@@ -126,6 +126,17 @@ function openRouterRouting(id: string): OpenRouterRouting | undefined {
 	return Object.hasOwn(routing, id) ? routing[id] as OpenRouterRouting : undefined;
 }
 
+/** Optional global output cap, read anew for every engine and validated fail-closed. */
+function maxOutputTokens(): number | undefined {
+	const raw = process.env.LH_MAX_OUTPUT_TOKENS;
+	if (raw === undefined || raw === "") return undefined;
+	const value = Number(raw);
+	if (!/^[1-9][0-9]*$/.test(raw) || !Number.isSafeInteger(value) || value < 1024) {
+		throw new Error(`LH_MAX_OUTPUT_TOKENS must be a positive integer >= 1024, got ${JSON.stringify(raw)}`);
+	}
+	return value;
+}
+
 /** The production engine for a RESOLVED spec (model slots wave,
  *  2026-09-20): provider-aware catalog lookup + thinking clamp. The API
  *  key is resolved by pi-ai itself from the environment per request (the
@@ -138,8 +149,14 @@ export function piEngineForSpec(spec: ResolvedModelSpec): PiEngine {
 		throw new Error(`${spec.provider} catalog has no model ${spec.id}`);
 	}
 	const routing = spec.provider === "openrouter" ? openRouterRouting(spec.id) : undefined;
-	const model = routing
-		? { ...catalogModel, compat: { ...catalogModel.compat, openRouterRouting: routing } }
+	const cap = maxOutputTokens();
+	const clamp = cap !== undefined && catalogModel.maxTokens > cap;
+	const model = routing || clamp
+		? {
+			...catalogModel,
+			...(routing ? { compat: { ...catalogModel.compat, openRouterRouting: routing } } : {}),
+			...(clamp ? { maxTokens: cap } : {}),
+		}
 		: catalogModel;
 	// UNSET level → the baked default order (first entry the model
 	// supports); SET level → pi's native nearest-clamp (model swaps keep
@@ -153,11 +170,18 @@ export function piEngineForSpec(spec: ResolvedModelSpec): PiEngine {
 		// bound streamSimple: the agent loop forwards state.thinkingLevel as
 		// `reasoning` (undefined = off on pi-ai's scale); the clamp above keeps
 		// the pin honest even when config or settings drift off the map.
-		streamFn: (requestModel, context, options) =>
-			models.streamSimple(routing && requestModel.provider === model.provider && requestModel.id === model.id ? model : requestModel, context, {
+		streamFn: (requestModel, context, options) => {
+			const matches = requestModel.provider === model.provider && requestModel.id === model.id;
+			const streamModel = model !== catalogModel && matches ? model
+				: cap !== undefined && !matches && requestModel.maxTokens > cap
+					? { ...requestModel, maxTokens: cap } : requestModel;
+			const outputCeiling = cap === undefined ? undefined : Math.min(streamModel.maxTokens, cap);
+			return models.streamSimple(streamModel, context, {
 				...options,
+				...(outputCeiling !== undefined && options?.maxTokens !== undefined && options.maxTokens > outputCeiling ? { maxTokens: outputCeiling } : {}),
 				reasoning: level === "off" ? undefined : level,
-			}),
+			});
+		},
 	};
 }
 

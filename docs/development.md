@@ -43,6 +43,7 @@ Secrets and machine-specific paths only. Model choice and thinking budgets are t
 |---|---|
 | `OPENROUTER_API_KEY` | required — all LLM calls go through OpenRouter |
 | `LH_OPENROUTER_ROUTING_FILE` | optional path to a JSON object mapping OpenRouter model ids to provider-routing objects |
+| `LH_MAX_OUTPUT_TOKENS` | optional positive integer >= 1024 capping requested output tokens for every model at the lesser of the catalog maximum and this value; recommended `32000` for credit-limited OpenRouter keys; invalid values fail closed |
 | `GOOGLE_SEARCH_API_KEY` + `GOOGLE_CSE_ID` | researcher's `web_search` (Google Custom Search) |
 | `DEEPGRAM_API_KEY` | optional — dictation (STT token minting; audio streams browser→Deepgram, never through the server) |
 | `CHROME_PATH` | optional system Chrome fallback for demo verification; the app's own browser helper is primary (nothing is downloaded) |
