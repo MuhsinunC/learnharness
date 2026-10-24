@@ -4,7 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { ActivityIcon, BotIcon, FileTextIcon, PenToolIcon, PlayIcon, SearchIcon, SquareIcon, WaypointsIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { CallUsage, JobKind, JobRecord } from "@/src/core";
-import { CLAUDE_CODE_OFF_REFUSAL, isModelsRefusal, isProviderKeyRefusal } from "@/src/core";
+import { CLAUDE_CODE_OFF_REFUSAL, isModelsRefusal, isProviderKeyRefusal, subscriptionLabel, subscriptionLabels } from "@/src/core";
 import { formatTokens, planCostLabel } from "@/components/usage-format";
 import { useServerEvent, useServerResync } from "@/components/server-events";
 
@@ -352,7 +352,7 @@ export function ActivitySection({ feed: feedProp }: { feed?: ActivityFeed }) {
 				Background agents
 				{blobs.length > 0 && (
 					<span className="ml-auto tabular-nums" data-testid="activity-total-cost" title="Total running cost (inferred)">
-						{planCostLabel(totalCost, blobs.some((blob) => blob.model?.startsWith("chatgpt:")))}
+						{planCostLabel(totalCost, subscriptionLabels(blobs.map((blob) => blob.model)))}
 				</span>
 				)}
 			</div>
@@ -427,7 +427,7 @@ function ActivityBlobRow({
 					)}
 				</span>
 				<span className="flex shrink-0 items-center gap-2 tabular-nums text-muted-foreground">
-					<span data-testid="activity-blob-cost">{planCostLabel(blob.cost, blob.model?.startsWith("chatgpt:") === true)}</span>
+					<span data-testid="activity-blob-cost">{planCostLabel(blob.cost, subscriptionLabel(blob.model))}</span>
 					<span data-testid="activity-blob-elapsed">{formatElapsed(now - blob.startedAt)}</span>
 				</span>
 			</button>
@@ -466,7 +466,7 @@ function ActivityBlobRow({
 						<div className="flex justify-between gap-2">
 							<span>Cost</span>
 							<span className="tabular-nums text-card-foreground">
-								{planCostLabel(blob.cost, blob.model?.startsWith("chatgpt:") === true)}
+								{planCostLabel(blob.cost, subscriptionLabel(blob.model))}
 							</span>
 						</div>
 						<div className="flex justify-between gap-2">

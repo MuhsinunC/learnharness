@@ -20,6 +20,8 @@ import packageMetadata from "../../package.json" with { type: "json" };
 import { chatGPTModel } from "./chatgpt-bridge.ts";
 import { chatGPTStream } from "./chatgpt-stream.ts";
 import type { ChatGPTDispatchLifecycle } from "./chatgpt-request-cycle.ts";
+import { nativeSubscriptionId, nativeSubscriptionModel } from "./subscription-bridge.ts";
+import { nativeSubscriptionStream } from "./subscription-stream.ts";
 
 /** App identity is immutable and shared by Models and every native Agent.
  * Agent's default Pi attribution otherwise overrides the Models identity. */
@@ -164,7 +166,8 @@ function maxOutputTokens(): number | undefined {
  *  hardcodes OpenRouter's. */
 export function piEngineForSpec(spec: ResolvedModelSpec, background: boolean | (() => boolean) = true, lifecycle?: ChatGPTDispatchLifecycle): PiEngine {
 	const models: Models = piModels();
-	const catalogModel = spec.provider === "chatgpt" ? chatGPTModel(spec.id) : models.getModel(spec.provider, spec.id);
+	const nativeId = nativeSubscriptionId(spec.provider);
+	const catalogModel = spec.provider === "chatgpt" ? chatGPTModel(spec.id) : nativeId ? nativeSubscriptionModel(spec.provider, spec.id) : models.getModel(spec.provider, spec.id);
 	if (!catalogModel) {
 		throw new Error(`${spec.provider} catalog has no model ${spec.id}`);
 	}
@@ -191,7 +194,8 @@ export function piEngineForSpec(spec: ResolvedModelSpec, background: boolean | (
 		// `reasoning` (undefined = off on pi-ai's scale); the clamp above keeps
 		// the pin honest even when config or settings drift off the map.
 		streamFn: (requestModel, context, options) => {
-			const stream = spec.provider === "chatgpt" ? chatGPTStream(typeof background === "function" ? background : () => background, lifecycle) : models.streamSimple.bind(models);
+			const purpose = typeof background === "function" ? background : () => background;
+			const stream = spec.provider === "chatgpt" ? chatGPTStream(purpose, lifecycle) : nativeId ? nativeSubscriptionStream(models.getProvider(nativeId)!, purpose, lifecycle) : models.streamSimple.bind(models);
 			const matches = requestModel.provider === model.provider && requestModel.id === model.id;
 			const streamModel = model !== catalogModel && matches ? model
 				: cap !== undefined && !matches && requestModel.maxTokens > cap
