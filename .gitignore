@@ -16,3 +16,10 @@ auth.json
 
 # dev-fresh launcher scratch (fresh-user sim): disposable per launch
 .fresh-data/
+
+# agent lane state (MuhsinunC fork): never committed
+.codex/
+codex/
+PROMPT.md
+TASK_SUMMARY.md
+FIXES.md
