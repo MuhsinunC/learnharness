@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import {
 	clampThinkingLevel,
 	createModels,
@@ -5,6 +6,7 @@ import {
 	type Api,
 	type Model,
 	type Models,
+	type OpenRouterRouting,
 	type StreamFunction,
 } from "@earendil-works/pi-ai";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
@@ -88,6 +90,36 @@ function defaultThinkingLevel(model: Model<Api>): ThinkingLevel {
 	return supported[0] ?? "off";
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+function openRouterRouting(id: string): OpenRouterRouting | undefined {
+	const path = process.env.LH_OPENROUTER_ROUTING_FILE;
+	if (!path) return undefined;
+	let contents: string;
+	try {
+		contents = readFileSync(path, "utf8");
+	} catch (cause) {
+		throw new Error(`OpenRouter routing file ${path}: unable to read file`, { cause });
+	}
+	let routing: unknown;
+	try {
+		routing = JSON.parse(contents);
+	} catch (cause) {
+		throw new Error(`OpenRouter routing file ${path}: invalid JSON`, { cause });
+	}
+	if (!isPlainObject(routing)) {
+		throw new Error(`OpenRouter routing file ${path}: top level must be a plain object`);
+	}
+	for (const [modelId, entry] of Object.entries(routing)) {
+		if (!isPlainObject(entry)) {
+			throw new Error(`OpenRouter routing file ${path}: entry ${modelId} must be a plain object`);
+		}
+	}
+	return Object.hasOwn(routing, id) ? routing[id] as OpenRouterRouting : undefined;
+}
+
 /** The production engine for a RESOLVED spec (model slots wave,
  *  2026-09-20): provider-aware catalog lookup + thinking clamp. The API
  *  key is resolved by pi-ai itself from the environment per request (the
@@ -95,10 +127,14 @@ function defaultThinkingLevel(model: Model<Api>): ThinkingLevel {
  *  hardcodes OpenRouter's. */
 export function piEngineForSpec(spec: ResolvedModelSpec): PiEngine {
 	const models: Models = piModels();
-	const model = models.getModel(spec.provider, spec.id);
-	if (!model) {
+	const catalogModel = models.getModel(spec.provider, spec.id);
+	if (!catalogModel) {
 		throw new Error(`${spec.provider} catalog has no model ${spec.id}`);
 	}
+	const routing = spec.provider === "openrouter" ? openRouterRouting(spec.id) : undefined;
+	const model = routing
+		? { ...catalogModel, compat: { ...catalogModel.compat, openRouterRouting: routing } }
+		: catalogModel;
 	// UNSET level → the baked default order (first entry the model
 	// supports); SET level → pi's native nearest-clamp (model swaps keep
 	// the user's intent and adapt honestly).
@@ -112,7 +148,7 @@ export function piEngineForSpec(spec: ResolvedModelSpec): PiEngine {
 		// `reasoning` (undefined = off on pi-ai's scale); the clamp above keeps
 		// the pin honest even when config or settings drift off the map.
 		streamFn: (requestModel, context, options) =>
-			models.streamSimple(requestModel, context, {
+			models.streamSimple(routing && requestModel.provider === model.provider && requestModel.id === model.id ? model : requestModel, context, {
 				...options,
 				reasoning: level === "off" ? undefined : level,
 			}),
