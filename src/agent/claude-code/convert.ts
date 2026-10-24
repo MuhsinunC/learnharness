@@ -146,9 +146,8 @@ export function convertPiMessages(
 			if (msg.provider === PROVIDER_ID && messages[previous]?.role === "toolResult") {
 				anthropicMessages.push({ role: "user", content: [{ type: "text", text: CONTINUE_TEXT }] });
 			}
-			const content = Array.isArray(msg.content) ? msg.content : [];
 			const blocks: (ContentBlock | RedactedThinkingBlock)[] = [];
-			for (const block of content) {
+			for (const block of msg.content) {
 				if (block.type === "text" && block.text) {
 					blocks.push({ type: "text", text: block.text });
 				} else if (block.type === "thinking") {
