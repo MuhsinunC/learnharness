@@ -165,17 +165,27 @@ test("snapshots descriptors without retaining the input registry", async (t) => 
 	await assert.rejects(client.callTool({ name: "added" }), /Unknown tool: added/);
 });
 
+// The SDK's in-flight-handler map drops entries only after handlers settle.
+function inflight(server: ReturnType<typeof createToolServer>): number {
+	return (server.config.instance.server as unknown as {
+		_requestHandlerAbortControllers: Map<unknown, unknown>;
+	})._requestHandlerAbortControllers.size;
+}
+
 test("cancels one parked call while closeAll settles the remaining call", async (t) => {
-	const { client, calls, closeAll } = await connect(t);
+	const server = await connect(t);
+	const { client, calls, closeAll } = server;
 	const controller = new AbortController();
 	const cancelled = client.callTool({ name: tool.name, _meta: { "claudecode/toolUseId": "cancel" } },
 		undefined, { signal: controller.signal });
 	const remaining = client.callTool({ name: tool.name, _meta: { "claudecode/toolUseId": "remain" } });
 	assert.equal(await Promise.race([cancelled, remaining, tick().then(() => "pending")]), "pending");
+	assert.equal(inflight(server), 2);
 	const rejection = assert.rejects(cancelled, /test cancellation/);
 	controller.abort(new Error("test cancellation"));
 	await rejection;
 	await tick(); // Deliver notifications/cancelled and settle the server handler.
+	assert.equal(inflight(server), 1);
 	assert.equal(await Promise.race([remaining, tick().then(() => "pending")]), "pending");
 	closeAll("remaining reason");
 	assert.deepEqual(await remaining, {
@@ -183,12 +193,15 @@ test("cancels one parked call while closeAll settles the remaining call", async 
 		isError: true,
 		_meta: { "claude/endTurn": true },
 	});
+	await tick();
+	assert.equal(inflight(server), 0);
 	assert.deepEqual(calls, ["cancel", "remain"]);
 	controller.abort();
 });
 
 test("handles cancellation delivered before the SDK invokes the handler", async (t) => {
-	const { client, calls, closeAll } = await connect(t);
+	const server = await connect(t);
+	const { client, calls, closeAll } = server;
 	const controller = new AbortController();
 	const pending = client.callTool({ name: tool.name, _meta: { "claudecode/toolUseId": "early" } },
 		undefined, { signal: controller.signal });
@@ -199,5 +212,34 @@ test("handles cancellation delivered before the SDK invokes the handler", async 
 	await rejection;
 	await tick();
 	assert.deepEqual(calls, ["early"]);
+	assert.equal(inflight(server), 0);
 	closeAll("cleanup after early cancellation");
+});
+
+
+test("cancelled handlers return endTurn errors, including already-aborted signals", async (t) => {
+	// Use a fresh server for each path so closeAll's result cannot mask abort handling.
+	for (const alreadyAborted of [false, true]) {
+		const server = createToolServer([tool], { timeoutMs: 1 });
+		t.after(() => server.closeAll("test cleanup"));
+		const handler = (server.config.instance.server as unknown as {
+			_requestHandlers: Map<string, (req: unknown, extra: unknown) => Promise<unknown>>;
+		})._requestHandlers.get("tools/call");
+		assert.ok(handler);
+		const controller = new AbortController();
+		if (alreadyAborted) controller.abort();
+		const pending = handler({
+			method: "tools/call",
+			params: { name: tool.name, _meta: { "claudecode/toolUseId": "x" } },
+		}, { signal: controller.signal });
+		if (!alreadyAborted) controller.abort();
+		const expected = {
+			content: [{ type: "text", text: "cancelled" }],
+			isError: true,
+			_meta: { "claude/endTurn": true },
+		};
+		assert.deepEqual(await Promise.race([pending, tick().then(() => "still pending")]), expected);
+		server.closeAll("later");
+		assert.deepEqual(await pending, expected);
+	}
 });
