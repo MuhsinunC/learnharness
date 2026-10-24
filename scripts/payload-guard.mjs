@@ -11,21 +11,26 @@ export function findForbiddenPayload(rootDir) {
 	const forbidden = [];
 	/** @type {Map<string, import("node:fs").Dirent[]>} */
 	const visited = new Map();
+	const contexts = new Set();
 	/** @param {string[]} parts */
 	function walk(parts) {
 		const dir = path.join(rootDir, ...parts);
 		const real = fs.realpathSync(dir);
+		// Aliases can reach the same directory at different package-matching depths.
+		const scoped = parts.at(-2) === "node_modules" && parts.at(-1) === "@anthropic-ai";
+		const context = JSON.stringify([real, scoped ? "scope" : parts.at(-1) === "node_modules" ? "modules" : "other"]);
+		if (contexts.has(context)) return;
+		contexts.add(context);
 		const cached = visited.get(real);
 		const entries = cached ?? fs.readdirSync(dir, { withFileTypes: true });
 		visited.set(real, entries);
 		for (const entry of entries) {
 			if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
 			const relative = [...parts, entry.name];
-			if (parts.at(-2) === "node_modules" && parts.at(-1) === "@anthropic-ai"
-				&& entry.name.startsWith("claude-agent-sdk-")) {
+			if (scoped && entry.name.startsWith("claude-agent-sdk-")) {
 				forbidden.push(relative.join("/"));
-			} else if (!cached && (entry.isDirectory() || (fs.existsSync(path.join(dir, entry.name))
-				&& fs.statSync(path.join(dir, entry.name)).isDirectory()))) {
+			} else if (entry.isDirectory() || (fs.existsSync(path.join(dir, entry.name))
+				&& fs.statSync(path.join(dir, entry.name)).isDirectory())) {
 				walk(relative);
 			}
 		}
