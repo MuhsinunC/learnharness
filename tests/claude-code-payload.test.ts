@@ -97,6 +97,15 @@ describe("Claude Code payload guard", () => {
 		});
 	});
 
+	it("checks forbidden names even when an alias reached the scope first", () => {
+		withTree((root) => {
+			const scope = path.join(root, "node_modules", "@anthropic-ai");
+			fs.mkdirSync(path.join(scope, "claude-agent-sdk-darwin-arm64"), { recursive: true });
+			fs.symlinkSync(scope, path.join(root, "alias"), "dir");
+			assert.deepEqual(findForbiddenPayload(root), ["node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64"]);
+		});
+	});
+
 	it("configures the platform exclusion and all three externals", () => {
 		const config = fs.readFileSync(new URL("../next.config.ts", import.meta.url), "utf8");
 		for (const value of ["node_modules/@anthropic-ai/claude-agent-sdk-*/**", "@anthropic-ai/claude-agent-sdk", "@modelcontextprotocol/sdk", "cc-session-io"]) {
