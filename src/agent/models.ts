@@ -131,8 +131,8 @@ function maxOutputTokens(): number | undefined {
 	const raw = process.env.LH_MAX_OUTPUT_TOKENS;
 	if (raw === undefined || raw === "") return undefined;
 	const value = Number(raw);
-	if (!/^[1-9][0-9]*$/.test(raw) || !Number.isSafeInteger(value)) {
-		throw new Error(`LH_MAX_OUTPUT_TOKENS must be a positive integer, got ${JSON.stringify(raw)}`);
+	if (!/^[1-9][0-9]*$/.test(raw) || !Number.isSafeInteger(value) || value < 1024) {
+		throw new Error(`LH_MAX_OUTPUT_TOKENS must be a positive integer >= 1024, got ${JSON.stringify(raw)}`);
 	}
 	return value;
 }
@@ -175,9 +175,10 @@ export function piEngineForSpec(spec: ResolvedModelSpec): PiEngine {
 			const streamModel = model !== catalogModel && matches ? model
 				: cap !== undefined && !matches && requestModel.maxTokens > cap
 					? { ...requestModel, maxTokens: cap } : requestModel;
+			const outputCeiling = cap === undefined ? undefined : Math.min(streamModel.maxTokens, cap);
 			return models.streamSimple(streamModel, context, {
 				...options,
-				...(cap !== undefined && options?.maxTokens !== undefined && options.maxTokens > cap ? { maxTokens: cap } : {}),
+				...(outputCeiling !== undefined && options?.maxTokens !== undefined && options.maxTokens > outputCeiling ? { maxTokens: outputCeiling } : {}),
 				reasoning: level === "off" ? undefined : level,
 			});
 		},
