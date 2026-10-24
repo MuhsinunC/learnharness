@@ -9,15 +9,21 @@ import * as path from "node:path";
 export function findForbiddenPayload(rootDir) {
 	/** @type {string[]} */
 	const forbidden = [];
+	const visited = new Set();
 	/** @param {string[]} parts */
 	function walk(parts) {
-		for (const entry of fs.readdirSync(path.join(rootDir, ...parts), { withFileTypes: true })) {
-			if (!entry.isDirectory()) continue;
+		const dir = path.join(rootDir, ...parts);
+		const real = fs.realpathSync(dir);
+		if (visited.has(real)) return;
+		visited.add(real);
+		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+			if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
 			const relative = [...parts, entry.name];
 			if (parts.at(-2) === "node_modules" && parts.at(-1) === "@anthropic-ai"
 				&& entry.name.startsWith("claude-agent-sdk-")) {
 				forbidden.push(relative.join("/"));
-			} else {
+			} else if (entry.isDirectory() || (fs.existsSync(path.join(dir, entry.name))
+				&& fs.statSync(path.join(dir, entry.name)).isDirectory())) {
 				walk(relative);
 			}
 		}
