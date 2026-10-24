@@ -97,6 +97,29 @@ describe("global max output tokens", { concurrency: false }, () => {
 		});
 	});
 
+	it("bounds explicit options by the effective model for matching and nonmatching requests", () => {
+		process.env.LH_MAX_OUTPUT_TOKENS = "32000";
+		const small = piModels().getModel(smallSpec.provider, smallSpec.id)!;
+		assert.equal(small.maxTokens, 16384);
+		captureStream((calls) => {
+			for (const engine of [piEngineForSpec(smallSpec), piEngineForSpec(spec)]) {
+				engine.streamFn(small, context, { maxTokens: 20000 });
+				assert.equal(calls.at(-1)![0], small);
+				assert.equal(calls.at(-1)![2]?.maxTokens, 16384);
+			}
+			const engine = piEngineForSpec(spec);
+			const other = { ...engine.model, id: "different-id", maxTokens: 64000 };
+			engine.streamFn(other, context, { maxTokens: 100000 });
+			assert.equal(calls.at(-1)![0].maxTokens, 32000);
+			assert.equal(calls.at(-1)![2]?.maxTokens, 32000);
+		});
+	});
+
+	it("accepts the minimum cap of 1024", () => {
+		process.env.LH_MAX_OUTPUT_TOKENS = "1024";
+		assert.equal(piEngineForSpec(spec).model.maxTokens, 1024);
+	});
+
 	it("composes routing and the cap on the same engine copy", () => {
 		const routing = { only: ["sail-research/us"], allow_fallbacks: false };
 		const path = join(directory, "routing.json");
@@ -113,12 +136,13 @@ describe("global max output tokens", { concurrency: false }, () => {
 		});
 	});
 
-	for (const value of ["abc", "0", "-5", "1.5", " 32000", "32000 ", "1e3", "9007199254740992"]) {
+	for (const value of ["abc", "0", "1", "15", "1023", "-5", "1.5", " 32000", "32000 ", "1e3", "9007199254740992"]) {
 		it(`rejects invalid cap ${JSON.stringify(value)}`, () => {
 			process.env.LH_MAX_OUTPUT_TOKENS = value;
 			assert.throws(() => piEngineForSpec(spec), (error: unknown) => {
 				assert.ok(error instanceof Error);
 				assert.ok(error.message.includes("LH_MAX_OUTPUT_TOKENS"));
+				assert.ok(error.message.includes("1024"));
 				assert.ok(error.message.includes(value));
 				return true;
 			});
