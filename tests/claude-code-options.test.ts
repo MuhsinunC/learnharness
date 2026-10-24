@@ -114,6 +114,22 @@ describe("Claude Code query contract", () => {
 		}
 	});
 
+	it("refuses Windows before validating the executable", () => {
+		for (const executable of [required.executable, "", undefined]) {
+			assert.throws(() => buildQueryOptions({ ...required, executable } as QueryInputs, "win32"), {
+				message: "claude-code: not supported on Windows",
+			});
+		}
+	});
+
+	it("builds the same options on macOS and Linux as the default platform", () => {
+		withEnv({}, () => {
+			for (const platform of ["darwin", "linux"] as const) {
+				assert.deepStrictEqual(buildQueryOptions(required, platform), buildQueryOptions(required));
+			}
+		});
+	});
+
 	it("discards all unknown input keys and forces the safety contract", () => {
 		withEnv({}, () => {
 			const hostile = {
@@ -136,16 +152,16 @@ describe("Claude Code query contract", () => {
 	it("resolves every thinking level with full, partial, invalid and off maps", () => {
 		const levels: (ModelThinkingLevel | undefined)[] = [undefined, "off", "minimal", "low", "medium", "high", "xhigh", "max"];
 		const cases: { map?: ThinkingLevelMap; expected: (string | undefined)[] }[] = [
-			{ expected: [undefined, undefined, "low", "low", "medium", "high", "max", undefined] },
+			{ expected: [undefined, undefined, "low", "low", "medium", "high", "max", "max"] },
 			{ map: { off: null, minimal: null, low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" }, expected: [undefined, undefined, undefined, "low", "medium", "high", "xhigh", "max"] },
 			{ map: { xhigh: "xhigh", max: "max" }, expected: [undefined, undefined, "low", "low", "medium", "high", "xhigh", "max"] },
-			{ map: { high: "turbo" } as ThinkingLevelMap, expected: [undefined, undefined, "low", "low", "medium", undefined, "max", undefined] },
-			{ map: { off: "low" }, expected: [undefined, undefined, "low", "low", "medium", "high", "max", undefined] },
+			{ map: { high: "turbo" } as ThinkingLevelMap, expected: [undefined, undefined, "low", "low", "medium", undefined, "max", "max"] },
+			{ map: { off: "low" }, expected: [undefined, undefined, "low", "low", "medium", "high", "max", "max"] },
 		];
 		for (const { map, expected } of cases) {
 			for (const [i, level] of levels.entries()) assert.equal(resolveEffort(map ? { thinkingLevelMap: map } : {}, level), expected[i], `${JSON.stringify(map)} / ${level}`);
 		}
-		assert.deepStrictEqual(REASONING_TO_EFFORT, { minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "max" });
+		assert.deepStrictEqual(REASONING_TO_EFFORT, { minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "max", max: "max" });
 		assert.deepStrictEqual([...VALID_EFFORTS], ["low", "medium", "high", "xhigh", "max"]);
 	});
 
