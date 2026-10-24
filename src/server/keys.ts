@@ -53,6 +53,7 @@ import {
 } from "../core/auth-keys.ts";
 import { authStore } from "../store/auth.ts";
 import { piModels } from "../agent/models.ts";
+import { chatGPTConnected } from "../agent/chatgpt-bridge.ts";
 
 // The once-per-process boot record — globalThis anchor (HMR re-imports the
 // module; the snapshot must not re-run and misread fill-gapped vars as real
@@ -207,6 +208,7 @@ export function keyValue(id: string): string | undefined {
 export function providerKeyPresent(provider: string): boolean {
 	// Keyless but boot-gated: a pin outlives a restart without the executable.
 	if (provider === "claude-code") return piModels().getProvider("claude-code") !== undefined;
+	if (provider === "chatgpt") return chatGPTConnected();
 	const info = AUTH_PROVIDER_KEYS.find((p) => p.id === provider);
 	return info ? keyValue(info.envVar) !== undefined : true;
 }
