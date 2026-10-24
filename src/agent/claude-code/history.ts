@@ -1,6 +1,7 @@
 import { getCurrentSystemPrompt, getCurrentTools } from "@earendil-works/pi-ai";
 import type { Message, Tool, TranscriptContext } from "@earendil-works/pi-ai";
 import type { ImageBlock, TextBlock } from "cc-session-io";
+import { isDroppedAssistant } from "./convert.ts";
 
 export type PromptBlock = TextBlock | ImageBlock;
 export type SplitPromptResult =
@@ -23,6 +24,10 @@ export function turnStart(messages: Message[]): number {
 }
 
 export function splitPrompt(history: Message[]): SplitPromptResult {
+	// Prior is sliced from the trimmed history; conversion drops these tails too.
+	let end = history.length;
+	while (end > 0 && isDroppedAssistant(history[end - 1]!)) end--;
+	if (end !== history.length) history = history.slice(0, end);
 	const start = turnStart(history);
 	const blocks: PromptBlock[] = [];
 	for (const message of history.slice(start)) {

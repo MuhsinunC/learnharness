@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { normalizeContext } from "@earendil-works/pi-ai";
 import type { AssistantMessage, Message, ToolCall, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
 import { toLlmMessages, type LhMessage } from "../src/core/native-messages.ts";
-import { CONTINUE_TEXT, MCP_TOOL_PREFIX, PROVIDER_ID, convertPiMessages, mapPiToolNameToSdk, messageContentToText, sanitizeToolId, toolResultContent } from "../src/agent/claude-code/convert.ts";
+import { CONTINUE_TEXT, MCP_TOOL_PREFIX, PROVIDER_ID, convertPiMessages, isDroppedAssistant, mapPiToolNameToSdk, messageContentToText, sanitizeToolId, toolResultContent } from "../src/agent/claude-code/convert.ts";
 import { foldTranscript, splitPrompt, turnStart } from "../src/agent/claude-code/history.ts";
 
 const text = (text: string) => ({ type: "text" as const, text });
@@ -30,12 +31,12 @@ test("constants, tool names and sanitized ids follow the provider contract", () 
 	assert.equal(mapPiToolNameToSdk("foo", names), "mcp__custom-tools__foo");
 	assert.throws(() => mapPiToolNameToSdk("MCP__CUSTOM-TOOLS__quiz", names), /already an SDK tool name/);
 	const cache = new Map<string, string>();
-	assert.equal(sanitizeToolId("a:b.c", cache), "a_b_c");
-	assert.equal(sanitizeToolId("a:b.c", cache), "a_b_c");
-	assert.deepEqual(cache, new Map([["a:b.c", "a_b_c"]]));
+	assert.equal(sanitizeToolId("a:b.c", cache), `a_b_c_${createHash("sha256").update("a:b.c").digest("hex").slice(0, 8)}`);
+	assert.equal(sanitizeToolId("a:b.c", cache), `a_b_c_${createHash("sha256").update("a:b.c").digest("hex").slice(0, 8)}`);
+	assert.equal(cache.size, 1);
 	const converted = convert([assistant([call("a:b"), call("c", "foo")]), result("a:b")]);
 	assert.deepEqual(converted.anthropicMessages[0]!.content, [
-		{ type: "tool_use", id: "a_b", name: "mcp__custom-tools__quiz", input: {} },
+		{ type: "tool_use", id: sanitizeToolId("a:b", new Map()), name: "mcp__custom-tools__quiz", input: {} },
 		{ type: "tool_use", id: "c", name: "mcp__custom-tools__foo", input: {} },
 	]);
 });
@@ -66,8 +67,7 @@ test("parallel results hoist around steers and survive an empty aborted assistan
 	}
 	const converted = convert([a, result("X"), assistant([]), result("Y")]);
 	assert.equal(converted.dropped.abortedTurns, 1);
-	assert.equal(converted.anthropicMessages.length, 3);
-	assert.deepEqual(converted.anthropicMessages[2], continueRecord);
+	assert.equal(converted.anthropicMessages.length, 2);
 	assert.equal((converted.anthropicMessages[1]!.content as unknown[]).length, 2);
 });
 
@@ -136,11 +136,11 @@ test("foldTranscript replays system state and removes system messages from histo
 });
 
 test("each subsequent call preserves converted prior plus the previous prompt record", () => {
-	const history: Message[] = [user([text("start")])];
+	const history: Message[] = [user("start")];
 	const additions: Message[][] = [
-		[assistant([call("server")]), result("server")],
+		[assistant([call("server")]), result("server"), assistant([])],
 		[assistant([call("X"), call("Y")]), result("X"), user([text("steer")]), result("Y")],
-		[assistant([text("done")]), user([text("next"), image])],
+		[assistant([text("done")]), user("next"), user([text("with image"), image]), { ...assistant([text("partial")]), stopReason: "aborted" }],
 		[assistant([call("Z")]), result("Z")],
 	];
 	for (const addition of additions) {
@@ -152,6 +152,108 @@ test("each subsequent call preserves converted prior plus the previous prompt re
 		const next = splitPrompt(history);
 		assert.notEqual(next.kind, "invalid");
 		if (next.kind === "invalid") throw new Error(next.reason);
-		assert.deepEqual(convert(next.prior).anthropicMessages.slice(0, prefix.length), prefix);
+		const replay = convert(next.prior).anthropicMessages.slice(0, prefix.length);
+		assert.deepEqual(replay, prefix);
+		assert.equal(JSON.stringify(replay), JSON.stringify(prefix));
 	}
+});
+
+
+test("sanitized ids avoid collisions and preserve call/result pairing deterministically", () => {
+	const ids = ["a:b", "a_b", "valid-short_ID"];
+	const history = [assistant(ids.map(id => call(id))), ...ids.map(id => result(id))];
+	const first = convert(history);
+	const second = convert(history);
+	assert.deepEqual(first.sanitizedIds, second.sanitizedIds);
+	assert.equal(new Set(first.sanitizedIds.values()).size, ids.length);
+	assert.equal(first.sanitizedIds.get("valid-short_ID"), "valid-short_ID");
+	const uses = first.anthropicMessages[0]!.content;
+	const results = first.anthropicMessages[1]!.content;
+	assert.ok(Array.isArray(uses) && Array.isArray(results));
+	assert.deepEqual(uses.map(b => b.type === "tool_use" && b.id), results.map(b => b.type === "tool_result" && b.tool_use_id));
+	assert.equal(JSON.stringify(first.anthropicMessages), JSON.stringify(second.anthropicMessages));
+	const cachedEmpty = new Map([["cached", ""]]);
+	assert.equal(sanitizeToolId("cached", cachedEmpty), "");
+});
+
+test("sanitized ids obey the 64-character bound and extend occupied hash suffixes", () => {
+	const ids = ["a|".repeat(225), "x".repeat(100) + "first", "x".repeat(100) + "second"];
+	const converted = convert([assistant(ids.map(id => call(id))), ...ids.map(id => result(id))]);
+	assert.equal(new Set(converted.sanitizedIds.values()).size, 3);
+	for (const clean of converted.sanitizedIds.values()) {
+		assert.ok(clean.length <= 64);
+		assert.match(clean, /^[a-zA-Z0-9_-]+$/);
+	}
+	const original = "a:b";
+	const digest = createHash("sha256").update(original).digest("hex");
+	const occupied = `a_b_${digest.slice(0, 8)}`;
+	assert.equal(sanitizeToolId(original, new Map([["other", occupied]])), `a_b_${digest.slice(0, 9)}`);
+	const cache = new Map<string, string>();
+	assert.equal(sanitizeToolId(original, cache), occupied);
+	assert.notEqual(sanitizeToolId(occupied, cache), occupied);
+	assert.equal(new Set(cache.values()).size, 2);
+});
+
+test("error result images follow all parallel results with original-id captions", () => {
+	const error = { ...result("X:original", [text("failed"), image, image, text("again"), image]), isError: true };
+	const a = assistant([call("X:original"), call("Y")]);
+	const converted = convert([a, error, user("steer"), result("Y")]);
+	const expectedError = {
+		type: "tool_result", tool_use_id: converted.sanitizedIds.get("X:original"),
+		content: "failed\n(image attached after the tool results)\nagain\n(image attached after the tool results)", is_error: true,
+	};
+	const attachments = [text("Images from the error result of tool call X:original (quiz):"), wireImage, wireImage, wireImage];
+	assert.deepEqual(convert([a, error]).anthropicMessages[1]!.content, [expectedError, ...attachments]);
+	assert.deepEqual(converted.anthropicMessages[1]!.content, [
+		expectedError, { type: "tool_result", tool_use_id: "Y", content: "Y", is_error: false }, ...attachments,
+	]);
+	assert.deepEqual(converted.anthropicMessages[2], { role: "user", content: [text("steer")] });
+});
+
+test("partial aborted/error assistants are dropped without splitting parallel results", () => {
+	const a = assistant([call("X"), call("Y")]);
+	for (const stopReason of ["aborted", "error"] as const) {
+		const dropped = { ...assistant([text("partial"), { type: "thinking" as const, thinking: "partial", thinkingSignature: "sig" }, call("orphan")]), stopReason };
+		assert.equal(isDroppedAssistant(dropped), true);
+		const converted = convert([a, result("X"), dropped, result("orphan"), result("Y")]);
+		assert.deepEqual(converted.anthropicMessages, convert([a, result("X"), result("Y")]).anthropicMessages);
+		assert.equal(converted.dropped.abortedTurns, 1);
+		assert.equal(converted.dropped.other.get("droppedAssistantToolResult"), 1);
+	}
+	const base = [assistant([call("X")]), result("X")];
+	const converted = convert([...base, assistant([]), assistant([]), assistant([text("done")])]);
+	assert.deepEqual(converted.anthropicMessages, [...convert(base).anthropicMessages, continueRecord, { role: "assistant", content: [text("done")] }]);
+	assert.equal(converted.dropped.abortedTurns, 2);
+	assert.equal(isDroppedAssistant(assistant(null as unknown as [])), true);
+	// A repeated id also belonging to a kept call must retain its result.
+	assert.equal(convert([assistant([call("X")]), { ...assistant([call("X")]), stopReason: "aborted" }, result("X")]).dropped.other.size, 0);
+});
+
+test("splitPrompt trims dropped tails for result continuations and user retries", () => {
+	const prior = [assistant([call("X")]), result("X")];
+	const tails = [assistant([]), { ...assistant([text("partial")]), stopReason: "aborted" as const }, { ...assistant([text("failed")]), stopReason: "error" as const }];
+	assert.deepEqual(splitPrompt([...prior, ...tails]), { kind: "continue", prior });
+	assert.deepEqual(splitPrompt([user("retry"), ...tails]), { kind: "user", prior: [], blocks: [text("retry")] });
+	assert.deepEqual(splitPrompt(tails), { kind: "invalid", reason: "claude-code: nothing to send" });
+	// Retrying an aborted user prompt sends the exact record a later reply replays.
+	const before = [user("retry"), ...tails];
+	const split = splitPrompt(before);
+	assert.equal(split.kind, "user");
+	if (split.kind !== "user") throw new Error("expected user retry");
+	const expected = [...convert(split.prior).anthropicMessages, { role: "user", content: split.blocks }];
+	const replay = convert([...before, assistant([text("done")])]).anthropicMessages.slice(0, expected.length);
+	assert.deepEqual(replay, expected);
+	assert.equal(JSON.stringify(replay), JSON.stringify(expected));
+});
+
+test("user runs replay as block arrays without absorbing results or CONTINUE records", () => {
+	assert.deepEqual(convert([user("hello")]).anthropicMessages, [{ role: "user", content: [text("hello")] }]);
+	assert.deepEqual(convert([user(""), user([text(""), { ...image, data: "" }])]).anthropicMessages, [{ role: "user", content: [text("[empty]")] }]);
+	assert.deepEqual(convert([user([])]).anthropicMessages, [{ role: "user", content: [text("[image]")] }]);
+	const users = [user("one"), user([text(""), text("two"), image])];
+	assert.deepEqual(convert(users).anthropicMessages, [{ role: "user", content: [text("one"), text("two"), wireImage] }]);
+	const a = assistant([call("X"), call("Y")]);
+	assert.deepEqual(convert([a, result("X"), ...users, result("Y"), assistant([text("done")])]).anthropicMessages.slice(2), [
+		{ role: "user", content: [text("one"), text("two"), wireImage] }, continueRecord, { role: "assistant", content: [text("done")] },
+	]);
 });
