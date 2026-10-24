@@ -12,6 +12,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { findForbiddenPayload } from "./payload-guard.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const STANDALONE = path.join(ROOT, ".next", "standalone");
@@ -58,6 +59,14 @@ for (const secret of ["auth.json", ".env", ".env.local"]) {
 		console.error("             Check outputFileTracingExcludes in next.config.ts.");
 		process.exit(1);
 	}
+}
+
+// 2b.1) Safety: personal-use Claude Code platform binaries must never ship.
+const forbiddenPayload = findForbiddenPayload(STANDALONE);
+if (forbiddenPayload.length) {
+	console.error(`[build-server] REFUSING: standalone contains Claude Code platform binaries:\n${forbiddenPayload.join("\n")}`);
+	console.error("             Check outputFileTracingExcludes in next.config.ts.");
+	process.exit(1);
 }
 
 // 2c) Payload curation (2026-10-11): the trace sweep can copy repo-root

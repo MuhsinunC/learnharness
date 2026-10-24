@@ -28,6 +28,7 @@ const nextConfig: NextConfig = {
 	// @anthropic-ai — pi-ai's deps — vanished from the trace entirely).
 	// Anchored "./"-prefixed forms behave the same. Only the three entries
 	// below are verified safe (complete externals trace + clean payload).
+	// The fourth entry is guarded by build-server rather than verified by a build.
 	// The recursive-DMG payload (repo dist/ swept into the bundle, shipping
 	// the previous build inside the next) is instead prevented by the
 	// desktop:dist clean step AND targeted post-trace curation in
@@ -40,6 +41,9 @@ const nextConfig: NextConfig = {
 			"data/**/*",
 			"auth.json",
 			".env*",
+			// The SDK's per-platform Claude Code binary must never ship in the desktop payload.
+			// scripts/build-server.mjs (via scripts/payload-guard.mjs) refuses any remaining copy.
+			"node_modules/@anthropic-ai/claude-agent-sdk-*/**",
 		],
 	},
 	// Empirically verified gaps (2026-09-17 standalone smoke): the tracer
@@ -82,6 +86,9 @@ const nextConfig: NextConfig = {
 		"pdfjs-dist", // sources v0: bundling breaks its node fake-worker path
 		"@napi-rs/canvas", // native binding — bundling breaks the .node require
 		"@resvg/resvg-js", // native binding — same
+		"@anthropic-ai/claude-agent-sdk",
+		"@modelcontextprotocol/sdk",
+		"cc-session-io", // Claude Code provider, personal-use; loaded by dynamic import
 	],
 };
 
