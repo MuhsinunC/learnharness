@@ -17,9 +17,7 @@ import type { Tool } from "@earendil-works/pi-ai";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
-// TODO(lh-2 integration): import from ./query-options.ts
-export const MCP_SERVER_NAME = "custom-tools";
-export const MCP_TOOL_PREFIX = "mcp__custom-tools__";
+import { MCP_SERVER_NAME } from "./query-options.ts";
 
 // Claude Code stamps tools/call with its tool_use block id. Call arrival
 // order need not match block order, so only this extension reliably pairs
@@ -36,47 +34,69 @@ function assertObjectSchema(tool: Tool): void {
 	}
 }
 
+function endTurnResult(reason: string): CallToolResult {
+	return {
+		content: [{ type: "text", text: reason }],
+		isError: true,
+		_meta: { "claude/endTurn": true },
+	};
+}
+
 export function createToolServer(tools: Tool[], opts: { timeoutMs: number }): {
 	config: McpSdkServerConfig & { instance: McpServer };
 	closeAll: (reason: string) => void;
 	calls: string[];
 } {
-	for (const tool of tools) assertObjectSchema(tool);
+	const names = new Set<string>();
+	const descriptors = tools.map(({ name, description, parameters }) => {
+		assertObjectSchema({ name, description, parameters });
+		if (names.has(name)) throw new Error(`duplicate MCP tool name: ${name}`);
+		names.add(name);
+		return { name, description, parameters };
+	});
 	const server = new McpServer({ name: MCP_SERVER_NAME, version: "1.0.0" }, { capabilities: { tools: {} } });
-	const byName = new Map(tools.map((tool) => [tool.name, tool]));
 	const calls: string[] = [];
 	const parked = new Set<(result: CallToolResult) => void>();
 	let closedResult: CallToolResult | undefined;
 
 	server.server.setRequestHandler(ListToolsRequestSchema, () => ({
-		tools: tools.map((tool) => ({
+		tools: descriptors.map((tool) => ({
 			name: tool.name,
 			description: tool.description,
 			inputSchema: tool.parameters as Record<string, unknown>,
 		})),
 	}));
 
-	server.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-		const tool = byName.get(request.params.name);
-		if (!tool) throw new Error(`Unknown tool: ${request.params.name}`);
+	server.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+		const name = request.params.name;
+		if (!names.has(name)) throw new Error(`Unknown tool: ${name}`);
 		const toolCallId = request.params._meta?.[TOOL_USE_ID_META];
 		if (typeof toolCallId !== "string") {
-			throw new Error(`${tool.name}: tools/call is missing _meta["${TOOL_USE_ID_META}"] — cannot pair the result with its tool call`);
+			throw new Error(`${name}: tools/call is missing _meta["${TOOL_USE_ID_META}"] — cannot pair the result with its tool call`);
 		}
 		calls.push(toolCallId);
 		// Park until the query closes, leaving Claude Code without a result
 		// from which it could start another request. Late calls cannot hang.
 		if (closedResult) return closedResult;
-		return new Promise<CallToolResult>((resolve) => parked.add(resolve));
+		return new Promise<CallToolResult>((resolve) => {
+			const settle = (result: CallToolResult) => {
+				parked.delete(settle);
+				extra.signal.removeEventListener("abort", onAbort);
+				resolve(result);
+			};
+			const onAbort = () => settle(endTurnResult("cancelled"));
+			if (extra.signal.aborted) {
+				onAbort();
+				return;
+			}
+			parked.add(settle);
+			extra.signal.addEventListener("abort", onAbort, { once: true });
+		});
 	});
 
 	function closeAll(reason: string): void {
 		if (closedResult) return;
-		closedResult = {
-			content: [{ type: "text", text: reason }],
-			isError: true,
-			_meta: { "claude/endTurn": true },
-		};
+		closedResult = endTurnResult(reason);
 		for (const resolve of parked) resolve(closedResult);
 		parked.clear();
 	}

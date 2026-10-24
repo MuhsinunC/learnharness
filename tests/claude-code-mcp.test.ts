@@ -8,7 +8,8 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Type } from "typebox";
 import { z } from "zod";
 import type { ListToolsResult } from "@modelcontextprotocol/sdk/types.js";
-import { createToolServer, MCP_TOOL_PREFIX } from "../src/agent/claude-code/mcp-server.ts";
+import { createToolServer } from "../src/agent/claude-code/mcp-server.ts";
+import { MCP_TOOL_PREFIX } from "../src/agent/claude-code/query-options.ts";
 import { createProberTools, createTeacherTools, type ProberToolContext } from "../src/agent/tools.ts";
 import { practiceTools } from "../src/agent/tools/practice.ts";
 import { bareQuestionTools } from "../src/agent/teacher-agent.ts";
@@ -141,4 +142,62 @@ export function assertLhToolSets(): number {
 
 test("LH registries use object schemas and unprefixed names", () => {
 	assert.ok(assertLhToolSets() > 50, "the sweep must cover a non-trivial tool set");
+});
+
+
+test("rejects duplicate tool names at construction", () => {
+	assert.throws(() => createToolServer([
+		{ ...tool, name: "find" }, { ...tool, name: "find" },
+	], { timeoutMs: 1 }), /duplicate MCP tool name: find/);
+});
+
+test("snapshots descriptors without retaining the input registry", async (t) => {
+	const original = { ...tool };
+	const tools = [original];
+	const { client } = await connect(t, tools);
+	const list = () => client.request({ method: "tools/list" }, z.custom<ListToolsResult>());
+	const before = JSON.stringify(await list());
+	original.description = "changed";
+	original.name = "renamed";
+	original.parameters = Type.Object({ changed: Type.Boolean() });
+	tools.push({ ...tool, name: "added" });
+	assert.equal(JSON.stringify(await list()), before);
+	await assert.rejects(client.callTool({ name: "added" }), /Unknown tool: added/);
+});
+
+test("cancels one parked call while closeAll settles the remaining call", async (t) => {
+	const { client, calls, closeAll } = await connect(t);
+	const controller = new AbortController();
+	const cancelled = client.callTool({ name: tool.name, _meta: { "claudecode/toolUseId": "cancel" } },
+		undefined, { signal: controller.signal });
+	const remaining = client.callTool({ name: tool.name, _meta: { "claudecode/toolUseId": "remain" } });
+	assert.equal(await Promise.race([cancelled, remaining, tick().then(() => "pending")]), "pending");
+	const rejection = assert.rejects(cancelled, /test cancellation/);
+	controller.abort(new Error("test cancellation"));
+	await rejection;
+	await tick(); // Deliver notifications/cancelled and settle the server handler.
+	assert.equal(await Promise.race([remaining, tick().then(() => "pending")]), "pending");
+	closeAll("remaining reason");
+	assert.deepEqual(await remaining, {
+		content: [{ type: "text", text: "remaining reason" }],
+		isError: true,
+		_meta: { "claude/endTurn": true },
+	});
+	assert.deepEqual(calls, ["cancel", "remain"]);
+	controller.abort();
+});
+
+test("handles cancellation delivered before the SDK invokes the handler", async (t) => {
+	const { client, calls, closeAll } = await connect(t);
+	const controller = new AbortController();
+	const pending = client.callTool({ name: tool.name, _meta: { "claudecode/toolUseId": "early" } },
+		undefined, { signal: controller.signal });
+	// InMemoryTransport delivers synchronously; the SDK defers its handler
+	// to a microtask, so cancellation reaches extra.signal before invocation.
+	const rejection = assert.rejects(pending, /early cancellation/);
+	controller.abort(new Error("early cancellation"));
+	await rejection;
+	await tick();
+	assert.deepEqual(calls, ["early"]);
+	closeAll("cleanup after early cancellation");
 });
