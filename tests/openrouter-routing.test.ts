@@ -80,6 +80,28 @@ describe("OpenRouter provider-routing file", { concurrency: false }, () => {
 		assert.equal(piEngineForSpec(other).model, piModels().getModel(other.provider, other.id));
 	});
 
+	it("accepts valid GLM and DeepSeek routing entries", () => {
+		const deepseekEntry = { quantizations: ["fp8"], sort: "throughput", data_collection: "deny" };
+		configure({ [spec.id]: entry, [otherSpec.id]: deepseekEntry });
+		assert.deepEqual(compat(piEngineForSpec(spec).model)?.openRouterRouting, entry);
+		assert.deepEqual(compat(piEngineForSpec(otherSpec).model)?.openRouterRouting, deepseekEntry);
+	});
+
+	for (const [field, value] of [["only", "sail-research/us"], ["allow_fallbacks", "false"]] as const) {
+		for (const modelId of [spec.id, otherSpec.id]) {
+			it(`rejects invalid /${field} on ${modelId}`, () => {
+				configure({ [modelId]: { [field]: value } });
+				assert.throws(() => piEngineForSpec(spec), (error: unknown) => {
+					assert.ok(error instanceof Error);
+					assert.ok(error.message.includes(path));
+					assert.ok(error.message.includes(modelId));
+					assert.ok(error.message.includes(`/${field}`));
+					return true;
+				});
+			});
+		}
+	}
+
 	for (const [label, contents, problem] of [
 		["invalid JSON", "{", "invalid JSON"],
 		["missing file", undefined, "unable to read file"],

@@ -10,7 +10,9 @@ import {
 	type StreamFunction,
 } from "@earendil-works/pi-ai";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+import { OpenRouterRoutingSchema } from "@earendil-works/pi-ai/providers/compat-schema";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import { Value } from "typebox/value";
 import { type ModelRole } from "../../config.ts";
 import { DEFAULT_THINKING_ORDER } from "../core/settings.ts";
 import packageMetadata from "../../package.json" with { type: "json" };
@@ -115,6 +117,10 @@ function openRouterRouting(id: string): OpenRouterRouting | undefined {
 	for (const [modelId, entry] of Object.entries(routing)) {
 		if (!isPlainObject(entry)) {
 			throw new Error(`OpenRouter routing file ${path}: entry ${modelId} must be a plain object`);
+		}
+		if (!Value.Check(OpenRouterRoutingSchema, entry)) {
+			const error = Value.Errors(OpenRouterRoutingSchema, entry)[0]!;
+			throw new Error(`OpenRouter routing file ${path}: entry ${modelId} ${error.instancePath}: ${error.message}`);
 		}
 	}
 	return Object.hasOwn(routing, id) ? routing[id] as OpenRouterRouting : undefined;
