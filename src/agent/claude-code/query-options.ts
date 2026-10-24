@@ -1,3 +1,7 @@
+/**
+ * Query options for the personal macOS/Linux provider.
+ * The child env allowlist is the safety contract; Windows needs USERPROFILE/SystemRoot/APPDATA, which is out of scope.
+ */
 import { isAbsolute } from "node:path";
 import type { Options, EffortLevel, McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import type { ModelThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
@@ -19,7 +23,8 @@ export type QueryInputs = {
 	persistSession?: boolean;
 };
 
-export function buildQueryOptions(inputs: QueryInputs): Options {
+export function buildQueryOptions(inputs: QueryInputs, platform: NodeJS.Platform = process.platform): Options {
+	if (platform === "win32") throw new Error("claude-code: not supported on Windows");
 	if (!inputs.executable || !isAbsolute(inputs.executable)) {
 		throw new Error("claude-code: executable path required");
 	}
@@ -54,7 +59,7 @@ export function buildQueryOptions(inputs: QueryInputs): Options {
 }
 
 export const REASONING_TO_EFFORT: Record<string, EffortLevel> = {
-	minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "max",
+	minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "max", max: "max",
 };
 
 export const VALID_EFFORTS = new Set<string>(["low", "medium", "high", "xhigh", "max"]);
