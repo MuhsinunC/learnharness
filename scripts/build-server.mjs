@@ -61,14 +61,6 @@ for (const secret of ["auth.json", ".env", ".env.local"]) {
 	}
 }
 
-// 2b.1) Safety: personal-use Claude Code platform binaries must never ship.
-const forbiddenPayload = findForbiddenPayload(STANDALONE);
-if (forbiddenPayload.length) {
-	console.error(`[build-server] REFUSING: standalone contains Claude Code platform binaries:\n${forbiddenPayload.join("\n")}`);
-	console.error("             Check outputFileTracingExcludes in next.config.ts.");
-	process.exit(1);
-}
-
 // 2c) Payload curation (2026-10-11): the trace sweep can copy repo-root
 // dist/ (previous installers, recursively) and the development Electron
 // runtime (the demo helper's dev-only require). Neither belongs in the
@@ -83,6 +75,14 @@ for (const extra of ["dist", path.join("node_modules", "electron")]) {
 		fs.rmSync(target, { recursive: true, force: true });
 		console.log(`[build-server] removed build-only payload: ${extra}`);
 	}
+}
+
+// 2d) Safety: personal-use Claude Code platform binaries must never ship.
+const forbiddenPayload = findForbiddenPayload(STANDALONE);
+if (forbiddenPayload.length) {
+	console.error(`[build-server] REFUSING: standalone contains Claude Code platform binaries:\n${forbiddenPayload.join("\n")}`);
+	console.error("             Check outputFileTracingExcludes in next.config.ts.");
+	process.exit(1);
 }
 
 // 3) Sanity: the runtime-read prompt assets must be present (the teacher

@@ -66,6 +66,18 @@ describe("desktop standalone payload", () => {
 		});
 	});
 
+	it("accepts platform binaries only inside discarded build trees", () => {
+		withPayload(({ root, write, run }) => {
+			for (const removed of ["dist", "node_modules/electron"]) {
+				write(path.join(STANDALONE, removed, "node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/cli"));
+			}
+			const result = run();
+			assert.equal(result.status, 0, String(result.stderr));
+			assert.equal(fs.existsSync(path.join(root, STANDALONE, "dist")), false);
+			assert.equal(fs.existsSync(path.join(root, STANDALONE, "node_modules/electron")), false);
+		});
+	});
+
 	it("refuses Claude Code platform binaries", () => {
 		withPayload(({ write, run }) => {
 			const leaked = "node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64";

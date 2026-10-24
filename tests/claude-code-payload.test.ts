@@ -40,7 +40,7 @@ describe("Claude Code payload guard", () => {
 		});
 	});
 
-	it("allows clean trees, the base SDK, missing roots, regular files, and skips symlinks", () => {
+	it("allows clean trees, the base SDK, missing roots, regular files", () => {
 		withTree((root) => {
 			assert.deepEqual(findForbiddenPayload(root), []);
 			assert.deepEqual(findForbiddenPayload(path.join(root, "missing")), []);
@@ -48,7 +48,51 @@ describe("Claude Code payload guard", () => {
 			fs.mkdirSync(path.join(scope, "claude-agent-sdk"), { recursive: true });
 			assert.deepEqual(findForbiddenPayload(root), []);
 			fs.writeFileSync(path.join(scope, "claude-agent-sdk-x"), "file");
-			fs.symlinkSync(root, path.join(scope, "claude-agent-sdk-link"), "dir");
+			assert.deepEqual(findForbiddenPayload(root), []);
+		});
+	});
+
+	it("flags platform symlinks regardless of their target", () => {
+		withTree((root) => {
+			const scope = path.join(root, "node_modules", "@anthropic-ai");
+			fs.mkdirSync(scope, { recursive: true });
+			fs.writeFileSync(path.join(root, "file"), "fixture");
+			const targets = {
+				"claude-agent-sdk-directory": root,
+				"claude-agent-sdk-file": path.join(root, "file"),
+				"claude-agent-sdk-dangling": path.join(root, "missing"),
+			};
+			for (const [name, target] of Object.entries(targets)) {
+				fs.symlinkSync(target, path.join(scope, name));
+			}
+			assert.deepEqual(findForbiddenPayload(root), Object.keys(targets).map(name => `node_modules/@anthropic-ai/${name}`).sort());
+		});
+	});
+
+	it("follows symlinked ancestor directories", () => {
+		withTree((outside) => {
+			fs.mkdirSync(path.join(outside, "claude-agent-sdk-darwin-arm64"));
+			withTree((root) => {
+				fs.mkdirSync(path.join(root, "node_modules"));
+				fs.symlinkSync(outside, path.join(root, "node_modules", "@anthropic-ai"), "dir");
+				assert.deepEqual(findForbiddenPayload(root), ["node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64"]);
+			});
+		});
+	});
+
+	it("terminates cycles and walks each real directory once", () => {
+		withTree((root) => {
+			const scope = path.join(root, "node_modules", "@anthropic-ai");
+			fs.mkdirSync(scope, { recursive: true });
+			fs.symlinkSync(root, path.join(scope, "cycle"), "dir");
+			fs.symlinkSync(scope, path.join(root, "alias"), "dir");
+			assert.deepEqual(findForbiddenPayload(root), []);
+		});
+	});
+
+	it("ignores unrelated dangling symlinks", () => {
+		withTree((root) => {
+			fs.symlinkSync(path.join(root, "missing"), path.join(root, "unrelated"));
 			assert.deepEqual(findForbiddenPayload(root), []);
 		});
 	});
