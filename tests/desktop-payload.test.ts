@@ -23,6 +23,7 @@ function withPayload(test: (fixture: {
 	};
 	try {
 		write(path.join("scripts", "build-server.mjs"), source);
+		write(path.join("scripts", "payload-guard.mjs"), fs.readFileSync(new URL("../scripts/payload-guard.mjs", import.meta.url), "utf8"));
 		write(path.join(STANDALONE, "server.js"));
 		write(path.join(".next", "static", "runtime.js"));
 		write(path.join("public", "asset.txt"));
@@ -45,6 +46,7 @@ describe("desktop standalone payload", () => {
 				write(path.join(STANDALONE, extra));
 			}
 			const runtime = [
+				"node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs",
 				"node_modules/@earendil-works/pi-ai/dist/index.js",
 				"node_modules/@earendil-works/pi-agent-core/dist/index.js",
 				"node_modules/@napi-rs/canvas-darwin-arm64/skia.darwin-arm64.node",
@@ -61,6 +63,17 @@ describe("desktop standalone payload", () => {
 			for (const file of runtime) assert.ok(fs.existsSync(path.join(root, STANDALONE, file)), file);
 			assert.ok(fs.existsSync(path.join(root, STANDALONE, ".next", "static", "runtime.js")));
 			assert.ok(fs.existsSync(path.join(root, STANDALONE, "public", "asset.txt")));
+		});
+	});
+
+	it("refuses Claude Code platform binaries", () => {
+		withPayload(({ write, run }) => {
+			const leaked = "node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64";
+			write(path.join(STANDALONE, leaked, "cli"));
+			const result = run();
+			assert.equal(result.status, 1);
+			assert.match(String(result.stderr), /REFUSING/);
+			assert.ok(String(result.stderr).includes(leaked));
 		});
 	});
 
