@@ -121,7 +121,7 @@ export function assertLhToolSets(): number {
 		createDemoBuilderTools({ html: null, testedHtml: null, lastResult: null },
 			{} as Parameters<typeof createDemoBuilderTools>[1]),
 		createPdfTools("unused.pdf"), createVisualTools(), createWebTools(() => null),
-		createPdfReadTools(process.env.TMPDIR!), auditorGraphTools(graph),
+		createPdfReadTools("unused-dir"), auditorGraphTools(graph),
 	];
 	// Extraction's submit schemas and runSubmitAgent's inline registry are
 	// private; covering those requires an export outside this lane's scope.
