@@ -3,6 +3,7 @@ import { createAssistantMessageEventStream, type AssistantMessageEventStream, ty
 import { convertPiMessages } from "./convert.ts";
 import { EventMapper, overageLatched, OVERAGE_REFUSAL, type EventMapperLogger } from "./events.ts";
 import { foldTranscript, splitPrompt } from "./history.ts";
+import { claudeCodeModelId, CLAUDE_CODE_SETTINGS } from "./models.ts";
 import { createToolServer } from "./mcp-server.ts";
 import { buildQueryOptions, CONTINUE_TEXT, MCP_SERVER_NAME, MCP_TOOL_PREFIX, resolveEffort } from "./query-options.ts";
 import { claudeCodeWorkdir, deleteSessionFile, markSessionActive, markSessionDone, sweepStaleSessions, writeSessionFile } from "./session-file.ts";
@@ -72,16 +73,17 @@ export function streamClaudeCode(model: Model<any>, transcript: TranscriptContex
 			if (dropped.thinking || dropped.abortedTurns || dropped.other.size) {
 				warn(`dropped history content: thinking=${dropped.thinking} providers=[${[...dropped.providers].join(",")}] abortedTurns=${dropped.abortedTurns}${[...dropped.other].map(([key, count]) => ` ${key}=${count}`).join("")}`);
 			}
+			const cliModel = claudeCodeModelId(model, CLAUDE_CODE_SETTINGS);
 			cwd = claudeCodeWorkdir(deps.dataDir);
 			const swept = state[sweepKey] ??= new Set<string>();
 			const pair = `${cwd}\0${deps.claudeDir}`;
 			if (!swept.has(pair)) { sweepStaleSessions(cwd, deps.claudeDir); swept.add(pair); }
 			try {
-				({ sessionId } = writeSessionFile({ messages: anthropicMessages, cwd, claudeDir: deps.claudeDir, model: model.id }));
+				({ sessionId } = writeSessionFile({ messages: anthropicMessages, cwd, claudeDir: deps.claudeDir, model: cliModel }));
 				markSessionActive(sessionId);
 			} catch (error) { if (!(error instanceof Error && error.message === "claude-code: empty history")) throw error; }
 			if (tools.length) server = createToolServer(tools, { timeoutMs: 3_600_000, onCall: checkParked });
-			const queryOptions = buildQueryOptions({ executable: deps.executable, cwd, cliModel: model.id,
+			const queryOptions = buildQueryOptions({ executable: deps.executable, cwd, cliModel,
 				effort: resolveEffort(model, options?.reasoning), appendPrompt: systemPrompt, resumeId: sessionId,
 				...(server ? { mcpServers: { [MCP_SERVER_NAME]: server.config } } : {}) });
 			const loading = deps.loadQuery();
