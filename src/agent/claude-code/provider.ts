@@ -10,7 +10,7 @@ import { claudeCodeCatalog } from "./models.ts";
 import { defaultLoadQuery, streamClaudeCode } from "./stream.ts";
 
 export type ClaudeCodeProviderDeps = {
-	isEnabled?: () => boolean;
+	registrationError?: () => string | null;
 	// Supplied only in endpoint mode (readEndpointConfig at boot); read once per stream so tokens refresh without module state.
 	endpoint?: () => ClaudeCodeEndpoint | null;
 	loadQuery?: typeof defaultLoadQuery;
@@ -23,6 +23,7 @@ export type ClaudeCodeProviderDeps = {
 export function claudeCodeProvider(executable: string, anthropicModels: readonly Model<Api>[], deps: ClaudeCodeProviderDeps = {}) {
 	const streamDeps = {
 		executable,
+		registrationError: deps.registrationError,
 		...(deps.endpoint ? { endpoint: deps.endpoint } : {}),
 		loadQuery: deps.loadQuery ?? defaultLoadQuery,
 		dataDir: deps.dataDir ?? PATHS.data,
@@ -30,9 +31,10 @@ export function claudeCodeProvider(executable: string, anthropicModels: readonly
 		logger: deps.logger ?? { debug: () => {}, warn: (message: string) => console.warn(message) },
 	};
 	const s = (model: Model<Api>, transcript: TranscriptContext, options?: SimpleStreamOptions) => {
-		if (deps.isEnabled && !deps.isEnabled()) {
+		const error = deps.registrationError?.();
+		if (error) {
 			const stream = createAssistantMessageEventStream();
-			new EventMapper(stream, model, new Map(), streamDeps.logger).fail("error", "claude-code: provider is off");
+			new EventMapper(stream, model, new Map(), streamDeps.logger).fail("error", error);
 			return stream;
 		}
 		return streamClaudeCode(model, transcript, options, streamDeps);

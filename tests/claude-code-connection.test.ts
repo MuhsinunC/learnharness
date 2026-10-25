@@ -14,7 +14,7 @@ function scenario(code: string, settings?: string, override = false, prelude = "
 printf '%s\\n' "$*" >> '${home}/argv'
 case "$*" in
 --version) echo '2.1.310 (Claude Code)';;
-'auth status') if [ -f '${home}/logged-out' ]; then echo '{"loggedIn":false}';
+'auth status --json') if [ -f '${home}/logged-out' ]; then echo '{"loggedIn":false}';
   elif [ -f '${home}/no-account' ]; then echo '{"loggedIn":true}';
   else echo '{"loggedIn":true,"email":"user@example.com","subscriptionType":"pro","orgId":"x","orgName":"y"}'; fi;;
 'auth login --claudeai')
@@ -64,8 +64,10 @@ assert.equal(response.status, 200);
 let status = await response.json();
 assert.equal(status.active, true); assert.equal(status.found,true); assert.equal(status.loggedIn,true);
 assert.equal(status.version,'2.1.310 (Claude Code)');
-assert.equal(fs.readFileSync(home+'/argv','utf8'),'--version\\nauth status\\n');
-assert.deepEqual(await c.getClaudeCodeStatus(),status);
+assert.equal(fs.readFileSync(home+'/argv','utf8'),'--version\\nauth status --json\\n');
+const {ok, probeError, ...getShape} = status;
+assert.equal(ok,true); assert.equal(probeError,undefined);
+assert.deepEqual(await c.getClaudeCodeStatus(),getShape);
 assert.deepEqual(status.account,{email:'user@example.com',subscriptionType:'pro'});
 assert.deepEqual(JSON.parse(fs.readFileSync(home+'/claude-code.json','utf8')),{mode:'local',executable});
 assert.ok(catalog.modelCatalog().models.some(m=>m.provider==='claude-code'));
@@ -269,7 +271,7 @@ const get = () => route.GET(new Request('http://localhost'));
 let now = Date.now(); Date.now = () => now;
 await Promise.all([get(),get()]); await get();
 const probes = () => fs.readFileSync(home+'/argv','utf8').trim().split('\\n');
-assert.deepEqual(probes(),['--version','auth status']);
+assert.deepEqual(probes(),['--version','auth status --json']);
 await route.PUT(request({mode:'local'}));
 const before = probes().length;
 await get(); assert.equal(probes().length,before);
@@ -343,11 +345,13 @@ assert.equal(calls,0);
 it("stale saved executables fall back to discovery in GET, PUT and login", () => scenario(`
 for (const exists of [false,true]) {
   const stale = home+'/stale';
+  (await import(${JSON.stringify(join(root, 'src/agent/models.ts'))})).disableClaudeCodeProvider();
   if (exists) { fs.writeFileSync(stale,'#!/bin/sh\\necho wrong\\n'); fs.chmodSync(stale,0o755); }
   settingsModule.writeClaudeCodeSettings({mode:'local',executable:stale});
   c.invalidateClaudeStatusCacheForTests();
   const status = await c.getClaudeCodeStatus();
-  assert.equal(status.executable,executable); assert.equal(status.staleExecutable,stale); assert.equal(status.error,null);
+  assert.equal(status.executable,stale); assert.equal(status.discovered,executable); assert.equal(status.error,null);
+  assert.equal(status.hint,'Saved Claude Code path is missing; choose the discovered one');
   const changed = await route.PUT(request({mode:'local'}));
   assert.equal(changed.status,200); assert.equal((await changed.json()).executable,executable);
   settingsModule.writeClaudeCodeSettings({mode:'local',executable:stale});
@@ -358,7 +362,7 @@ for (const exists of [false,true]) {
 it("successful URL-free login is idle and only login inherits desktop variables", () => scenario(`
 for(const key of ['DISPLAY','WAYLAND_DISPLAY','XDG_RUNTIME_DIR','DBUS_SESSION_BUS_ADDRESS']) process.env[key]='desktop';
 fs.writeFileSync(executable, '#!/bin/sh\\ncase "$*" in\\n--version) env > "' +
-  home + '/version-env"; echo "Claude Code";;\\n"auth status") env > "' +
+  home + '/version-env"; echo "Claude Code";;\\n"auth status --json") env > "' +
   home + '/status-env"; echo "{}";;\\nauth*) env > "' +
   home + '/login-env";;\\nesac\\n');
 const response = await loginRoute.POST(loginRequest());
@@ -386,18 +390,20 @@ it("mutations across module copies serialize and GET retries a changed settings 
 const endpoint = await import(${JSON.stringify(join(root, "src/server/claude-code-endpoint.ts"))});
 const other = await import(${JSON.stringify(join(root, "src/server/claude-code-connection.ts"))}+'?mutex-copy');
 endpoint.writeEndpointConfig({baseUrl:'https://old.example',token:'old'});
-let release;
-const blocked = request({mode:'local'});
-blocked.json = () => new Promise(resolve => { release = () => resolve({mode:'local'}); });
-const put = route.PUT(blocked);
-while(!release) await new Promise(resolve => setImmediate(resolve));
+const slow = home+'/slow';
+fs.writeFileSync(slow,'#!/bin/sh\\nif [ "$1" = "--version" ]; then touch "'+home+'/locked"; '+
+  'while [ ! -f "'+home+'/unlock" ]; do sleep 0.01; done; echo "Claude Code"; else echo "{}"; fi\\n');
+fs.chmodSync(slow,0o755);
+const put = route.PUT(request({mode:'local',executable:slow}));
+while(!fs.existsSync(home+'/locked')) await new Promise(resolve => setTimeout(resolve,5));
 let deleteDone=false, loginDone=false;
 const remove = other.deleteClaudeCodeEndpoint(new Request('http://localhost',{method:'DELETE'})).then(r=>{deleteDone=true;return r;});
 const login = other.postClaudeCodeLogin(loginRequest()).then(r=>{loginDone=true;return r;});
 await new Promise(resolve => setImmediate(resolve));
 assert.equal(deleteDone,false); assert.equal(loginDone,false); assert.equal(fs.existsSync(endpoint.endpointFile()),true);
-release(); await put; await remove; await login; c.resetClaudeLoginForTests();
+fs.writeFileSync(home+'/unlock',''); await put; await remove; await login; c.resetClaudeLoginForTests();
 // Hold A's probe while writing B, then ensure GET retries rather than mixing A with B's mode.
+(await import(${JSON.stringify(join(root, 'src/agent/models.ts'))})).disableClaudeCodeProvider();
 const a = home+'/a', b=home+'/b';
 fs.copyFileSync(executable,b); fs.chmodSync(b,0o755);
 fs.writeFileSync(a,'#!/bin/sh\\nif [ "$1" = "--version" ]; then touch "' +
@@ -410,4 +416,124 @@ while(!fs.existsSync(home+'/started')) await new Promise(resolve=>setTimeout(res
 settingsModule.writeClaudeCodeSettings({mode:'endpoint',executable:b}); fs.writeFileSync(home+'/release','');
 const status = await pending;
 assert.equal(status.mode,'endpoint'); assert.equal(status.executable,b); assert.equal(status.version,'2.1.310 (Claude Code)');
+`));
+it("auth status accepts logged-out JSON on exit one but version requires exit zero", () => scenario(`
+fs.writeFileSync(executable,'#!/bin/sh\\nif [ "$1" = "--version" ]; then echo "Claude Code"; '+
+  ${JSON.stringify("else echo '{\"loggedIn\":false}'; exit 1; fi\n")});
+let status = await c.getClaudeCodeStatus();
+assert.equal(status.loggedIn,false); assert.equal(status.error,null);
+fs.writeFileSync(executable,'#!/bin/sh\\necho "Claude Code"; exit 1\\n');
+c.invalidateClaudeStatusCacheForTests();
+status = await c.getClaudeCodeStatus(); assert.equal(status.version,null); assert.ok(status.error);
+`));
+it("captured providers reject real changes while equivalent boot and held-slot streams survive", () => scenario(`
+const boot = await import(${JSON.stringify(join(root, "src/server/claude-code-boot.ts"))});
+const models = await import(${JSON.stringify(join(root, "src/agent/models.ts"))});
+const other = await import(${JSON.stringify(join(root, "src/agent/models.ts"))}+'?identity-copy');
+const otherBoot = await import(${JSON.stringify(join(root, "src/server/claude-code-boot.ts"))}+'?boot-copy');
+const {acquireClaudeCodeSlot} = await import(${JSON.stringify(join(root, "src/agent/claude-code/slots.ts"))});
+const {normalizeContext} = await import('@earendil-works/pi-ai');
+let calls=0;
+const loadQuery = async () => () => {
+  calls++;
+  return {async *[Symbol.asyncIterator](){yield {type:'result',subtype:'success',is_error:false};},close(){},interrupt:async()=>{}};
+};
+boot.setClaudeCodeLoadQueryForTests(loadQuery);
+await route.PUT(request({mode:'endpoint',baseUrl:'https://relay.example',token:'test-token'}));
+const captured = other.piModels(), model = captured.getModels('claude-code')[0];
+const context = normalizeContext({systemPrompt:'',tools:[],messages:[{role:'user',content:'x',timestamp:0}]});
+await route.PUT(request({mode:'local'}));
+assert.equal((await captured.streamSimple(model,context).result()).errorMessage,'claude-code: provider changed; retry');
+assert.equal(calls,0);
+process.env.LH_CLAUDE_CODE_MAX_CHILDREN='1';
+for(const kind of ['same','off','changed']) {
+  await route.PUT(request({mode:'local'}));
+  const current = models.piModels(), currentModel = current.getModels('claude-code')[0];
+  const release = await acquireClaudeCodeSlot();
+  try {
+    const events = current.streamSimple(currentModel,context);
+    await new Promise(resolve=>setImmediate(resolve));
+    if(kind==='same') { otherBoot.setClaudeCodeLoadQueryForTests(loadQuery); otherBoot.bootClaudeCodeProvider(); }
+    if(kind==='off') other.disableClaudeCodeProvider();
+    if(kind==='changed') other.enableClaudeCodeProvider(executable,{dataDir:home,loadQuery:async()=>loadQuery()});
+    release();
+    const result = await events.result();
+    if(kind==='same') assert.notEqual(result.stopReason,'error',result.errorMessage);
+    else assert.equal(result.errorMessage,kind==='off'?'claude-code: provider is off':'claude-code: provider changed; retry');
+  } finally { release(); }
+}
+assert.equal(calls,1);
+`));
+it("registration is checked after a pending SDK load", () => scenario(`
+const boot = await import(${JSON.stringify(join(root, "src/server/claude-code-boot.ts"))});
+const models = await import(${JSON.stringify(join(root, "src/agent/models.ts"))});
+const {normalizeContext} = await import('@earendil-works/pi-ai');
+let finishLoad, calls=0;
+boot.setClaudeCodeLoadQueryForTests(() => new Promise(resolve=>{finishLoad=resolve;}));
+await route.PUT(request({mode:'local'}));
+const collection=models.piModels(), model=collection.getModels('claude-code')[0];
+const events=collection.streamSimple(model,normalizeContext({systemPrompt:'',tools:[],messages:[{role:'user',content:'x',timestamp:0}]}));
+while(!finishLoad) await new Promise(resolve=>setImmediate(resolve));
+models.disableClaudeCodeProvider(); finishLoad(()=>{calls++;});
+assert.equal((await events.result()).errorMessage,'claude-code: provider is off'); assert.equal(calls,0);
+`));
+it("each probe deadline settles, escalates only its child, and permits retry", () => scenario(`
+c.setClaudeProbeTimeoutsForTests(150,30);
+for(const kind of ['version','auth']) {
+  fs.writeFileSync(executable,'#!/bin/sh\\n'+
+    (kind==='auth'?'if [ "$1" = "--version" ]; then echo "Claude Code"; exit 0; fi\\n':'')+
+    'echo $$ >> "'+home+'/probe-pids"\\n'+
+    (kind==='auth'?${JSON.stringify("echo '{\"loggedIn\":true}'\n")}:'echo "Claude Code"\\n')+
+    "trap '' TERM; exec sleep 30\\n");
+  c.invalidateClaudeStatusCacheForTests();
+  for(let attempt=0;attempt<2;attempt++) {
+    const response=await route.GET(new Request('http://localhost'));
+    assert.equal(response.status,200); assert.ok((await response.json()).error);
+    const pids=fs.readFileSync(home+'/probe-pids','utf8').trim().split('\\n').map(Number);
+    const pid=pids.at(-1);
+    for(let i=0;i<100;i++) { try {process.kill(pid,0);} catch {break;} await new Promise(resolve=>setTimeout(resolve,10)); }
+    assert.throws(()=>process.kill(pid,0));
+    assert.equal(pids.length,(kind==='auth'?2:0)+attempt+1);
+  }
+}
+`));
+it("PUT body limits and parsing happen before the mutation lock", () => scenario(`
+let controller;
+const blocked = new Request('http://localhost',{method:'PUT',headers:{'Content-Type':'application/json'},duplex:'half',
+  body:new ReadableStream({start(c){controller=c;}})});
+const waiting=route.PUT(blocked);
+const second=await route.PUT(request({mode:'off'})); assert.equal(second.status,200);
+controller.enqueue(new TextEncoder().encode('{"mode":"off"}')); controller.close(); assert.equal((await waiting).status,200);
+assert.equal((await route.PUT(new Request('http://localhost',{method:'PUT',headers:{'Content-Type':'application/json'},
+  body:' '.repeat(65537)}))).status,413);
+assert.equal((await route.PUT(new Request('http://localhost',{method:'PUT',headers:{'Content-Type':'application/json'},body:'{'}))).status,400);
+`));
+it("committed PUT and DELETE separate success from probe diagnostics", () => scenario(`
+await route.PUT(request({mode:'local'}));
+fs.writeFileSync(executable,'#!/bin/sh\\nif [ "$1" = "--version" ]; then echo "Claude Code"; else echo bad; fi\\n');
+let response=await route.PUT(request({mode:'local'}));
+let status=await response.json();
+assert.equal(response.status,200); assert.equal(status.ok,true); assert.equal(status.error,null);
+assert.equal(status.probeError,'unable to read login status');
+status=await (await endpointRoute.DELETE(new Request('http://localhost',{method:'DELETE'}))).json();
+assert.equal(status.ok,true); assert.equal(status.error,null); assert.ok(status.probeError);
+status=await c.getClaudeCodeStatus(); assert.equal(status.error,'unable to read login status'); assert.equal(status.ok,undefined);
+`));
+it("status distinguishes configured registration from a discovered replacement", () => scenario(`
+await route.PUT(request({mode:'local'}));
+const replacement=home+'/replacement'; fs.mkdirSync(replacement); const candidate=replacement+'/claude';
+fs.copyFileSync(executable,candidate); fs.chmodSync(candidate,0o755); fs.unlinkSync(executable);
+process.env.PATH=replacement+':/bin:/usr/bin'; c.invalidateClaudeStatusCacheForTests();
+const status=await c.getClaudeCodeStatus();
+assert.equal(status.executable,executable); assert.equal(status.discovered,candidate); assert.equal(status.active,true);
+assert.equal(status.found,false); assert.equal(status.version,'2.1.310 (Claude Code)');
+assert.equal(status.hint,'Saved Claude Code path is missing; choose the discovered one');
+const fixed=await (await route.PUT(request({mode:'local',executable:status.discovered}))).json();
+assert.equal(fixed.executable,candidate); assert.equal(fixed.discovered,null); assert.equal(fixed.hint,null); assert.equal(fixed.ok,true);
+await route.PUT(request({mode:'endpoint',baseUrl:'https://relay.example',token:'test-token'}));
+const next=replacement+'/next'; fs.mkdirSync(next); const nextCandidate=next+'/claude';
+fs.copyFileSync(candidate,nextCandidate); fs.unlinkSync(candidate); process.env.PATH=next+':/bin:/usr/bin';
+const removed=await (await endpointRoute.DELETE(new Request('http://localhost',{method:'DELETE'}))).json();
+assert.equal(removed.ok,true); assert.equal(removed.executable,nextCandidate); assert.equal(removed.discovered,null);
+
 `));

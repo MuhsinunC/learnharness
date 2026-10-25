@@ -8,14 +8,14 @@ Endpoint configuration lives in `claude-endpoint.json` next to the auth key file
 
 Login alone also inherits DISPLAY, WAYLAND_DISPLAY, XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS to open the Linux desktop browser. Login cancellation signals only the direct child; non-exec wrappers may leave descendants running.
 
-All four routes refuse mismatched Origin hosts and cross-site fetches before doing work. Status probes share an in-flight request and cache for five seconds; connection mutations and login exit invalidate them.
+All four routes refuse mismatched Origin hosts and cross-site fetches before doing work. Status probes share an in-flight request and cache settled successful results for five seconds; each probe has a ten-second deadline, followed by direct-child SIGKILL after a two-second SIGTERM grace if needed; connection mutations and login exit invalidate them.
 
 Connection settings live in `<LH_DATA_DIR>/claude-code.json` (the default data directory when `LH_DATA_DIR` is unset): `{"mode":"off","executable":null}`. Select `local` to register the provider or `off` to remove it immediately, without restarting. No Claude credential is stored by the app. Endpoint mode uses the same binary with explicit relay credentials.
 
-- `GET /api/claude-code` reports discovery, version, login and registration state.
-- `PUT /api/claude-code` with JSON `{"mode":"local","executable":"/example/bin/claude"}` validates the binary and saves the connection. Omitting `executable` uses the saved path or first discovered candidate. `{"mode":"off"}` disables it while retaining the saved path.
-- `DELETE /api/claude-code/endpoint` clears the endpoint credential file. When endpoint mode is selected, it falls back to local if the binary is logged in, otherwise off.
-- `POST /api/claude-code/login` with `Content-Type: application/json` starts `claude auth login --claudeai`. Claude opens the browser; the response also supplies its HTTPS login URL. Poll GET for login status. A new login replaces the previous child, and login expires after ten minutes.
+- `GET /api/claude-code` reports discovery, version, login and registration state. `executable` is the registered or configured path; `discovered` is a runnable fallback when different, with `hint` advising an explicit path update. `version`, `loggedIn`, and `account` describe `discovered` when present, otherwise `executable`. `active` describes actual registration, even when its path is missing.
+- `PUT /api/claude-code` with JSON `{"mode":"local","executable":"/example/bin/claude"}` validates the binary and saves the connection. Omitting `executable` uses the saved path or first discovered candidate. `{"mode":"off"}` disables it while retaining the saved path. Committed changes return `ok: true`, `error: null`, and optional `probeError` diagnostics; failures return a non-2xx status with `error`. Bodies are capped at 64 KiB and validated before the mutation lock.
+- `DELETE /api/claude-code/endpoint` clears the endpoint credential file. When endpoint mode is selected, it falls back to local if the binary is logged in, otherwise off. Successful deletion also returns `ok: true`, `error: null`, and optional `probeError`, independently of probe success.
+- `POST /api/claude-code/login` with `Content-Type: application/json` starts `claude auth login --claudeai`. Claude opens the browser; the response also supplies its HTTPS login URL. A successful login child that exits without a URL returns `login: {state: "idle"}`. Poll GET for login status. A new login replaces the previous child, and login expires after ten minutes.
 
 Discovery checks the saved path, PATH, standard user and system install directories, and nvm versions newest first. Symlinks deduplicate by target while retaining the first discovered path so neighboring node executables and automatic updates work.
 

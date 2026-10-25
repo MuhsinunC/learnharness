@@ -1,14 +1,14 @@
-import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { buildChildEnv } from "../agent/claude-code/child-env.ts";
-import { piModels } from "../agent/models.ts";
+import { claudeCodeRegistrationExecutable, piModels } from "../agent/models.ts";
 import { applyClaudeCodeSettings, claudeCodeEnvOverride } from "./claude-code-boot.ts";
 import {
 	claudeExecutableProblem, claudeSettingsError, claudeSettingsGeneration, readClaudeCodeSettings, writeClaudeCodeSettings,
 } from "./claude-code-settings.ts";
-import { clearEndpointConfig, endpointFile, endpointStatus, isAllowedEndpointUrl, writeEndpointConfig } from "./claude-code-endpoint.ts";
+import { clearEndpointConfig, endpointFile, endpointStatus, isAllowedEndpointUrl, validToken, writeEndpointConfig } from "./claude-code-endpoint.ts";
 
 const UNREADABLE_ENDPOINT = "claude-code endpoint: existing endpoint credentials could not be read; re-enter the token";
 
@@ -38,27 +38,62 @@ export function discoverClaudeExecutables(roots = defaultRoots()): string[] {
 		try { const real = realpathSync(p); if (seen.has(real)) return false; seen.add(real); return true; } catch { return false; }
 	});
 }
-function run(executable: string, args: string[]): Promise<string> {
+let probeDeadlineMs = 10_000, probeKillGraceMs = 2_000;
+export function setClaudeProbeTimeoutsForTests(deadlineMs: number, killGraceMs: number): void {
+	if (process.env.NODE_ENV !== "test") throw new Error("test-only injection");
+	probeDeadlineMs = deadlineMs;
+	probeKillGraceMs = killGraceMs;
+}
+function run(executable: string, args: string[]): Promise<{ stdout: string; code: number | null }> {
 	return new Promise((resolve, reject) => {
-		const child = execFile(executable, args, {
+		const child = spawn(executable, args, {
 			env: buildChildEnv(process.env, null, executable) as NodeJS.ProcessEnv,
-			encoding: "utf8", timeout: 10_000, maxBuffer: 64 * 1024,
-		}, (error, stdout) => error ? reject(new Error("command failed")) : resolve(stdout));
-		child.stdin?.end();
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		let stdout = "", bytes = 0, settled = false;
+		let escalation: NodeJS.Timeout | undefined;
+		const fail = () => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(deadline);
+			child.kill("SIGTERM");
+			escalation = setTimeout(() => {
+				if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+			}, probeKillGraceMs);
+			escalation.unref();
+			reject(new Error("probe failed"));
+		};
+		const deadline = setTimeout(fail, probeDeadlineMs);
+		child.stdout.on("data", (chunk: Buffer) => {
+			bytes += chunk.length;
+			if (bytes > 64 * 1024) fail();
+			else stdout += chunk.toString();
+		});
+		child.stderr.on("data", (chunk: Buffer) => { bytes += chunk.length; if (bytes > 64 * 1024) fail(); });
+		child.on("error", fail);
+		child.on("close", code => {
+			clearTimeout(deadline);
+			clearTimeout(escalation);
+			if (settled) return;
+			settled = true;
+			resolve({ stdout, code });
+		});
 	});
 }
 export async function validateClaudeExecutable(executable: string): Promise<{ version: string | null; error: string | null }> {
 	const problem = claudeExecutableProblem(executable);
 	if (problem) return { version: null, error: problem };
 	try {
-		const stdout = await run(executable, ["--version"]);
-		if (stdout.includes("Claude Code")) return { version: stdout.trim(), error: null };
+		const { stdout, code } = await run(executable, ["--version"]);
+		if (code === 0 && stdout.includes("Claude Code")) return { version: stdout.trim(), error: null };
 	} catch { /* private failure */ }
 	return { version: null, error: "executable failed validation" };
 }
 export async function readClaudeAuthStatus(executable: string) {
 	try {
-		const value = JSON.parse(await run(executable, ["auth", "status"]));
+		const { stdout } = await run(executable, ["auth", "status", "--json"]);
+		const value = JSON.parse(stdout);
+		if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.loggedIn !== "boolean") throw new Error();
 		const account = value.loggedIn === true && (typeof value.email === "string" || typeof value.subscriptionType === "string")
 			? {
 				...(typeof value.email === "string" ? { email: value.email } : {}),
@@ -156,48 +191,55 @@ async function resolveExecutable(validation?: Validation) {
 	const settings = readClaudeCodeSettings();
 	if (override.rejected || process.platform === "win32") {
 		return { executable: override.path ?? settings.executable, candidates: [], version: null,
-			staleExecutable: null, error: "Claude Code executable was rejected" };
+			error: "Claude Code executable was rejected" };
 	}
 	const candidates = discoverClaudeExecutables();
 	const preferred = override.path ?? settings.executable;
-	let staleExecutable: string | null = null;
 	for (const executable of [...new Set([preferred, ...candidates])]) {
 		if (!executable) continue;
 		const checked = validation?.executable === executable ? { version: validation.version, error: null }
 			: await validateClaudeExecutable(executable);
-		if (checked.version) return { executable, candidates, ...checked, staleExecutable };
-		if (override.enabled) return { executable, candidates, ...checked, staleExecutable };
-		if (executable === settings.executable) staleExecutable = executable;
+		if (checked.version) return { executable, candidates, ...checked };
+		if (override.enabled) return { executable, candidates, ...checked };
 	}
-	return { executable: null, candidates, version: null, staleExecutable, error: "Claude Code not found" };
+	return { executable: null, candidates, version: null, error: "Claude Code not found" };
 }
 async function readSpawnStatus(validation?: Validation) {
 	const resolved = await resolveExecutable(validation);
 	const auth = resolved.version && resolved.executable ? await readClaudeAuthStatus(resolved.executable)
 		: { loggedIn: false, account: null, error: null };
+	const configured = claudeCodeRegistrationExecutable() ?? claudeCodeEnvOverride().path ?? readClaudeCodeSettings().executable;
+	const discovered = resolved.executable !== configured ? resolved.executable : null;
 	return {
-		...resolved, found: !!resolved.executable && !claudeExecutableProblem(resolved.executable),
+		...resolved, executable: configured, discovered,
+		hint: configured && discovered ? "Saved Claude Code path is missing; choose the discovered one" : null,
+		found: !!configured && !claudeExecutableProblem(configured),
 		loggedIn: auth.loggedIn, account: auth.account, error: resolved.error ?? auth.error,
 	};
 }
 type SpawnStatus = Awaited<ReturnType<typeof readSpawnStatus>>;
-const cacheKey = Symbol.for("lh.claudeCodeStatusCache.v2");
-const cacheGlobal = globalThis as typeof globalThis & {
-	[cacheKey]?: { entry?: { expires: number; promise: Promise<SpawnStatus> } };
+const cacheKey = Symbol.for("lh.claudeCodeStatusCache.v3");
+type StatusCache = {
+	entry?: { expires: number; value: SpawnStatus };
+	pending?: Promise<SpawnStatus>;
 };
+const cacheGlobal = globalThis as typeof globalThis & { [cacheKey]?: StatusCache };
 const statusCache = cacheGlobal[cacheKey] ??= {};
-function invalidateStatusCache(): void { statusCache.entry = undefined; }
+function invalidateStatusCache(): void { statusCache.entry = undefined; statusCache.pending = undefined; }
 export function invalidateClaudeStatusCacheForTests(): void { invalidateStatusCache(); }
-async function getClaudeCodeStatus(validation?: Validation, retry = true): Promise<Awaited<ReturnType<typeof statusResponse>>> {
+async function getClaudeCodeStatus(validation?: Validation, retry = true): Promise<ReturnType<typeof statusResponse>> {
 	const generation = claudeSettingsGeneration();
-	if (!statusCache.entry || statusCache.entry.expires <= Date.now()) {
-		const entry = { expires: Infinity, promise: readSpawnStatus(validation) };
-		statusCache.entry = entry;
-		entry.promise.then(() => { entry.expires = Date.now() + 5_000; }, () => {
-			if (statusCache.entry === entry) invalidateStatusCache();
-		});
+	let backed: SpawnStatus;
+	if (statusCache.entry && statusCache.entry.expires > Date.now()) backed = statusCache.entry.value;
+	else {
+		const pending = statusCache.pending ??= readSpawnStatus(validation);
+		try {
+			backed = await pending;
+			if (statusCache.pending === pending && !backed.error) {
+				statusCache.entry = { expires: Date.now() + 5_000, value: backed };
+			}
+		} finally { if (statusCache.pending === pending) statusCache.pending = undefined; }
 	}
-	const backed = await statusCache.entry.promise;
 	if (retry && generation !== claudeSettingsGeneration()) {
 		invalidateStatusCache();
 		return getClaudeCodeStatus(undefined, false);
@@ -223,6 +265,8 @@ function refuseCrossOrigin(request: Request): Response | null {
 	return mismatch || request.headers.get("sec-fetch-site") === "cross-site"
 		? json({ error: "cross-origin request refused" }, 403) : null;
 }
+/** Status keeps the configured/registered executable separate from discovered fallback and hint.
+ * Version and auth fields describe discovered when present, otherwise executable. */
 export async function getClaudeCodeConnection(request: Request): Promise<Response> {
 	const refusal = refuseCrossOrigin(request);
 	if (refusal) return refusal;
@@ -230,27 +274,13 @@ export async function getClaudeCodeConnection(request: Request): Promise<Respons
 }
 const json = (body: unknown, status = 200) => Response.json(body, { status });
 const isJson = (request: Request) => request.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() === "application/json";
-async function putClaudeCodeConnectionLocked(request: Request): Promise<Response> {
-	const refusal = refuseCrossOrigin(request);
-	if (refusal) return refusal;
-	const platformError = platformRefusal();
-	if (platformError) return platformError;
-	if (claudeCodeEnvOverride().enabled) return json({ error: "connection controlled by launch environment" }, 409);
-	if (!isJson(request)) return json({ error: "application/json required" }, 415);
-	let body;
-	try { body = await request.json(); } catch { return json({ error: "invalid JSON object" }, 400); }
-	if (!body || typeof body !== "object" || Array.isArray(body)) return json({ error: "invalid JSON object" }, 400);
-	if (!["off", "local", "endpoint"].includes(body.mode)) return json({ error: "invalid mode" }, 400);
-	if (Object.hasOwn(body, "executable") &&
-		(typeof body.executable !== "string" || !body.executable || !isAbsolute(body.executable))) {
-		return json({ error: "executable must be an absolute path" }, 400);
-	}
+async function putClaudeCodeConnectionLocked(body: { mode: "off" | "local" | "endpoint"; executable?: string; baseUrl?: unknown; token?: unknown }): Promise<Response> {
 	const saved = readClaudeCodeSettings();
 	let executable = saved.executable;
 	let validation: { executable: string; version: string } | undefined;
 	if (body.mode !== "off") {
 		const resolved = body.executable === undefined ? await resolveExecutable() : null;
-		executable = body.executable ?? resolved?.executable;
+		executable = body.executable ?? resolved?.executable ?? null;
 		if (!executable) return json({ error: "Claude Code not found" }, 400);
 		const result = resolved ?? await validateClaudeExecutable(executable);
 		if (result.error) return json({ error: result.error }, 400);
@@ -264,7 +294,7 @@ async function putClaudeCodeConnectionLocked(request: Request): Promise<Response
 			return json({ error: "invalid endpoint URL" }, 400);
 		}
 		const token = body.token;
-		if (token !== undefined && (typeof token !== "string" || !/^[\x21-\x7e]+$/.test(token))) {
+		if (token !== undefined && !validToken(token)) {
 			return json({ error: "invalid endpoint token" }, 400);
 		}
 		if (token === undefined && !stored.tokenSet) {
@@ -287,7 +317,7 @@ async function putClaudeCodeConnectionLocked(request: Request): Promise<Response
 	}
 	applyClaudeCodeSettings();
 	invalidateStatusCache();
-	return json(await getClaudeCodeStatus(validation));
+	return mutationSuccess(await getClaudeCodeStatus(validation));
 }
 async function postClaudeCodeLoginLocked(request: Request): Promise<Response> {
 	const refusal = refuseCrossOrigin(request);
@@ -310,21 +340,61 @@ async function deleteClaudeCodeEndpointLocked(request: Request): Promise<Respons
 	const settings = readClaudeCodeSettings();
 	if (settings.mode === "endpoint" && !claudeCodeEnvOverride().enabled) {
 		const status = await getClaudeCodeStatus();
-		try { writeClaudeCodeSettings({ mode: status.loggedIn ? "local" : "off", executable: status.executable }); }
+		try { writeClaudeCodeSettings({ mode: status.loggedIn ? "local" : "off", executable: status.discovered ?? status.executable }); }
 		catch { return json({ error: "unable to save connection settings" }, 500); }
 		applyClaudeCodeSettings();
+		invalidateStatusCache();
 	}
-	return json(await getClaudeCodeStatus());
+	return mutationSuccess(await getClaudeCodeStatus());
 }
 
-export function putClaudeCodeConnection(request: Request): Promise<Response> {
-	return serialize(() => putClaudeCodeConnectionLocked(request));
+function mutationSuccess(status: ReturnType<typeof statusResponse>): Response {
+	const { error, ...rest } = status;
+	return json({ ok: true, ...rest, error: null, ...(error ? { probeError: error } : {}) });
+}
+/** Commit settings with ok:true/error:null, optional probeError, and the GET executable/discovered/hint fields. */
+export async function putClaudeCodeConnection(request: Request): Promise<Response> {
+	const refusal = refuseCrossOrigin(request);
+	if (refusal) return refusal;
+	const platformError = platformRefusal();
+	if (platformError) return platformError;
+	if (claudeCodeEnvOverride().enabled) return json({ error: "connection controlled by launch environment" }, 409);
+	if (!isJson(request)) return json({ error: "application/json required" }, 415);
+	let body;
+	try {
+		const reader = request.body?.getReader();
+		let bytes = 0;
+		const chunks: Uint8Array[] = [];
+		if (reader) {
+			try {
+				while (true) {
+					const { done, value } = await reader.read();
+					if (done) break;
+					bytes += value.length;
+					if (bytes > 64 * 1024) {
+						void reader.cancel().catch(() => {});
+						return json({ error: "request body too large" }, 413);
+					}
+					chunks.push(value);
+				}
+			} finally { reader.releaseLock(); }
+		}
+		body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+	} catch { return json({ error: "invalid JSON object" }, 400); }
+	if (!body || typeof body !== "object" || Array.isArray(body)) return json({ error: "invalid JSON object" }, 400);
+	if (!["off", "local", "endpoint"].includes(body.mode)) return json({ error: "invalid mode" }, 400);
+	if (Object.hasOwn(body, "executable") &&
+		(typeof body.executable !== "string" || !body.executable || !isAbsolute(body.executable))) {
+		return json({ error: "executable must be an absolute path" }, 400);
+	}
+	return serialize(() => putClaudeCodeConnectionLocked(body));
 }
 
 export function postClaudeCodeLogin(request: Request): Promise<Response> {
 	return serialize(() => postClaudeCodeLoginLocked(request));
 }
 
+/** Clear credentials with ok:true/error:null, optional probeError, and the GET executable/discovered/hint fields. */
 export function deleteClaudeCodeEndpoint(request: Request): Promise<Response> {
 	return serialize(() => deleteClaudeCodeEndpointLocked(request));
 }
