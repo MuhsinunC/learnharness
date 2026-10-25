@@ -15,7 +15,7 @@ newer() {
     awk -v a="$1" -v b="$2" 'BEGIN {na=split(a,x,"."); nb=split(b,y,"."); n=na>nb?na:nb; for(i=1;i<=n;i++){if(x[i]+0>y[i]+0)exit 0;if(x[i]+0<y[i]+0)exit 1}exit 1}'
 }
 plain() {
-    case "$1" in *"$(printf '\t')"*|*'
+    case "$1" in *$'\t'*|*'
 '*) fail 'Tabs and newlines in paths or link targets are unsupported.';; esac
 }
 exists() { [ -e "$1" ] || [ -L "$1" ]; }
@@ -76,6 +76,7 @@ ship_running() {
     awk -v label="$label" '{sub(/^[[:space:]]*[0-9]+[[:space:]]+/,"");if(index($0,label)>0)found=1}END{exit !found}' "$tmp/ps"
 }
 quit_app() {
+    printf 'Waiting for LearnHarness to quit...\n'
     was_running=no
     if app_running; then
         was_running=yes
@@ -90,6 +91,7 @@ quit_app() {
         [ "$((SECONDS-start))" -lt "$quit_timeout" ] || fail 'LearnHarness is still running. Nothing was changed.'
         sleep 1
     done
+    printf 'Waiting for updates to finish...\n'
     start=$SECONDS; absent=-1
     while :; do
         if ship_running; then
@@ -103,6 +105,7 @@ quit_app() {
     done
 }
 launch_app() {
+    printf 'Launching LearnHarness...\n'
     if [ -n "${LH_MIGRATE_LAUNCH_CMD:-}" ]; then /bin/bash -c "$LH_MIGRATE_LAUNCH_CMD" hook "$app" || true
     else open -a "$app" || true; fi
     start=$SECONDS
@@ -123,18 +126,44 @@ snapshot() {
     root=$1
     if ! exists "$root"; then return; fi
     [ -d "$root" ] && [ ! -L "$root" ] || fail 'Expected a real data/app directory.'
-    (cd "$root"; find . -print) > "$tmp/paths"
-    LC_ALL=C sort "$tmp/paths" > "$tmp/sorted"
-    while IFS= read -r path; do
+    # Validate NUL-delimited names before using the format-1 line records.
+    (cd "$root"; find . -print0) > "$tmp/paths"
+    : > "$tmp/escaped-paths"
+    : > "$tmp/links"
+    while IFS= read -r -d '' path; do
         plain "$path"
-        full=$root/$path
-        mode=$(stat -f '%Lp' "$full")
-        if [ -L "$full" ]; then kind=l; value=$(readlink "$full"); plain "$value"
-        elif [ -f "$full" ]; then kind=f; value=$(hash_file "$full")
-        elif [ -d "$full" ]; then kind=d; value=-
-        else fail 'Unsupported special file in backup.'; fi
-        printf 'entry\t%s\t%s\t%s\t%s\n' "$kind" "$mode" "$value" "$path"
-    done < "$tmp/sorted"
+        if [ -L "$root/$path" ]; then printf '%s\0' "$path" >> "$tmp/links"
+        else
+            case "$path" in *\\*)
+                if [ -f "$root/$path" ]; then printf '%s\0' "$path" >> "$tmp/escaped-paths"; fi;;
+            esac
+        fi
+    done < "$tmp/paths"
+    (
+        cd "$root"
+        find . -exec stat -f $'%HT\t%Lp\t%N' {} + > "$tmp/metadata"
+        # shasum escapes backslashes in names; hash those few paths via stdin.
+        find . -type f ! -path '*\\*' -exec shasum -a 256 {} + > "$tmp/hashes"
+        while IFS= read -r -d '' path; do
+            printf '%s  %s\n' "$(hash_file "$path")" "$path" >> "$tmp/hashes"
+        done < "$tmp/escaped-paths"
+        while IFS= read -r -d '' path; do
+            value=$(readlink "$path"); plain "$value"
+            printf '%s\t%s\n' "$path" "$value"
+        done < "$tmp/links" > "$tmp/targets"
+    )
+    awk -F '\t' '
+        FILENAME==ARGV[1] {hashes[substr($0,67)]=substr($0,1,64);next}
+        FILENAME==ARGV[2] {targets[$1]=$2;next}
+        {
+            if($1=="Regular File") {kind="f";value=hashes[$3];if(length(value)!=64)exit 1}
+            else if($1=="Directory") {kind="d";value="-"}
+            else if($1=="Symbolic Link") {kind="l";value=targets[$3];if(!($3 in targets))exit 1}
+            else exit 1
+            print $3 "\tentry\t" kind "\t" $2 "\t" value "\t" $3
+        }
+    ' "$tmp/hashes" "$tmp/targets" "$tmp/metadata" > "$tmp/records" || fail 'Unsupported or unreadable entry in backup.'
+    LC_ALL=C sort -t $'\t' -k1,1 "$tmp/records" | cut -f 2-
 }
 verify_data() {
     snapshot "$1" > "$tmp/live"

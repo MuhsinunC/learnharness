@@ -20,6 +20,7 @@ done
 [ -n "$dmg" ] || [ -z "$expected_hash" ] || fail '--sha256 requires --dmg.'
 init
 if [ -z "$dmg" ]; then
+    printf 'Downloading the release...\n'
     if [ -z "$release_json" ]; then
         release_json=$tmp/releases.json
         curl -fL 'https://api.github.com/repos/MuhsinunC/learnharness/releases?per_page=100' -o "$release_json"
@@ -69,6 +70,21 @@ if [ -z "${fork_tag:-}" ]; then
 fi
 fork_base=$(base_version "$fork_tag")
 valid_base "$fork_base" || fail 'Invalid fork version.'
+backup_root=${LH_MIGRATE_BACKUP_ROOT:-"$HOME/LearnHarness-backups"}
+plain "$backup_root"
+[ ! -L "$backup_root" ] || fail 'Backup root must not be a symlink. Nothing was changed.'
+ancestor=$backup_root
+while [ ! -d "$ancestor" ]; do ancestor=$(dirname "$ancestor"); done
+ancestor=$(cd "$ancestor" && pwd -P)
+existing=$ancestor
+while :; do
+    [ ! -e "$ancestor/.git" ] && [ ! -L "$ancestor/.git" ] || fail 'Backup root is inside a git checkout. Nothing was changed.'
+    [ "$ancestor" != / ] || break
+    ancestor=$(dirname "$ancestor")
+done
+if xcode-select -p >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+    if [ "$(git -C "$existing" rev-parse --is-inside-work-tree 2>/dev/null || true)" = true ]; then fail 'Backup root is inside a git checkout. Nothing was changed.'; fi
+fi
 quit_app
 old_version=none; old_path=none
 if [ -d "$app" ]; then
@@ -81,22 +97,8 @@ if [ -d "$app" ]; then
         exit 1
     fi
 fi
-backup_root=${LH_MIGRATE_BACKUP_ROOT:-"$HOME/LearnHarness-backups"}
-plain "$backup_root"
-[ ! -L "$backup_root" ] || fail 'Backup root must not be a symlink.'
-ancestor=$backup_root
-while [ ! -d "$ancestor" ]; do ancestor=$(dirname "$ancestor"); done
-ancestor=$(cd "$ancestor" && pwd -P)
-existing=$ancestor
-while :; do
-    [ ! -e "$ancestor/.git" ] && [ ! -L "$ancestor/.git" ] || fail 'Backup root is inside a git checkout.'
-    [ "$ancestor" != / ] || break
-    ancestor=$(dirname "$ancestor")
-done
-if xcode-select -p >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
-    if [ "$(git -C "$existing" rev-parse --is-inside-work-tree 2>/dev/null || true)" = true ]; then fail 'Backup root is inside a git checkout.'; fi
-fi
 backup=$(unique_path "$backup_root/$stamp")
+printf 'Backing up data...\n'
 present=no; tar_hash=none
 snapshot "$data" > "$tmp/data-entries"
 if [ -d "$data" ]; then present=yes; fi
@@ -113,7 +115,10 @@ if [ -d "$data" ]; then present=yes; fi
     chmod 600 "$backup/rollback-fork.sh" "$backup/migrate-common.sh"
 )
 if [ "$present" = yes ]; then tar_hash=$(hash_file "$backup/data.tar.gz"); fi
-if [ "$old_path" != none ]; then ditto "$app" "$backup/LearnHarness.app"; fi
+if [ "$old_path" != none ]; then
+    printf 'Copying the app into the backup...\n'
+    ditto "$app" "$backup/LearnHarness.app"
+fi
 manifest=$backup/manifest.txt
 (
     umask 077
@@ -129,15 +134,18 @@ manifest=$backup/manifest.txt
     } > "$manifest"
     chmod 600 "$manifest"
 )
+printf 'Verifying data...\n'
 verify_data "$data"
 if [ "$dry" = yes ]; then
     printf 'Dry run: would mount the DMG read-only, copy, remove quarantine, verify its signature, and swap %s.\n' "$app"
 else
+    printf 'Installing the fork...\n'
     mount_dmg
     prepare_app "$tmp/mnt/LearnHarness.app"
     [ "$(base_version "$(version "$new_app")")" = "$fork_base" ] || fail 'DMG app version differs from release version.'
     detach_dmg
     if [ "$old_path" != none ]; then
+        printf 'Verifying the backup app copy...\n'
         snapshot "$app" > "$tmp/old-app"
         snapshot "$backup/LearnHarness.app" > "$tmp/backup-app"
         cmp -s "$tmp/old-app" "$tmp/backup-app" || fail 'Backup app verification failed.'
@@ -148,6 +156,7 @@ else
     ! /usr/bin/grep -Fq 'com.apple.quarantine' "$tmp/xattrs" || fail 'Quarantine remains on installed app.'
     codesign --verify "$app"
 fi
+printf 'Verifying data...\n'
 verify_data "$data"
 summary
 printf 'Backup: %s\n' "$backup"
