@@ -2,7 +2,7 @@ import { accessSync, constants, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { PATHS } from "../../config.ts";
 import { enableClaudeCodeProvider } from "../agent/models.ts";
-import { envKeysIgnored, isFillGapped } from "./keys.ts";
+import { isFillGapped } from "./keys.ts";
 
 type BootDecision =
 	| { kind: "unset" }
@@ -11,12 +11,13 @@ type BootDecision =
 const BOOT_KEY = Symbol.for("lh.claudeCodeBoot");
 const bootState = globalThis as Record<symbol, BootDecision | undefined>;
 
-function decide(env: NodeJS.ProcessEnv): BootDecision {
+function decide(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): BootDecision {
 	const p = env.LH_CLAUDE_CODE_EXECUTABLE;
 	const reject = (reason: string): BootDecision => ({ kind: "rejected", reason });
-	if (envKeysIgnored()) return p ? reject("LH_IGNORE_ENV_KEYS=1") : { kind: "unset" };
+	if (env.LH_IGNORE_ENV_KEYS === "1") return p ? reject("LH_IGNORE_ENV_KEYS=1") : { kind: "unset" };
 	if (!p) return { kind: "unset" };
-	if (process.platform === "win32") return reject("Windows is not supported");
+	if (platform === "win32") return reject("Windows is not supported");
+	if (platform !== "darwin" && platform !== "linux") return reject(`unsupported platform ${platform}`);
 	if (isFillGapped("LH_CLAUDE_CODE_EXECUTABLE")) return reject("set only via auth.json");
 	if (!isAbsolute(p)) return reject("not an absolute path");
 	try {
@@ -32,10 +33,10 @@ function decide(env: NodeJS.ProcessEnv): BootDecision {
 	return { kind: "accepted", path: p };
 }
 
-export function bootClaudeCodeProvider(env = process.env): void {
+export function bootClaudeCodeProvider(env = process.env, platform: NodeJS.Platform = process.platform): void {
 	let decision = bootState[BOOT_KEY];
 	if (!decision) {
-		decision = bootState[BOOT_KEY] = decide(env);
+		decision = bootState[BOOT_KEY] = decide(env, platform);
 		if (decision.kind === "rejected") {
 			console.warn(`claude-code: LH_CLAUDE_CODE_EXECUTABLE ignored (${decision.reason})`);
 		}

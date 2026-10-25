@@ -38,7 +38,9 @@ import { jobStore } from "../src/store/jobs.ts";
 import { buildAnswer, dismissedAnswer, normalizeOptions, resolveCorrect, type QuestionData } from "../src/core/question-core.ts";
 import { danglingQuestionOf, endsInDismissal, needsContinuation, newAnswerResult } from "../src/core/native-messages.ts";
 import { projectView } from "../src/core/view.ts";
-import type { PiEngine } from "../src/agent/models.ts";
+import { enableClaudeCodeProvider, resetClaudeCodeProviderForTests, type PiEngine } from "../src/agent/models.ts";
+import { validateChatSettings, validateModelsSettings } from "../src/server/model-catalog.ts";
+import { providerKeyPresent } from "../src/server/keys.ts";
 import type { LhMessage } from "../src/core/native-messages.ts";
 
 // Route-level pin (the chat-birth-stamp pattern): the dismiss route's
@@ -995,6 +997,34 @@ describe("the key-presence turn gate (provider-key interlude, 2026-09-25)", () =
 			assert.equal(chatStore.getChat(chat.id)!.messages.length, 0, "no write-ahead persist before the gate");
 		} finally {
 			if (saved !== undefined) process.env.TOGETHER_API_KEY = saved;
+		}
+	});
+
+	it("a claude-code pin after a restart without the executable refuses with provider_key_missing, never a throw", async () => {
+		const chat = chatStore.createChat("Test: claude-code pin outlives its provider");
+		createdChats.push(chat.id);
+		const model = { provider: "claude-code", id: "claude-opus-5-5" };
+		try {
+			// Registered: the pin validates for both the chat and the strong slot.
+			enableClaudeCodeProvider("/nonexistent/claude");
+			assert.equal(providerKeyPresent("claude-code"), true);
+			assert.deepEqual(validateChatSettings({ model }), { ok: true });
+			assert.deepEqual(validateModelsSettings({ strong: { model } }), { ok: true });
+			chatStore.saveSettings(chat.id, { model });
+			// Restart without LH_CLAUDE_CODE_EXECUTABLE: the provider is gone, the pin stays.
+			resetClaudeCodeProviderForTests();
+			assert.equal(providerKeyPresent("claude-code"), false);
+			const res = await handleChatInput(chat.id, { type: "text", text: "teach me something" }, agentFactory(scriptedTeacher(defaultLesson).engine));
+
+			assert.equal(res.status, 503, "the key-presence gate refuses before the engine build");
+			const body = (await res.json()) as { code: string; provider: string; slots: string[] };
+			assert.equal(body.code, "provider_key_missing");
+			assert.equal(body.provider, "claude-code");
+			assert.deepEqual(body.slots, ["strong"]);
+			assert.equal(isTurnRunning(chat.id), false, "the refusal never registers a live turn");
+			assert.equal(chatStore.getChat(chat.id)!.messages.length, 0, "no write-ahead persist before the gate");
+		} finally {
+			resetClaudeCodeProviderForTests();
 		}
 	});
 
