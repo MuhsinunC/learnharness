@@ -47,21 +47,33 @@ const usage = { input_tokens: 11, output_tokens: 7, cache_read_input_tokens: 13,
 const sdk = (message: unknown) => message as SDKMessage;
 const event = (type: string, fields = {}) => sdk({ type: "stream_event", event: { type, ...fields } });
 type Call = { prompt: SDKUserMessage[]; options: Options; file?: string; parked: string[] };
-type Step = { text: string; model?: string; tool?: { name: string; input: Record<string, unknown> } };
+type Step = { text: string; model?: string; beforeReply?: () => Promise<void>; tool?: { name: string; input: Record<string, unknown> } };
+const networkAttempts: string[] = [];
 
 beforeEach(() => {
 	// Fail before any transport can leave the process, including accidental provider fallbacks.
-	mock.method(globalThis, "fetch", () => { assert.fail("network fetch forbidden"); });
-	mock.method(Socket.prototype, "connect", () => { assert.fail("network socket forbidden"); });
+	networkAttempts.length = 0;
+	mock.method(globalThis, "fetch", (input: RequestInfo | URL) => {
+		networkAttempts.push(`fetch ${input instanceof Request ? input.url : String(input)}`);
+		assert.fail("network fetch forbidden");
+	});
+	mock.method(Socket.prototype, "connect", (...args: unknown[]) => {
+		networkAttempts.push(`socket ${args.map(String).join(" ")}`);
+		assert.fail("network socket forbidden");
+	});
 	resetClaudeCodeProviderForTests();
 	resetClaudeCodeStreamForTests();
 	settingsStore.writeSettings({ version: 1, models: { strong: { model: strong }, cheap: { model: cheap } }, graph: { enabled: false } });
 });
 afterEach(async () => {
 	await tick();
-	mock.restoreAll();
-	resetClaudeCodeProviderForTests();
-	resetClaudeCodeStreamForTests();
+	try {
+		assert.deepEqual(networkAttempts, []);
+	} finally {
+		mock.restoreAll();
+		resetClaudeCodeProviderForTests();
+		resetClaudeCodeStreamForTests();
+	}
 	assert.equal(providerKeyPresent("claude-code"), false);
 });
 after(() => {
@@ -91,7 +103,8 @@ function register(steps: Step[]) {
 		const closed = new Promise<IteratorResult<SDKMessage>>(resolve => { close = () => resolve({ done: true, value: undefined }); });
 		const iterator = (async function* () {
 			for await (const message of prompt as AsyncIterable<SDKUserMessage>) call.prompt.push(message);
-			yield event("message_start", { message: { id: `msg-${calls.length}`, usage } });
+			await step.beforeReply?.();
+			yield event("message_start", { message: { id: `msg-${calls.length}`, usage: { ...usage, output_tokens: 1 } } });
 			yield event("content_block_start", { index: 0, content_block: { type: "text", text: "" } });
 			yield event("content_block_delta", { index: 0, delta: { type: "text_delta", text: step.text } });
 			yield event("content_block_stop", { index: 0 });
@@ -138,13 +151,17 @@ async function post(chatId: string, input: ChatInput) {
 	const turn = runningTurn(chatId);
 	assert.ok(turn, "subscribe immediately after POST acknowledgement");
 	const body = await new Response(turn.subscribe()).text();
+	assertSettledBody(body);
+	assert.equal(runningTurn(chatId), undefined);
+	await tick();
+	return chatStore.getChat(chatId)!;
+}
+
+function assertSettledBody(body: string) {
 	const events = body.split("\n").filter(line => line.startsWith("data: ") && line !== "data: [DONE]").map(line => JSON.parse(line.slice(6)));
 	assert.ok(events.some(e => e.type === "agent_end"), body);
 	assert.ok(!events.some(e => e.type === "error"), body);
 	assert.ok(body.endsWith("data: [DONE]\n\n"));
-	assert.equal(runningTurn(chatId), undefined);
-	await tick();
-	return chatStore.getChat(chatId)!;
 }
 
 function noSessionFiles() {
@@ -214,24 +231,59 @@ test("plan_init executes on the server and makes exactly two queries within one 
 });
 
 test("a background sub-agent resolves the cheap claude-code slot and leaves no session files", { timeout: 8000 }, async () => {
-	const calls = register([{ text: "The planets orbit the sun.", model: "claude-haiku-5-5" }, { text: "Research received." }]);
+	let releaseWake!: () => void, wakeStarted!: () => void;
+	const wakeGate = new Promise<void>(resolve => { releaseWake = resolve; });
+	const started = new Promise<void>(resolve => { wakeStarted = resolve; });
+	const calls = register([
+		{ text: "Check search availability.", model: "claude-haiku-5-5", tool: { name: "web_search", input: { query: "planet order" } } },
+		{ text: "The planets orbit the sun.", model: "claude-haiku-5-5" },
+		{ text: "Research received.", beforeReply: () => { wakeStarted(); return wakeGate; } },
+	]);
 	const jobRunner = createJobRunner({ chatStore, jobStore, deliver: deliverJobResult, engineFor: (role) => {
 		const spec = resolveRoleSpec(role, settingsStore.readSettings());
 		return spec ? piEngineForSpec(spec) : undefined;
 	} });
 	const chat = teacherChat();
 	const job = jobStore.createJob({ kind: "research", chatId: chat.id, toolCallId: "research-1" });
-	await jobRunner.runJob(job.id, { question: "Summarize planet order" });
-	const wake = runningTurn(chat.id);
-	if (wake) await new Response(wake.subscribe()).text();
+	const jobRun = jobRunner.runJob(job.id, { question: "Summarize planet order" });
+	try {
+		await started;
+		const wake = runningTurn(chat.id);
+		assert.ok(wake, "job delivery started the teacher wake turn");
+		const body = new Response(wake.subscribe()).text();
+		releaseWake();
+		assertSettledBody(await body);
+	} finally {
+		releaseWake();
+		await jobRun;
+	}
 	await tick();
 	const saved = jobStore.getJob(job.id)!;
-	assert.equal(calls.length, 2);
+	assert.equal(calls.length, 3);
+	assert.deepEqual(calls[0]!.parked, ["web_search"]);
+	const resumed = calls[1]!;
+	assert.equal(resumed.options.extraArgs?.model, "claude-haiku-5-5");
+	assert.ok(resumed.options.resume);
+	assert.ok(resumed.file);
+	assert.match(resumed.file, /tool_result/);
+	assert.match(resumed.file, /web_search is not available/);
 	assert.equal(saved.status, "done", saved.error);
 	assert.equal((saved.result as { brief: string }).brief, "The planets orbit the sun.");
 	assert.equal(saved.usage!.model, "claude-code:claude-haiku-5-5");
 	assert.equal(jobCost(saved), null);
+	assert.deepEqual(chatStore.getChat(chat.id)!.messages.filter(m => m.role === "assistant").at(-1)!.content,
+		[{ type: "text", text: "Research received." }]);
 	noSessionFiles();
+});
+
+test("network guard records attempts even when the caller catches its error", async () => {
+	try {
+		await fetch("https://example.invalid/guard-check");
+	} catch {
+		// Simulate production swallowing a transport error.
+	}
+	assert.deepEqual(networkAttempts, ["fetch https://example.invalid/guard-check"]);
+	networkAttempts.length = 0;
 });
 
 test("usage persists with token counts and reads as unpriced null", { timeout: 8000 }, async () => {
