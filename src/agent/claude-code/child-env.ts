@@ -22,7 +22,7 @@ export function buildChildEnv(source: NodeJS.ProcessEnv = process.env, endpoint?
 	}
 	if (executable) {
 		const dir = dirname(executable);
-		env.PATH = [dir, ...(source.PATH ?? "").split(delimiter).filter(entry => entry && entry !== dir)].join(delimiter);
+		env.PATH = [dir, ...(source.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin").split(delimiter).filter(entry => entry && entry !== dir)].join(delimiter);
 	}
 	return { ...env, ...CC_CHILD_ENV, ...(endpoint ? { ANTHROPIC_BASE_URL: endpoint.baseUrl, ANTHROPIC_AUTH_TOKEN: endpoint.token } : {}) };
 }
