@@ -15,7 +15,7 @@ const sweepKey = Symbol.for("lh.claudeCode.swept");
 const state = globalThis as typeof globalThis & { [sweepKey]?: Set<string> };
 export function resetClaudeCodeStreamForTests(): void { delete state[sweepKey]; }
 export const defaultLoadQuery = () => import("@anthropic-ai/claude-agent-sdk").then(m => m.query);
-type Deps = { endpoint?: () => ClaudeCodeEndpoint | null; executable: string; dataDir: string; claudeDir: string; loadQuery: () => Promise<typeof query>; logger: EventMapperLogger; parkQuietMs?: number; cleanupWaitMs?: number };
+type Deps = { registrationError?: () => string | null; endpoint?: () => ClaudeCodeEndpoint | null; executable: string; dataDir: string; claudeDir: string; loadQuery: () => Promise<typeof query>; logger: EventMapperLogger; parkQuietMs?: number; cleanupWaitMs?: number };
 
 /** options.maxTokens and LH_MAX_OUTPUT_TOKENS do not apply to this provider (no verified SDK surface). */
 export function streamClaudeCode(model: Model<any>, transcript: TranscriptContext, options: SimpleStreamOptions | undefined, deps: Deps): AssistantMessageEventStream {
@@ -108,6 +108,8 @@ export function streamClaudeCode(model: Model<any>, transcript: TranscriptContex
 			async function* prompt(): AsyncGenerator<SDKUserMessage> {
 				yield { type: "user", message: { role: "user", content: content as SDKUserMessage["message"]["content"] }, parent_tool_use_id: null, session_id: "" };
 			}
+			const registrationError = deps.registrationError?.();
+			if (registrationError) throw new Error(registrationError);
 			child = queryFn({ prompt: prompt(), options: queryOptions });
 			const iterator = child[Symbol.asyncIterator]();
 			while (!mapper.ended) {
