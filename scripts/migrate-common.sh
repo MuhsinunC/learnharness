@@ -8,6 +8,7 @@ export PATH LC_ALL=C
 
 bundle_id=com.learnharness.LearnHarness
 state_msg='Nothing was changed.'
+ship_status_warned=no; ship_record_noted=no
 fail() { printf '%s\n' "$*" >&2; exit 1; }
 hash_file() {
     digest=$(shasum -a 256 < "$1") || fail "Could not compute the SHA-256 digest of $1. $state_msg"
@@ -149,7 +150,7 @@ cleanup() {
 # Test-only hooks: bash -c COMMAND hook ARG. Quit/launch get the app path as $1;
 # LH_NO_GUI=1 skips the launch hook, open, and window-process wait.
 # ps gets the field (comm or command) and prints "pid comm" or "pid command";
-# launchctl gets the ShipIt label, prints launchctl-style output, and exits 0
+# launchctl gets the ShipIt label, prints launchctl list-style output, and exits 0
 # when loaded or non-zero when not loaded; lsappinfo gets the bundle id and prints each
 # instance's ASN line followed by its "pid = N" line.
 # Test-only timeout overrides: QUIT_TIMEOUT=30, SHIPIT_TIMEOUT=60,
@@ -209,14 +210,37 @@ gui_running() {
 }
 ship_running() {
     label=$bundle_id.ShipIt
+    loaded=no
     if [ -n "${LH_MIGRATE_LAUNCHCTL_CMD:-}" ]; then
-        if /bin/bash -c "$LH_MIGRATE_LAUNCHCTL_CMD" hook "$label" > "$tmp/launchctl" 2>/dev/null; then return 0; fi
+        if /bin/bash -c "$LH_MIGRATE_LAUNCHCTL_CMD" hook "$label" > "$tmp/launchctl" 2>/dev/null; then loaded=yes; fi
     else
-        if launchctl list "$label" > "$tmp/launchctl" 2>/dev/null; then return 0; fi
+        if launchctl list "$label" > "$tmp/launchctl" 2>/dev/null; then loaded=yes; fi
     fi
-    if exists "$HOME/Library/Caches/$label/ShipItState.plist"; then return 0; fi
+    if [ "$loaded" = yes ]; then
+        if /usr/bin/grep -Eq '^[[:space:]]*"PID"[[:space:]]*=[[:space:]]*[0-9]+;' "$tmp/launchctl"; then return 0; fi
+        last_exit_status=$(awk '
+            /^[[:space:]]*"LastExitStatus"[[:space:]]*=[[:space:]]*-?[0-9]+;/ {
+                sub(/^[^=]*=[[:space:]]*/, ""); sub(/;.*/, "")
+                print ($0+0 == 0 ? "done" : "retry"); exit
+            }' "$tmp/launchctl")
+        case "$last_exit_status" in
+            retry) return 0;;
+            done) ;;
+            *)
+                if [ "$ship_status_warned" = no ]; then
+                    printf 'Could not read the launchd status of %s; treating it as an update still installing.\n' "$label" >&2
+                    ship_status_warned=yes
+                fi
+                return 0;;
+        esac
+    fi
     processes command > "$tmp/ps" || fail "Could not read the process listing. $state_msg"
-    awk -v label="$label" '{sub(/^[[:space:]]*[0-9]+[[:space:]]+/,"");if(index($0,label)>0)found=1}END{exit !found}' "$tmp/ps"
+    if awk -v label="$label" '{sub(/^[[:space:]]*[0-9]+[[:space:]]+/,"");if(index($0,label)>0)found=1}END{exit !found}' "$tmp/ps"; then return 0; fi
+    if exists "$HOME/Library/Caches/$label/ShipItState.plist" && [ "$ship_record_noted" = no ]; then
+        printf 'Note: an old update record was found; continuing.\n'
+        ship_record_noted=yes
+    fi
+    return 1
 }
 request_quit() {
     if [ -n "${LH_MIGRATE_QUIT_CMD:-}" ]; then
