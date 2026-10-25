@@ -70,6 +70,8 @@ export class EventMapper {
 	get output(): AssistantMessage { return this.message; }
 	get ended(): boolean { return this.terminal; }
 	get hasOpenBlocks(): boolean { return this.activeBlockIndices.size > 0; }
+	/** True when the current request was opened by a stream message_start (not the non-streaming fallback). */
+	get currentRequestStreamed(): boolean { return this.currentRequest?.fromStream === true; }
 	private get blocks(): Array<any> { return this.output.content; }
 	handle(message: SDKMessage): void {
 		if ("parent_tool_use_id" in message && message.parent_tool_use_id != null) {
