@@ -40,16 +40,20 @@ function fetchCatalog(force = false): Promise<ModelCatalogResponse> {
 	return catalogInflight;
 }
 
-export function useModelCatalog(): { catalog: ModelCatalogResponse | undefined; refresh: () => void } {
+export function useModelCatalog(): { catalog: ModelCatalogResponse | undefined; failed: boolean; refresh: () => void } {
 	const [catalog, setCatalog] = useState(catalogCache);
+	const [failed, setFailed] = useState(false);
 	useEffect(() => {
 		if (catalogCache) return;
 		let alive = true;
 		fetchCatalog()
-			.then((c) => alive && setCatalog(c))
+			.then((c) => {
+				if (!alive) return;
+				setCatalog(c);
+				setFailed(false);
+			})
 			.catch(() => {
-				/* the picker stays closed on failure; the buttons still
-				   display the strong slot from the record fetch */
+				if (alive) setFailed(true);
 			});
 		return () => {
 			alive = false;
@@ -57,12 +61,15 @@ export function useModelCatalog(): { catalog: ModelCatalogResponse | undefined; 
 	}, []);
 	const refresh = useCallback(() => {
 		fetchCatalog(true)
-			.then(setCatalog)
+			.then((c) => {
+				setCatalog(c);
+				setFailed(false);
+			})
 			.catch(() => {
 				/* refresh is best-effort: the cached list stays on failure */
 			});
 	}, []);
-	return { catalog, refresh };
+	return { catalog, failed, refresh };
 }
 
 /** provider:id → contextWindow over the cached catalog — the client-side

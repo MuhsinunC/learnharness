@@ -8,7 +8,7 @@ import { DictationBar, joinDictation, useDictation } from "@/components/dictatio
 import { useFieldCycle } from "@/components/field-cycle";
 import { SidebarToggle } from "@/components/sidebar";
 import { SetupDialog } from "@/components/setup-dialog";
-import { useStrongKeyless, useZeroKeys, ZeroKeysPill } from "@/components/setup-cta";
+import { ClaudeCodeOffNotice, usePreSendRemedy, useZeroKeys, ZeroKeysPill } from "@/components/setup-cta";
 import { StatsBar } from "@/components/stats-bar";
 import { ChainTableOverlay } from "@/components/chain-table.tsx";
 import { ComposerActions, NodePickerControl } from "@/components/composer-actions";
@@ -279,10 +279,8 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 	// The zero-keys truth (zero-keys wave): no provider key = the pill
 	// takes precedence over the models CTA (keys come first in the chain).
 	const zeroKeys = useZeroKeys();
-	// The strong slot's keyless truth (pre-send key guards, owner interlude
-	// 2026-09-25): keys may exist generally while the STRONG slot's pinned
-	// provider has none — the same skip-everything treatment on send.
-	const strongKeyless = useStrongKeyless();
+	const remedy = usePreSendRemedy(zeroKeys);
+	const [noticeShown, setNoticeShown] = useState(false);
 	const [setupOpen, setSetupOpen] = useState(false);
 
 	const send = useCallback(() => {
@@ -292,13 +290,10 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 			setSetupOpen(true);
 			return;
 		}
-		// The pre-send KEY guards (owner interlude, no-orphan-chats): guard
-		// BEFORE startDraftSession creates the record — a refused first
-		// send would otherwise leave an orphan error-shell chat in the
-		// sidebar. Same skip-everything-and-open-setup treatment; the
-		// server's 503 gate remains the belt for /chat/[id] sessions.
-		if (zeroKeys || strongKeyless) {
-			setSetupOpen(true);
+		// Refuse before creating an orphan session; subscription pins need a notice.
+		if (remedy) {
+			if (remedy === "notice") setNoticeShown(true);
+			else setSetupOpen(true);
 			return;
 		}
 		setBusy(true);
@@ -308,7 +303,7 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 				else setBusy(false);
 			})
 			.catch(() => setBusy(false));
-	}, [busy, router, configured, zeroKeys, strongKeyless]);
+	}, [busy, router, configured, remedy]);
 
 	return (
 		<>
@@ -347,7 +342,9 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 					/>
 				}
 				setupCta={
-					zeroKeys ? (
+					noticeShown && remedy === "notice" ? (
+						<ClaudeCodeOffNotice />
+					) : zeroKeys ? (
 						<ZeroKeysPill inline onOpen={() => setSetupOpen(true)} />
 					) : (
 						!configured && (
