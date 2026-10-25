@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { lstatSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
+import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { createSession, deleteSession, getProjectDir, normalizeProjectPath, type Message } from "cc-session-io";
 
 import type { AnthropicMessage } from "./convert.ts";
 
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const CWD_SCAN_BYTES = 64 * 1024;
 const activeSessionsKey = Symbol.for("learnharness.claude-code.active-sessions");
 
 function activeSessions(): Set<string> {
@@ -42,7 +43,43 @@ export function deleteSessionFile(id: string, cwd: string, claudeDir: string): v
 	deleteSession(id, cwd, claudeDir);
 }
 
-/** Liveness is in-process only: one server owns a data dir; cross-process liveness is out of scope. */
+function recordedCwd(path: string): string | undefined {
+	const fd = openSync(path, "r");
+	try {
+		const buffer = Buffer.alloc(CWD_SCAN_BYTES);
+		let total = 0;
+		let lineStart = 0;
+		while (total < CWD_SCAN_BYTES) {
+			const bytes = readSync(fd, buffer, total, Math.min(4096, CWD_SCAN_BYTES - total), null);
+			total += bytes;
+			const available = buffer.subarray(0, total);
+			while (lineStart < total) {
+				let lineEnd = available.indexOf(0x0A, lineStart);
+				if (lineEnd === -1) {
+					if (bytes !== 0) break;
+					lineEnd = total;
+				}
+				const line = available.subarray(lineStart, lineEnd).toString("utf8");
+				lineStart = lineEnd + 1;
+				try {
+					const record = JSON.parse(line);
+					if (record !== null && typeof record === "object" && typeof record.cwd === "string") return record.cwd;
+				} catch {
+					continue;
+				}
+			}
+			if (bytes === 0) break;
+		}
+	} finally {
+		closeSync(fd);
+	}
+}
+
+/**
+ * Deletes only old inactive sessions whose recorded cwd is this workdir, with their companions via deleteSessionFile.
+ * Orphan companion dirs are deliberately left alone because they carry no ownership evidence.
+ * Liveness is in-process only: one server owns a data dir; cross-process liveness is out of scope.
+ */
 export function sweepStaleSessions(
 	cwd: string,
 	claudeDir: string,
@@ -62,7 +99,8 @@ export function sweepStaleSessions(
 		const id = entry.name.slice(0, -".jsonl".length);
 		if (!SESSION_ID.test(id) || activeSessions().has(id)) continue;
 		try {
-			if (lstatSync(join(projectDir, entry.name)).mtimeMs < now - olderThanMs) {
+			const path = join(projectDir, entry.name);
+			if (lstatSync(path).mtimeMs < now - olderThanMs && recordedCwd(path) === normalizeProjectPath(cwd)) {
 				deleteSessionFile(id, cwd, claudeDir);
 			}
 		} catch (error) {
