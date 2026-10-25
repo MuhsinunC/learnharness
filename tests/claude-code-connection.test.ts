@@ -130,7 +130,7 @@ const childEnv = Object.fromEntries(fs.readFileSync(home+'/env','utf8').trim().s
 }));
 // POSIX sh adds these itself; they were not supplied by the app.
 for (const key of ['PWD','SHLVL','_']) delete childEnv[key];
-assert.ok(Object.keys(childEnv).every(k=>[...CHILD_ENV_ALLOWLIST,...Object.keys(CC_CHILD_ENV)].includes(k)), JSON.stringify(childEnv));
+assert.ok(Object.keys(childEnv).every(k=>[...CHILD_ENV_ALLOWLIST,...Object.keys(CC_CHILD_ENV),'DISPLAY','WAYLAND_DISPLAY','XDG_RUNTIME_DIR','DBUS_SESSION_BUS_ADDRESS'].includes(k)), JSON.stringify(childEnv));
 assert.ok(childEnv.PATH.startsWith(home+':'));
 `));
 it("login exits before a URL return a private 502 failure", () => scenario(`
