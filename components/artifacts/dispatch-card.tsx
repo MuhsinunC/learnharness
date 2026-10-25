@@ -4,7 +4,7 @@ import { useContext } from "react";
 import { CheckIcon, SettingsIcon, XIcon } from "lucide-react";
 import { JobsContext } from "@/components/jobs-context";
 import { ChatActionsContext } from "@/components/chat";
-import { CLAUDE_CODE_OFF_REFUSAL, isModelsRefusal, isProviderKeyRefusal, type JobKind, type JobRecord } from "@/src/core";
+import { CLAUDE_CODE_OFF_REFUSAL, isClaudeCodeOffRefusal, isModelsRefusal, isProviderKeyRefusal, type JobKind, type JobRecord } from "@/src/core";
 import { BrailleSpinner } from "@/components/braille-spinner";
 
 /**
@@ -43,7 +43,7 @@ export function DispatchCard({ toolCallId, kind }: { toolCallId: string; kind: J
 	if (isModelsRefusal(job.error)) {
 		return <DispatchRefusedCard label={label} line="needs model setup" button="Set up models" />;
 	}
-	if (job.error === CLAUDE_CODE_OFF_REFUSAL) {
+	if (isClaudeCodeOffRefusal(job.error)) {
 		return <DispatchRefusedCard label={label} line={CLAUDE_CODE_OFF_REFUSAL} />;
 	}
 	if (isProviderKeyRefusal(job.error)) {

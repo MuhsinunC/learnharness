@@ -20,7 +20,7 @@ import { QuestionDock } from "../components/question-dock.tsx";
 import { ProbeDoneCard } from "../components/artifacts/probe-done-card.tsx";
 import { DispatchCard } from "../components/artifacts/dispatch-card.tsx";
 import { JobsContext } from "../components/jobs-context.ts";
-import { CLAUDE_CODE_OFF_REFUSAL } from "../src/core/settings.ts";
+import { CLAUDE_CODE_OFF_REFUSAL, LEGACY_CLAUDE_CODE_OFF_REFUSAL } from "../src/core/settings.ts";
 import { ChatActionsContext } from "../components/chat.tsx";
 import type { JobRecord } from "../src/core/contracts.ts";
 import { AnsweredCard } from "../components/answered-card.tsx";
@@ -124,8 +124,8 @@ describe("DispatchCard — the BYOK refusal tone (owner, 2026-09-22)", () => {
 		assert.ok(!html.includes("failed"));
 	});
 
-	it("a Claude Code refusal shows restart instructions with no key setup action", () => {
-		const html = renderToStaticMarkup(inJobs([job({ error: CLAUDE_CODE_OFF_REFUSAL })]));
+	for (const error of [CLAUDE_CODE_OFF_REFUSAL, LEGACY_CLAUDE_CODE_OFF_REFUSAL]) it(`a Claude Code refusal shows current setup instructions: ${error}`, () => {
+		const html = renderToStaticMarkup(inJobs([job({ error })]));
 		assert.ok(html.includes('data-testid="dispatch-refused"'));
 		assert.ok(html.includes(CLAUDE_CODE_OFF_REFUSAL.replaceAll("'", "&#x27;")));
 		assert.ok(!html.includes("dispatch-setup-link"));

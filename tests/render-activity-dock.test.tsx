@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { ActivitySection, formatElapsed, toBlobs, type ActivityFeed, type FeedExtraction } from "../components/activity-dock.tsx";
-import { CLAUDE_CODE_OFF_REFUSAL } from "../src/core/settings.ts";
+import { CLAUDE_CODE_OFF_REFUSAL, LEGACY_CLAUDE_CODE_OFF_REFUSAL } from "../src/core/settings.ts";
 import { formatTokens, formatUsd } from "../components/usage-format.ts";
 import { jobCost } from "../src/server/pricing.ts";
 
@@ -253,7 +253,7 @@ describe("activity section render", () => {
 	});
 });
 
-it("the dock describes a disabled subscription provider without asking for a key", () => {
-	const blob = toBlobs({ jobs: [job({ status: "error", error: CLAUDE_CODE_OFF_REFUSAL })], extractions: [] })[0]!;
+for (const error of [CLAUDE_CODE_OFF_REFUSAL, LEGACY_CLAUDE_CODE_OFF_REFUSAL]) it(`the dock describes a disabled subscription without asking for a key: ${error}`, () => {
+	const blob = toBlobs({ jobs: [job({ status: "error", error })], extractions: [] })[0]!;
 	assert.equal(blob.activity, "Claude Code is off");
 });
