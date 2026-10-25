@@ -80,3 +80,6 @@ export * from "./coverage.ts";
 // ONE session→markdown formatter — the extractor's view and the user-facing
 // export share it. Pure, browser-safe.
 export * from "./session-markdown.ts";
+// claude-code-endpoint.ts (LH-27/LH-23): the endpoint type and the pure URL
+// predicate the settings card and the server share. Browser-safe.
+export * from "./claude-code-endpoint.ts";
