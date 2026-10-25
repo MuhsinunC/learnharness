@@ -111,9 +111,16 @@ test("abort before spawning and during a pending pull preserves partial output a
 	const before = new AbortController(); before.abort();
 	assert.equal((await collect(h.run(transcript(history()), before.signal))).at(-1)?.type, "error"); assert.equal(h.calls.length, 0);
 	const controller = new AbortController(); const stream = h.run(transcript(history()), controller.signal);
+	let closedAtError = 0, interruptedAtError = 0;
+	const push = stream.push.bind(stream);
+	stream.push = e => {
+		if (e.type === "error") { closedAtError = h.calls[0]!.closes; interruptedAtError = h.calls[0]!.interrupts; }
+		push(e);
+	};
 	await until(() => (h.calls[0]?.pulls ?? 0) === 5); controller.abort();
 	const events = await collect(stream); const last = events.at(-1) as any;
 	assert.equal(last.reason, "aborted"); assert.equal(last.error.errorMessage, "aborted"); assert.equal(last.error.content[0].text, "OK");
+	assert.equal(closedAtError, 1); assert.equal(interruptedAtError, 1);
 	assert.equal(h.calls[0]!.closes, 1); noFiles(h);
 });
 for (const mode of ["throw", "end", "result"] as const) test(`failure ${mode} deletes session`, async () => {

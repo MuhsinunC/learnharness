@@ -28,7 +28,7 @@ export function streamClaudeCode(model: Model<any>, transcript: TranscriptContex
 		let wake!: () => void;
 		const ended = new Promise<undefined>(resolve => { wake = () => resolve(undefined); });
 		const warn = (error: unknown) => deps.logger.warn(`claude-code: ${String(error)}`);
-		const abort = () => { mapper.fail("aborted", "aborted"); wake(); stopChild("aborted"); };
+		const abort = () => { stopChild("aborted"); mapper.fail("aborted", "aborted"); wake(); };
 		function stopChild(reason: string): void {
 			if (closed || !child) return;
 			closed = true;
