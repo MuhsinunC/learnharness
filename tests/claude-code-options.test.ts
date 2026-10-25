@@ -70,7 +70,7 @@ describe("Claude Code query contract", () => {
 				settings: { autoMemoryEnabled: false, includeGitInstructions: false, claudeMdExcludes: ["**/CLAUDE.md", "**/.claude/rules/**"] },
 				extraArgs: { model: "claude-test", "strict-mcp-config": null },
 				maxTurns: 1, persistSession: false,
-				env: { HOME: home, PATH: "/abs/bin", ...flags }, permissionMode: "dontAsk", settingSources: [], tools: [],
+				env: { HOME: home, PATH: "/abs/bin:/usr/bin:/bin:/usr/sbin:/sbin", ...flags }, permissionMode: "dontAsk", settingSources: [], tools: [],
 				allowedTools: ["mcp__custom-tools__*"], strictMcpConfig: true,
 			});
 			assert.equal(buildQueryOptions(required).maxTurns, 1);
@@ -81,6 +81,7 @@ describe("Claude Code query contract", () => {
 	it("passes exactly allowlisted values and child-only flags from a poisoned environment", () => {
 		const poison = {
 			ANTHROPIC_API_KEY: "poison", ANTHROPIC_BASE_URL: "poison", CLAUDE_CONFIG_DIR: "poison",
+			DISPLAY: "poison", WAYLAND_DISPLAY: "poison", XDG_RUNTIME_DIR: "poison", DBUS_SESSION_BUS_ADDRESS: "poison",
 			HTTPS_PROXY: "poison", HTTP_PROXY: "poison", ALL_PROXY: "poison", NO_PROXY: "poison",
 			OPENROUTER_API_KEY: "poison", CLAUDE_CODE_OAUTH_TOKEN: "poison", LH_CLAUDE_CODE_EXECUTABLE: "poison",
 		};
@@ -108,6 +109,11 @@ describe("Claude Code query contract", () => {
 			assert.equal(childClaudeDir(), join(home, ".claude"));
 			assert.equal(childClaudeDir({ NODE_ENV: "test" }), join(homedir(), ".claude"));
 		});
+	});
+
+	it("supplies system search directories when PATH is absent", () => {
+		assert.equal(buildChildEnv({ NODE_ENV: "test" }, null, "/example/bin/claude").PATH,
+			"/example/bin:/usr/bin:/bin:/usr/sbin:/sbin");
 	});
 
 	it("requires an absolute executable path", () => {

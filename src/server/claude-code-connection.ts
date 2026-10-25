@@ -5,7 +5,9 @@ import { delimiter, isAbsolute, join } from "node:path";
 import { buildChildEnv } from "../agent/claude-code/child-env.ts";
 import { piModels } from "../agent/models.ts";
 import { applyClaudeCodeSettings, claudeCodeEnvOverride } from "./claude-code-boot.ts";
-import { claudeExecutableProblem, readClaudeCodeSettings, writeClaudeCodeSettings } from "./claude-code-settings.ts";
+import {
+	claudeExecutableProblem, claudeSettingsError, claudeSettingsGeneration, readClaudeCodeSettings, writeClaudeCodeSettings,
+} from "./claude-code-settings.ts";
 import { clearEndpointConfig, endpointStatus, isAllowedEndpointUrl, writeEndpointConfig } from "./claude-code-endpoint.ts";
 
 export type DiscoveryRoots = { pathEnv: string | undefined; home: string; fixedDirs: string[] };
@@ -63,6 +65,18 @@ export async function readClaudeAuthStatus(executable: string) {
 		return { loggedIn: value.loggedIn === true, account, error: null };
 	} catch { return { loggedIn: false, account: null, error: "unable to read login status" }; }
 }
+const mutationKey = Symbol.for("lh.claudeCodeMutations.v2");
+const mutations = globalThis as typeof globalThis & { [mutationKey]?: { tail: Promise<unknown> } };
+const mutation = mutations[mutationKey] ??= { tail: Promise.resolve() };
+function serialize<T>(run: () => Promise<T>): Promise<T> {
+	const result = mutation.tail.then(run, run);
+	mutation.tail = result.catch(() => {});
+	return result;
+}
+function platformRefusal(): Response | null {
+	return process.platform === "win32"
+		? json({ error: "Claude Code provider is not supported on Windows" }, 400) : null;
+}
 type Login = { state: "idle" | "pending" | "failed"; url: string | null; error: string | null };
 type LoginSession = { child?: ChildProcess; login: Login; timer?: NodeJS.Timeout; finish?: () => void };
 const loginKey = Symbol.for("lh.claudeCodeLogin");
@@ -95,7 +109,7 @@ async function startLogin(executable: string): Promise<Login> {
 		let urlTimer: NodeJS.Timeout;
 		const finish = () => {
 			clearTimeout(urlTimer);
-			resolve(session.login.state === "idle" ? { state: "failed", url: null, error: "login exited before providing a URL" } : { ...session.login });
+			resolve({ ...session.login });
 		};
 		session.finish = finish;
 		const current = () => loginState.current === session;
@@ -107,7 +121,11 @@ async function startLogin(executable: string): Promise<Login> {
 		};
 		const child = session.child = spawn(executable, ["auth", "login", "--claudeai"], {
 			detached: true, stdio: ["ignore", "pipe", "pipe"],
-			env: buildChildEnv(process.env, null, executable) as NodeJS.ProcessEnv,
+			env: {
+				...buildChildEnv(process.env, null, executable),
+				...Object.fromEntries(["DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]
+					.filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]])),
+			} as NodeJS.ProcessEnv,
 		});
 		let buffer = "";
 		child.stdout!.on("data", chunk => {
@@ -130,33 +148,46 @@ async function startLogin(executable: string): Promise<Login> {
 		urlTimer = setTimeout(() => fail("login did not provide a URL"), 15_000); urlTimer.unref();
 	});
 }
-function resolveExecutable() {
+type Validation = { executable: string; version: string };
+async function resolveExecutable(validation?: Validation) {
 	const override = claudeCodeEnvOverride();
 	const settings = readClaudeCodeSettings();
+	if (override.rejected || process.platform === "win32") {
+		return { executable: override.path ?? settings.executable, candidates: [], version: null,
+			staleExecutable: null, error: "Claude Code executable was rejected" };
+	}
 	const candidates = discoverClaudeExecutables();
-	return { override, settings, candidates, executable: override.path ?? settings.executable ?? candidates[0] ?? null };
+	const preferred = override.path ?? settings.executable;
+	let staleExecutable: string | null = null;
+	for (const executable of [...new Set([preferred, ...candidates])]) {
+		if (!executable) continue;
+		const checked = validation?.executable === executable ? { version: validation.version, error: null }
+			: await validateClaudeExecutable(executable);
+		if (checked.version) return { executable, candidates, ...checked, staleExecutable };
+		if (override.enabled) return { executable, candidates, ...checked, staleExecutable };
+		if (executable === settings.executable) staleExecutable = executable;
+	}
+	return { executable: null, candidates, version: null, staleExecutable, error: "Claude Code not found" };
 }
-type Validation = { executable: string; version: string };
 async function readSpawnStatus(validation?: Validation) {
-	const { executable, candidates } = resolveExecutable();
-	const validated = validation?.executable === executable ? { version: validation.version, error: null }
-		: executable ? await validateClaudeExecutable(executable) : { version: null, error: "Claude Code not found" };
-	const auth = validated.version && executable ? await readClaudeAuthStatus(executable)
+	const resolved = await resolveExecutable(validation);
+	const auth = resolved.version && resolved.executable ? await readClaudeAuthStatus(resolved.executable)
 		: { loggedIn: false, account: null, error: null };
 	return {
-		executable, candidates, found: !!executable && !claudeExecutableProblem(executable),
-		version: validated.version, loggedIn: auth.loggedIn, account: auth.account, error: validated.error ?? auth.error,
+		...resolved, found: !!resolved.executable && !claudeExecutableProblem(resolved.executable),
+		loggedIn: auth.loggedIn, account: auth.account, error: resolved.error ?? auth.error,
 	};
 }
 type SpawnStatus = Awaited<ReturnType<typeof readSpawnStatus>>;
-const cacheKey = Symbol.for("lh.claudeCodeStatusCache");
+const cacheKey = Symbol.for("lh.claudeCodeStatusCache.v2");
 const cacheGlobal = globalThis as typeof globalThis & {
 	[cacheKey]?: { entry?: { expires: number; promise: Promise<SpawnStatus> } };
 };
 const statusCache = cacheGlobal[cacheKey] ??= {};
 function invalidateStatusCache(): void { statusCache.entry = undefined; }
 export function invalidateClaudeStatusCacheForTests(): void { invalidateStatusCache(); }
-async function getClaudeCodeStatus(validation?: Validation) {
+async function getClaudeCodeStatus(validation?: Validation, retry = true): Promise<Awaited<ReturnType<typeof statusResponse>>> {
+	const generation = claudeSettingsGeneration();
 	if (!statusCache.entry || statusCache.entry.expires <= Date.now()) {
 		const entry = { expires: Infinity, promise: readSpawnStatus(validation) };
 		statusCache.entry = entry;
@@ -165,12 +196,19 @@ async function getClaudeCodeStatus(validation?: Validation) {
 		});
 	}
 	const backed = await statusCache.entry.promise;
+	if (retry && generation !== claudeSettingsGeneration()) {
+		invalidateStatusCache();
+		return getClaudeCodeStatus(undefined, false);
+	}
+	return statusResponse(backed);
+}
+function statusResponse(backed: SpawnStatus) {
 	const override = claudeCodeEnvOverride();
 	const settings = readClaudeCodeSettings();
 	return {
 		mode: override.enabled ? "local" : settings.mode, envOverride: override.enabled,
 		active: piModels().getProvider("claude-code") !== undefined,
-		...backed, login: { ...loginState.current.login }, endpoint: endpointStatus(),
+		...backed, error: claudeSettingsError() ?? backed.error, login: { ...loginState.current.login }, endpoint: endpointStatus(),
 	};
 }
 function refuseCrossOrigin(request: Request): Response | null {
@@ -190,9 +228,10 @@ export async function getClaudeCodeConnection(request: Request): Promise<Respons
 }
 const json = (body: unknown, status = 200) => Response.json(body, { status });
 const isJson = (request: Request) => request.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() === "application/json";
-export async function putClaudeCodeConnection(request: Request): Promise<Response> {
+async function putClaudeCodeConnectionLocked(request: Request): Promise<Response> {
 	const refusal = refuseCrossOrigin(request);
 	if (refusal) return refusal;
+	if (platformRefusal()) return platformRefusal()!;
 	if (claudeCodeEnvOverride().enabled) return json({ error: "connection controlled by launch environment" }, 409);
 	if (!isJson(request)) return json({ error: "application/json required" }, 415);
 	let body;
@@ -207,12 +246,14 @@ export async function putClaudeCodeConnection(request: Request): Promise<Respons
 	let executable = saved.executable;
 	let validation: { executable: string; version: string } | undefined;
 	if (body.mode !== "off") {
-		executable = body.executable ?? saved.executable ?? discoverClaudeExecutables()[0];
+		const resolved = body.executable === undefined ? await resolveExecutable() : null;
+		executable = body.executable ?? resolved?.executable;
 		if (!executable) return json({ error: "Claude Code not found" }, 400);
-		const result = await validateClaudeExecutable(executable);
+		const result = resolved ?? await validateClaudeExecutable(executable);
 		if (result.error) return json({ error: result.error }, 400);
 		validation = { executable, version: result.version! };
 	}
+	let endpointWrite: { baseUrl: string; token?: string } | undefined;
 	if (body.mode === "endpoint") {
 		const stored = endpointStatus();
 		const baseUrl = body.baseUrl === undefined ? stored.baseUrl : body.baseUrl;
@@ -224,30 +265,34 @@ export async function putClaudeCodeConnection(request: Request): Promise<Respons
 			return json({ error: "invalid endpoint token" }, 400);
 		}
 		if (token === undefined && !stored.tokenSet) return json({ error: "endpoint token required" }, 400);
-		try { writeEndpointConfig({ baseUrl, ...(token !== undefined ? { token } : {}) }); }
-		catch { return json({ error: "unable to save endpoint configuration" }, 500); }
+		endpointWrite = { baseUrl, ...(token !== undefined ? { token } : {}) };
 	}
 	try { writeClaudeCodeSettings({ mode: body.mode, executable }); }
 	catch { return json({ error: "unable to save connection settings" }, 500); }
+	if (endpointWrite) {
+		try { writeEndpointConfig(endpointWrite); }
+		catch {
+			writeClaudeCodeSettings(saved);
+			invalidateStatusCache();
+			return json({ error: "unable to save endpoint configuration" }, 500);
+		}
+	}
 	applyClaudeCodeSettings();
 	invalidateStatusCache();
-	const response = json(await getClaudeCodeStatus(validation));
-	invalidateStatusCache();
-	return response;
+	return json(await getClaudeCodeStatus(validation));
 }
-export async function postClaudeCodeLogin(request: Request): Promise<Response> {
+async function postClaudeCodeLoginLocked(request: Request): Promise<Response> {
 	const refusal = refuseCrossOrigin(request);
 	if (refusal) return refusal;
+	if (platformRefusal()) return platformRefusal()!;
 	if (!isJson(request)) return json({ error: "application/json required" }, 415);
-	const { executable } = resolveExecutable();
-	if (!executable) return json({ error: "Claude Code not found" }, 400);
-	const validated = await validateClaudeExecutable(executable);
-	if (validated.error) return json({ error: validated.error }, 400);
+	const { executable, version } = await resolveExecutable();
+	if (!executable || !version) return json({ error: "Claude Code not found" }, 400);
 	const login = await startLogin(executable);
-	return json({ login }, login.state === "pending" ? 200 : 502);
+	return login.state === "idle" ? json({ login: { state: "idle" } }) : json({ login }, login.state === "pending" ? 200 : 502);
 }
 
-export async function deleteClaudeCodeEndpoint(request: Request): Promise<Response> {
+async function deleteClaudeCodeEndpointLocked(request: Request): Promise<Response> {
 	const refusal = refuseCrossOrigin(request);
 	if (refusal) return refusal;
 	try { clearEndpointConfig(); }
@@ -260,7 +305,17 @@ export async function deleteClaudeCodeEndpoint(request: Request): Promise<Respon
 		catch { return json({ error: "unable to save connection settings" }, 500); }
 		applyClaudeCodeSettings();
 	}
-	const response = json(await getClaudeCodeStatus());
-	invalidateStatusCache();
-	return response;
+	return json(await getClaudeCodeStatus());
+}
+
+export function putClaudeCodeConnection(request: Request): Promise<Response> {
+	return serialize(() => putClaudeCodeConnectionLocked(request));
+}
+
+export function postClaudeCodeLogin(request: Request): Promise<Response> {
+	return serialize(() => postClaudeCodeLoginLocked(request));
+}
+
+export function deleteClaudeCodeEndpoint(request: Request): Promise<Response> {
+	return serialize(() => deleteClaudeCodeEndpointLocked(request));
 }
