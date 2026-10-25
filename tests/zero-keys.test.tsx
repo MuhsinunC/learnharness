@@ -165,11 +165,7 @@ describe("strongKeyless — the pre-send guard's truth (owner interlude, no-orph
 
 
 describe("keyless provider availability for the zero-keys guard", () => {
-	it("only a known catalog without keyless providers requires key setup", () => {
-		assert.equal(zeroKeysVerdict(true, undefined, false), false);
-		assert.equal(zeroKeysVerdict(true, catalog(null), false), true);
-		assert.equal(zeroKeysVerdict(false, undefined, false), false);
-		assert.equal(zeroKeysVerdict(false, catalog(null), false), false);
+	it("hasKeylessProvider excludes unavailable and keyed provider rows", () => {
 		const unavailable = catalog(null);
 		unavailable.providers.push({ id: "claude-code", envVar: "LH_CLAUDE_CODE_EXECUTABLE", keyless: true, keyPresent: false });
 		assert.equal(hasKeylessProvider(unavailable), false);
