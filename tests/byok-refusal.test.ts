@@ -12,6 +12,8 @@ import {
 	providerKeyMissing,
 	PROVIDER_KEY_MISSING_CODE,
 	CLAUDE_CODE_OFF_REFUSAL,
+	LEGACY_CLAUDE_CODE_OFF_REFUSAL,
+	isClaudeCodeOffRefusal,
 } from "../src/core/settings.ts";
 import type { ModelCatalogEntry, ModelSlotName } from "../src/core/index.ts";
 
@@ -252,4 +254,13 @@ describe("provider refusal remedy and banner", () => {
 			assert.equal(refusalBannerText(message), message);
 		}
 	});
+});
+
+it("legacy Claude refusals remain recognizable for saved jobs", () => {
+	for (const error of [CLAUDE_CODE_OFF_REFUSAL, LEGACY_CLAUDE_CODE_OFF_REFUSAL]) {
+		assert.equal(isClaudeCodeOffRefusal(error), true);
+		assert.equal(isProviderKeyRefusal(error), true);
+	}
+	assert.equal(isClaudeCodeOffRefusal(undefined), false);
+	assert.equal(isClaudeCodeOffRefusal("unrelated failure"), false);
 });

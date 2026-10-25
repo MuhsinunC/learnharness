@@ -14,6 +14,8 @@ const { ClaudeCodeConnection, CLAUDE_LOGIN_POLL_MS, CLAUDE_LOGIN_POLL_LIMIT_MS }
 const { SubscriptionConnections, NativeSubscriptionUIProvider } = await import("../components/settings/subscription-connections.tsx");
 const { ChatGPTUIProvider } = await import("../components/settings/chatgpt-connection.tsx");
 const { onSettingsSaved } = await import("../components/settings-signal.ts");
+const storage = new Map<string, string>();
+Object.assign(globalThis, { sessionStorage: { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => { storage.set(key, value); }, removeItem: (key: string) => { storage.delete(key); } } });
 const originalFetch = globalThis.fetch;
 let root: Root | undefined, host: HTMLDivElement | undefined;
 const initial = { mode: "off", envOverride: false, active: false, executable: "/Users/example/.local/bin/claude", found: true, loggedIn: false, account: null, login: { state: "idle", url: null as string | null, error: null as string | null }, endpoint: { baseUrl: null as string | null, tokenSet: false }, error: null };
@@ -47,7 +49,7 @@ async function type(label: string, value: string) {
 	});
 }
 const puts = (f: ReturnType<typeof fixture>) => f.calls.filter((c) => c.method === "PUT");
-afterEach(async () => { await act(async () => root?.unmount()); host?.remove(); root = undefined; host = undefined; globalThis.fetch = originalFetch; });
+afterEach(async () => { await act(async () => root?.unmount()); host?.remove(); root = undefined; host = undefined; globalThis.fetch = originalFetch; storage.clear(); });
 
 test("not found has only installation instructions and refresh", async () => {
 	fixture({ found: false }); await mount(); assert(text().includes("Claude Code isn't installed on this computer.")); assert(text().includes("Install Claude Code from claude.com/claude-code, then come back here.")); assert(button("Refresh")); assert(!button("Log in with Claude")); assert(!host!.querySelector("input, details"));
@@ -176,14 +178,14 @@ test("GET status with an API error still shows signed-in content", async () => {
 	assert(text().includes("Signed in")); assert(text().includes("auth status timed out"));
 	assert(host!.querySelector('[role="switch"]'));
 });
-test("PUT status with an API error updates the card without a refresh signal", async () => {
+test("PUT status with an API error notifies when its mode committed", async () => {
 	fixture({ loggedIn: true, mode: "local" }); await mount();
 	globalThis.fetch = async () => ({ ok: true, json: async () => ({ ...initial, loggedIn: true, mode: "off", error: "auth status timed out" }) }) as Response;
 	const events: string[] = [], off = onSettingsSaved((section) => events.push(section));
 	try {
 		await click(host!.querySelector('[role="switch"]')!);
 		assert.equal(host!.querySelector('[role="switch"]')!.getAttribute("aria-checked"), "false");
-		assert(text().includes("auth status timed out")); assert.deepEqual(events, []);
+		assert(text().includes("auth status timed out")); assert.deepEqual(events, ["keys"]);
 	} finally { off(); }
 });
 test("endpoint saves preempt background polling and ignore its late reply", async (t) => {
@@ -203,7 +205,7 @@ test("endpoint saves preempt background polling and ignore its late reply", asyn
 	await click(button("Save")); assert.equal(calls.filter((call) => call.method === "PUT").length, 1);
 	assert(button("Stop using endpoint"));
 	await act(async () => resolve({ ok: true, json: async () => ({ ...initial, loggedIn: true, mode: "off" }) } as Response));
-	assert(button("Stop using endpoint")); assert(!host!.querySelector('[role="switch"]'));
+	assert(button("Stop using endpoint")); assert.equal(host!.querySelector('[role="switch"]')!.getAttribute("aria-checked"), "true");
 	assert.equal(calls.filter((call) => call.method === "PUT").length, 1);
 });
 test("status-bearing PUT errors redact the submitted token", async () => {
@@ -212,7 +214,7 @@ test("status-bearing PUT errors redact the submitted token", async () => {
 	const events: string[] = [], off = onSettingsSaved((section) => events.push(section));
 	try {
 		await click(button("Save")); assert(button("Stop using endpoint")); assert.equal(input("Token").value, "");
-		assert(!document.body.innerHTML.includes("SENTINEL-TOKEN-7f3a")); assert(text().includes("The Claude connection could not be changed. Try again.")); assert.deepEqual(events, []);
+		assert(!document.body.innerHTML.includes("SENTINEL-TOKEN-7f3a")); assert(text().includes("The Claude connection could not be changed. Try again.")); assert.deepEqual(events, ["keys"]);
 	} finally { off(); }
 });
 test("Base URL changes through React onChange without controlled-input warnings", async (t) => {
@@ -230,4 +232,144 @@ test("a held background poll expires at the login deadline", async (t) => {
 	assert(text().includes("Sign-in timed out. Try again.")); assert(!button("Log in with Claude").disabled);
 	await act(async () => resolve({ ok: true, json: async () => ({ ...initial, loggedIn: true }) } as Response));
 	assert(button("Log in with Claude")); assert(!host!.querySelector('[role="switch"]'));
+});
+
+const endpoint = { baseUrl: "https://relay.example", tokenSet: true };
+async function unmount() { await act(async () => root?.unmount()); host?.remove(); root = undefined; host = undefined; }
+for (const mode of ["local", "endpoint"]) test(`login completion preserves the already chosen ${mode} backend`, async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+	const f = fixture({ mode, endpoint }); await mount(); await click(button("Log in with Claude"));
+	f.set({ loggedIn: true, login: { state: "idle", url: null } });
+	await act(async () => t.mock.timers.tick(CLAUDE_LOGIN_POLL_MS));
+	assert.deepEqual(puts(f), []);
+});
+test("a user mode change during login prevents automatic activation", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+	const f = fixture(); await mount(); await click(button("Log in with Claude"));
+	await type("Base URL", endpoint.baseUrl); await type("Token", "SENTINEL-TOKEN-7f3a"); await click(button("Save"));
+	await click(host!.querySelector('[role="switch"]')!);
+	f.set({ loggedIn: true, login: { state: "idle", url: null } });
+	await act(async () => t.mock.timers.tick(CLAUDE_LOGIN_POLL_MS));
+	assert.deepEqual(puts(f).map(c => c.body?.mode), ["endpoint", "off"]);
+});
+test("backend choice is remembered while off and restored by the toggle", async () => {
+	const f = fixture({ mode: "endpoint", loggedIn: true, endpoint }); await mount();
+	assert(input("custom endpoint").checked);
+	await click(host!.querySelector('[role="switch"]')!); await click(host!.querySelector('[role="switch"]')!);
+	assert.deepEqual(puts(f).map(c => c.body), [{ mode: "off" }, { mode: "endpoint" }]);
+	await click(input("my Claude login")); assert.deepEqual(puts(f).at(-1)?.body, { mode: "local" });
+});
+test("changing backend while off sends no request and on needs a usable backend", async () => {
+	const f = fixture({ endpoint }); await mount();
+	assert((host!.querySelector('[role="switch"]') as HTMLButtonElement).disabled);
+	await click(input("custom endpoint")); assert.deepEqual(puts(f), []);
+	assert(!(host!.querySelector('[role="switch"]') as HTMLButtonElement).disabled);
+	await click(host!.querySelector('[role="switch"]')!); assert.deepEqual(puts(f)[0]!.body, { mode: "endpoint" });
+});
+test("without an endpoint there is no choice and the toggle uses local", async () => {
+	const f = fixture({ loggedIn: true }); await mount(); assert(!host!.querySelector('[type="radio"]'));
+	await click(host!.querySelector('[role="switch"]')!); assert.deepEqual(puts(f)[0]!.body, { mode: "local" });
+});
+for (const mode of ["local", "endpoint"]) test(`signed-out ${mode} can always be turned off`, async () => {
+	const f = fixture({ mode, error: "auth status timed out" }); await mount();
+	assert(button("Log in with Claude")); const toggle = host!.querySelector<HTMLButtonElement>('[role="switch"]')!;
+	assert(!toggle.disabled); await click(toggle); assert.deepEqual(puts(f)[0]!.body, { mode: "off" });
+});
+test("mode-only writes preserve the unsubmitted token draft", async () => {
+	fixture({ loggedIn: true, mode: "local", endpoint }); await mount(); await type("Token", "SENTINEL-TOKEN-7f3a");
+	await click(host!.querySelector('[role="switch"]')!); assert.equal(input("Token").value, "SENTINEL-TOKEN-7f3a");
+	await click(input("custom endpoint")); await click(host!.querySelector('[role="switch"]')!);
+	assert.equal(input("Token").value, "SENTINEL-TOKEN-7f3a");
+});
+test("login activation survives remount and is consumed exactly once", async () => {
+	const f = fixture(); await mount(); await click(button("Log in with Claude")); assert.equal(storage.size, 1);
+	await unmount(); f.set({ loggedIn: true, login: { state: "idle", url: null } }); await mount();
+	assert.deepEqual(puts(f).map(c => c.body), [{ mode: "local" }]); assert.equal(storage.size, 0);
+	await unmount(); await mount(); assert.equal(puts(f).length, 1);
+});
+test("expired login markers do not activate a remounted card", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+	const f = fixture(); await mount(); await click(button("Log in with Claude")); await unmount();
+	t.mock.timers.tick(CLAUDE_LOGIN_POLL_LIMIT_MS);
+	f.set({ loggedIn: true, login: { state: "idle", url: null } }); await mount(); assert.deepEqual(puts(f), []); assert.equal(storage.size, 0);
+});
+test("user writes clear activation for later remounts", async () => {
+	const f = fixture({ endpoint }); await mount(); await click(button("Log in with Claude"));
+	await click(input("custom endpoint")); await click(host!.querySelector('[role="switch"]')!);
+	await click(host!.querySelector('[role="switch"]')!); await unmount();
+	f.set({ loggedIn: true, login: { state: "idle", url: null } }); await mount();
+	assert.deepEqual(puts(f).map(c => c.body?.mode), ["endpoint", "off"]); assert.equal(storage.size, 0);
+});
+test("background recovery clears only background errors", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+	fixture({ login: { state: "pending", url: null } }); await mount(); const fetchStatus = globalThis.fetch;
+	globalThis.fetch = async () => { throw new Error("offline"); };
+	await act(async () => t.mock.timers.tick(CLAUDE_LOGIN_POLL_MS)); assert(host!.querySelector('[role="alert"]'));
+	globalThis.fetch = fetchStatus;
+	await act(async () => t.mock.timers.tick(CLAUDE_LOGIN_POLL_MS)); assert(!host!.querySelector('[role="alert"]'));
+	await type("Base URL", "not a url"); await click(button("Save"));
+	await act(async () => t.mock.timers.tick(CLAUDE_LOGIN_POLL_MS)); assert(text().includes("Enter an https:// URL"));
+});
+for (const changed of [false, true]) test(`error-bearing write signals only a committed status change: ${changed}`, async () => {
+	fixture({ loggedIn: true, mode: "local" }); await mount();
+	globalThis.fetch = async () => ({ ok: true, json: async () => ({ ...initial, loggedIn: true, mode: changed ? "off" : "local", error: "auth status timed out" }) }) as Response;
+	const events: string[] = [], off = onSettingsSaved(s => events.push(s));
+	try { await click(host!.querySelector('[role="switch"]')!); assert.deepEqual(events, changed ? ["keys"] : []); } finally { off(); }
+});
+test("a completed write notifies even after unmount", async () => {
+	fixture({ loggedIn: true, mode: "local" }); await mount(); let resolve!: (r: Response) => void;
+	globalThis.fetch = () => new Promise<Response>(done => { resolve = done; });
+	const events: string[] = [], off = onSettingsSaved(s => events.push(s));
+	try {
+		await click(host!.querySelector('[role="switch"]')!); await unmount();
+		await act(async () => resolve({ ok: true, json: async () => ({ ...initial, loggedIn: true }) } as Response));
+		assert.deepEqual(events, ["keys"]);
+	} finally { off(); }
+});
+for (const account of [{ subscriptionType: "pro" }, { email: null, subscriptionType: null }]) test(`account without email renders a clean identity: ${account.subscriptionType}`, async () => {
+	fixture({ loggedIn: true, account }); await mount();
+	assert(text().includes(account.subscriptionType ? "Signed in (pro)" : "Signed in"));
+	assert(!text().includes("undefined")); assert(!text().includes("null")); assert(!text().includes("Signed in as"));
+});
+for (const url of ["https://user:pass@relay.example", "https://relay.example/?", "https://relay.example/#"]) test(`shared endpoint predicate rejects ${url} without clearing token`, async () => {
+	const f = fixture(); await mount(); await type("Base URL", url); await type("Token", "SENTINEL-TOKEN-7f3a"); await click(button("Save"));
+	assert.deepEqual(puts(f), []); assert.equal(input("Token").value, "SENTINEL-TOKEN-7f3a");
+});
+
+test("login failure clears the remount activation marker", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+	const f = fixture(); await mount(); await click(button("Log in with Claude"));
+	f.set({ login: { state: "failed", url: null, error: "Login failed" } });
+	await act(async () => t.mock.timers.tick(CLAUDE_LOGIN_POLL_MS)); assert.equal(storage.size, 0);
+	await unmount(); f.set({ loggedIn: true, login: { state: "idle", url: null } }); await mount(); assert.deepEqual(puts(f), []);
+});
+test("login works when session storage is unavailable", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+	for (const method of ["getItem", "setItem", "removeItem"] as const) t.mock.method(sessionStorage, method, () => { throw new Error("storage disabled"); });
+	const f = fixture(); await mount(); await click(button("Log in with Claude")); f.set({ loggedIn: true });
+	await act(async () => t.mock.timers.tick(CLAUDE_LOGIN_POLL_MS)); assert.deepEqual(puts(f).map(c => c.body), [{ mode: "local" }]);
+});
+
+test("failed backend changes keep the current selection", async () => {
+	const f = fixture({ loggedIn: true, mode: "local", endpoint }); await mount(); f.fail("cannot save");
+	await click(input("custom endpoint")); assert(input("my Claude login").checked); assert(!input("custom endpoint").checked);
+});
+test("a missing executable does not prevent disabling an active mode", async () => {
+	const f = fixture({ found: false, mode: "local" }); await mount();
+	await click(host!.querySelector('[role="switch"]')!); assert.deepEqual(puts(f)[0]!.body, { mode: "off" });
+});
+
+test("an expired marker cannot restart activation from a pending GET", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+	const f = fixture(); await mount(); await click(button("Log in with Claude")); await unmount();
+	t.mock.timers.tick(CLAUDE_LOGIN_POLL_LIMIT_MS); await mount();
+	assert(button("Log in with Claude")); f.set({ loggedIn: true });
+	await act(async () => t.mock.timers.tick(CLAUDE_LOGIN_POLL_MS)); assert.deepEqual(puts(f), []);
+});
+
+test("logging in while an endpoint is selected off does not override the choice", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+	const f = fixture({ endpoint }); await mount(); await click(input("custom endpoint")); await click(button("Log in with Claude"));
+	f.set({ loggedIn: true, login: { state: "idle", url: null } });
+	await act(async () => t.mock.timers.tick(CLAUDE_LOGIN_POLL_MS)); assert.deepEqual(puts(f), []); assert(input("custom endpoint").checked);
 });

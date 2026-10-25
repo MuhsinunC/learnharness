@@ -3,6 +3,9 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { notifySettingsSaved } from "@/components/settings-signal";
 import { Toggle } from "./controls";
+// This lane shares the pure endpoint validator directly with the server.
+// eslint-disable-next-line import/no-restricted-paths
+import { normalizeEndpointUrl } from "@/src/core/claude-code-endpoint";
 
 export const CLAUDE_LOGIN_POLL_MS = 2000;
 export const CLAUDE_LOGIN_POLL_LIMIT_MS = 600000;
@@ -13,7 +16,7 @@ type Login = { state: "idle" | "pending" | "failed"; url: string | null; error?:
 type Status = {
 	mode: "off" | "local" | "endpoint"; envOverride: boolean; active: boolean;
 	executable: string | null; found: boolean; candidates?: string[] | null; version?: string | null;
-	loggedIn: boolean; account?: { email: string; subscriptionType: string | null } | null;
+	loggedIn: boolean; account?: { email?: string | null; subscriptionType: string | null } | null;
 	login?: Login | null; endpoint?: { baseUrl: string | null; tokenSet: boolean } | null; error?: string | null;
 };
 type Change = { mode: Status["mode"]; baseUrl?: string; token?: string };
@@ -24,66 +27,108 @@ function loginUrl(value?: string | null) {
 	try { return value && new URL(value).protocol === "https:" ? value : null; } catch { return null; }
 }
 
+const LOGIN_MARKER = "lh:claude-login";
+function readLoginMarker(): number | "expired" | null {
+	try {
+		const value = sessionStorage.getItem(LOGIN_MARKER);
+		if (value === null) return null;
+		const started = Number(value);
+		if (Number.isFinite(started) && Date.now() >= started && Date.now() - started < CLAUDE_LOGIN_POLL_LIMIT_MS) return started;
+		sessionStorage.removeItem(LOGIN_MARKER);
+		return "expired";
+	} catch { /* Storage is optional in browser privacy modes. */ }
+	return null;
+}
+function storeLoginMarker(started: number | null) {
+	try {
+		if (started === null) sessionStorage.removeItem(LOGIN_MARKER);
+		else sessionStorage.setItem(LOGIN_MARKER, String(started));
+	} catch { /* In-memory activation still works without storage. */ }
+}
+
 export function ClaudeCodeConnection() {
 	const [status, setStatus] = useState<Status | null>(null), [error, setError] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false), [baseUrl, setBaseUrl] = useState("");
+	const [backend, setBackend] = useState<"local" | "endpoint">("local");
 	const mounted = useRef(false), sequence = useRef(0), inFlight = useRef(false);
 	const current = useRef<Status | null>(null), tokenInput = useRef<HTMLInputElement>(null);
 	const polling = useRef<ReturnType<typeof setInterval> | null>(null), loginStarted = useRef<number | null>(null);
-	const autoEnabled = useRef(false), loginTimedOut = useRef(false), pollInFlight = useRef(false);
+	const loginTimedOut = useRef(false), pollInFlight = useRef(false), backgroundError = useRef(false);
+	const modeGeneration = useRef(0), activation = useRef<{ started: number; generation: number } | null>(null);
+	function clearActivation() { activation.current = null; storeLoginMarker(null); }
+	function showError(message: string, background = false) { backgroundError.current = background; setError(message); }
 	function stopPolling() {
 		if (polling.current !== null) clearInterval(polling.current);
 		polling.current = null; loginStarted.current = null;
 	}
 	function accept(next: Status, token?: string, syncEndpoint = false) {
+		const firstStatus = current.current === null;
 		const normalized = { ...next, account: next.account ?? null, login: next.login ?? { state: "idle" as const, url: null, error: null }, endpoint: next.endpoint ?? { baseUrl: null, tokenSet: false } };
 		if (loginTimedOut.current && normalized.login.state === "pending") normalized.login = { state: "idle", url: null, error: null };
 		if (!current.current || syncEndpoint) setBaseUrl(normalized.endpoint.baseUrl ?? "");
+		if (next.mode !== "off") setBackend(next.mode);
 		current.current = normalized; setStatus(normalized);
 		if (normalized.login.state === "failed") {
-			stopPolling(); setError(safeError(normalized.login.error, LOGIN_ERROR, token));
+			stopPolling(); clearActivation(); showError(safeError(normalized.login.error, LOGIN_ERROR, token));
 		} else if (next.loggedIn) {
-			const completingLogin = loginStarted.current !== null;
 			stopPolling();
-			if (completingLogin && !next.envOverride && next.mode !== "local" && !autoEnabled.current) {
-				autoEnabled.current = true;
-				// Defer until the GET has released the request lock.
-				queueMicrotask(() => { if (mounted.current) void request("PUT", { mode: "local" }); });
+			const eligible = activation.current;
+			clearActivation();
+			if (eligible && eligible.generation === modeGeneration.current && Date.now() - eligible.started < CLAUDE_LOGIN_POLL_LIMIT_MS && !next.envOverride && next.mode === "off") {
+				// Consume activation before queuing so overlapping replies cannot enable twice.
+				queueMicrotask(() => { if (mounted.current && eligible.generation === modeGeneration.current) void request("PUT", { mode: "local" }, false, true); });
 			}
 		} else if (next.found && !next.envOverride && normalized.login.state === "pending" && loginStarted.current === null && !loginTimedOut.current) {
-			autoEnabled.current = false; loginStarted.current = Date.now();
+			loginStarted.current = activation.current?.started ?? Date.now();
+			if (firstStatus && !activation.current && next.mode === "off") activation.current = { started: loginStarted.current, generation: modeGeneration.current };
 			polling.current = setInterval(() => {
 				if (Date.now() - loginStarted.current! >= CLAUDE_LOGIN_POLL_LIMIT_MS) {
-					stopPolling(); loginTimedOut.current = true;
+					stopPolling(); clearActivation(); loginTimedOut.current = true;
 					if (pollInFlight.current) { sequence.current++; pollInFlight.current = false; }
 					if (current.current) { current.current = { ...current.current, login: { state: "idle", url: null } }; setStatus(current.current); }
-					setError("Sign-in timed out. Try again.");
+					showError("Sign-in timed out. Try again.");
 				} else void request("GET", undefined, true);
 			}, CLAUDE_LOGIN_POLL_MS);
 		} else if (!next.found || next.envOverride) stopPolling();
 	}
-	async function request(method: "GET" | "PUT" | "POST", body?: Change, background = false) {
+	async function request(method: "GET" | "PUT" | "POST", body?: Change, background = false, automatic = false) {
 		if (inFlight.current || (background && pollInFlight.current)) return;
 		const owner = ++sequence.current, fallback = method === "GET" ? READ_ERROR : CHANGE_ERROR;
+		const previous = current.current, sentToken = body?.token;
 		pollInFlight.current = background;
-		if (!background) { inFlight.current = true; setBusy(true); setError(null); }
-		if (method === "POST") loginTimedOut.current = false;
+		if (!background) { inFlight.current = true; setBusy(true); backgroundError.current = false; setError(null); }
+		if (method === "POST") {
+			loginTimedOut.current = false; clearActivation();
+			if (previous?.mode === "off" && !(backend === "endpoint" && previous.endpoint?.baseUrl && previous.endpoint.tokenSet)) {
+				const started = Date.now(); activation.current = { started, generation: modeGeneration.current }; storeLoginMarker(started);
+			}
+		}
+		if (method === "PUT" && !automatic) storeLoginMarker(null);
 		try {
 			const response = await fetch(method === "POST" ? "/api/claude-code/login" : "/api/claude-code", method === "GET" ? { cache: "no-store" } : { method, headers: { "Content-Type": "application/json" }, ...(body ? { body: JSON.stringify(body) } : {}) });
 			const reply = await response.json();
+			const committed = response.ok && (reply.error == null || (typeof reply.found === "boolean" && (reply.mode !== previous?.mode || reply.active !== previous?.active)));
+			if (method === "PUT" && committed) {
+				if (!automatic) { modeGeneration.current++; clearActivation(); }
+				notifySettingsSaved("keys");
+			}
 			if (!mounted.current || owner !== sequence.current) return;
-			if (!response.ok) { setError(safeError(reply.error, fallback, body?.token)); return; }
+			if (!response.ok) { if (method === "POST") clearActivation(); showError(safeError(reply.error, fallback, sentToken), background); return; }
+			if (background && backgroundError.current) { backgroundError.current = false; setError(null); }
 			if (reply.error != null) {
-				if (typeof reply.found === "boolean") accept({ ...reply, error: safeError(reply.error, fallback, body?.token) }, body?.token, method === "PUT" && body?.mode === "endpoint");
-				setError(safeError(reply.error, fallback, body?.token)); return;
+				if (method === "POST") clearActivation();
+				if (typeof reply.found === "boolean") accept({ ...reply, error: safeError(reply.error, fallback, sentToken) }, sentToken, method === "PUT" && body?.mode === "endpoint");
+				showError(safeError(reply.error, fallback, sentToken), background); return;
 			}
 			if (method === "POST") {
 				if (current.current) accept({ ...current.current, login: reply.login });
-			} else accept(reply, body?.token, method === "PUT" && body?.mode === "endpoint");
-			if (method === "PUT") notifySettingsSaved("keys");
-		} catch { if (mounted.current && owner === sequence.current) setError(fallback); }
-		finally {
-			if (method === "PUT" && tokenInput.current) tokenInput.current.value = "";
+				if (reply.login?.state === "idle") queueMicrotask(() => { if (mounted.current) void request("GET"); });
+			} else accept(reply, sentToken, method === "PUT" && body?.mode === "endpoint");
+		} catch {
+			if (method === "POST") clearActivation();
+			if (mounted.current && owner === sequence.current) showError(fallback, background);
+		} finally {
+			if (sentToken && tokenInput.current) tokenInput.current.value = "";
 			if (body) delete body.token;
 			if (mounted.current && owner === sequence.current) {
 				pollInFlight.current = false;
@@ -92,23 +137,31 @@ export function ClaudeCodeConnection() {
 		}
 	}
 	useEffect(() => {
-		mounted.current = true; void request("GET");
+		mounted.current = true;
+		const started = readLoginMarker();
+		if (started === "expired") loginTimedOut.current = true;
+		else if (started !== null) activation.current = { started, generation: modeGeneration.current };
+		void request("GET");
 		return () => { mounted.current = false; sequence.current++; inFlight.current = false; pollInFlight.current = false; stopPolling(); };
 		// Requests and the polling timer read current status through refs.
 	}, []);
 	function saveEndpoint() {
-		const url = baseUrl.trim();
-		try {
-			const parsed = new URL(url);
-			if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && ["localhost", "127.0.0.1"].includes(parsed.hostname))) throw new Error();
-		} catch { setError("Enter an https:// URL, or http://localhost or http://127.0.0.1 for a relay on this computer."); return; }
+		const url = normalizeEndpointUrl(baseUrl);
+		if (url === null) { showError("Enter an https:// URL, or http://localhost or http://127.0.0.1 for a relay on this computer."); return; }
 		const token = tokenInput.current?.value ?? "";
-		if (!token && !status?.endpoint?.tokenSet) { setError("Enter a token."); return; }
+		if (!token && !status?.endpoint?.tokenSet) { showError("Enter a token."); return; }
 		void request("PUT", { mode: "endpoint", baseUrl: url, ...(token ? { token } : {}) });
+	}
+	function chooseBackend(choice: "local" | "endpoint") {
+		if (status?.mode !== "off") void request("PUT", { mode: choice });
+		else { setBackend(choice); if (choice === "endpoint") clearActivation(); }
 	}
 	const pending = status?.login?.state === "pending" && !status.loggedIn;
 	const url = loginUrl(status?.login?.url);
-	const signedIn = status?.account ? `Signed in as ${status.account.email}${status.account.subscriptionType ? ` (${status.account.subscriptionType})` : ""}` : "Signed in";
+	const signedIn = `${status?.account?.email ? `Signed in as ${status.account.email}` : "Signed in"}${status?.account?.subscriptionType ? ` (${status.account.subscriptionType})` : ""}`;
+	const endpointConfigured = !!status?.endpoint?.baseUrl && !!status.endpoint.tokenSet;
+	const selectedBackend = endpointConfigured ? backend : "local";
+	const canEnable = selectedBackend === "endpoint" ? endpointConfigured : !!status?.loggedIn;
 	const help = "text-xs leading-relaxed text-muted-foreground";
 	return <div data-testid="claude-code-connection" className="flex flex-col gap-2">
 		<span className="font-ui text-xs text-foreground">Claude</span>
@@ -121,16 +174,22 @@ export function ClaudeCodeConnection() {
 		</> : !status.found ? <>
 			<p className={help}>Claude Code isn&apos;t installed on this computer.</p>
 			<p className={help}>Install Claude Code from claude.com/claude-code, then come back here.</p>
+			{status.mode !== "off" && <div className="flex items-center gap-3 text-xs text-foreground"><Toggle label="Use Claude in LearnHarness" checked disabled={busy} onChange={() => void request("PUT", { mode: "off" })} /><span>Use Claude in LearnHarness</span></div>}
 			<Button type="button" className="self-start cursor-pointer disabled:cursor-not-allowed" size="xs" variant="outline" disabled={busy} onClick={() => void request("GET")}>Refresh</Button>
 		</> : <>
 			{status.loggedIn ? <>
 				<p className={help}>{signedIn}</p>
-				<div className="flex items-center gap-3 text-xs text-foreground"><Toggle label="Use Claude in LearnHarness" checked={status.mode !== "off"} disabled={busy} onChange={(on) => void request("PUT", { mode: on ? "local" : "off" })} /><span>Use Claude in LearnHarness</span></div>
 				{status.executable && <p className="text-[11px] text-muted-foreground">{status.executable}</p>}
 			</> : pending ? <>
 				<p className={help}>Finish signing in in your browser…</p>
 				{url && <a className={help} href={url} target="_blank" rel="noreferrer">If no browser opened, open this link</a>}
 			</> : <Button type="button" className="self-start cursor-pointer disabled:cursor-not-allowed" size="xs" variant="outline" disabled={busy} onClick={() => void request("POST")}>Log in with Claude</Button>}
+			{endpointConfigured && <fieldset disabled={busy} className="space-y-1 text-xs text-foreground">
+				<legend>Send requests through:</legend>
+				<label className="mr-3 inline-flex items-center gap-1"><input type="radio" name="claude-backend" aria-label="my Claude login" disabled={status.mode !== "off" && !status.loggedIn} checked={selectedBackend === "local"} onChange={() => chooseBackend("local")} />my Claude login</label>
+				<label className="inline-flex items-center gap-1"><input type="radio" name="claude-backend" aria-label="custom endpoint" checked={selectedBackend === "endpoint"} onChange={() => chooseBackend("endpoint")} />custom endpoint</label>
+			</fieldset>}
+			{(status.loggedIn || endpointConfigured || status.mode !== "off") && <div className="flex items-center gap-3 text-xs text-foreground"><Toggle label="Use Claude in LearnHarness" checked={status.mode !== "off"} disabled={busy || (status.mode === "off" && !canEnable)} onChange={(on) => void request("PUT", { mode: on ? selectedBackend : "off" })} /><span>Use Claude in LearnHarness</span></div>}
 			<details open={status.mode === "endpoint"} className="text-xs">
 				<summary className="cursor-pointer text-muted-foreground">Advanced: use a custom Claude Code endpoint</summary>
 				<div className="mt-2 space-y-2">
