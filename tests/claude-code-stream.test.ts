@@ -45,12 +45,12 @@ afterEach(async () => {
 	if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
 	if (oldCap === undefined) delete process.env.LH_CLAUDE_CODE_MAX_CHILDREN; else process.env.LH_CLAUDE_CODE_MAX_CHILDREN = oldCap;
 });
-type RecordCall = { prompt: SDKUserMessage[]; options: Options; file?: string; pulls: number; interrupts: number; closes: number };
+type RecordCall = { prompt: SDKUserMessage[]; options: Options; file?: string; pulls: number; interrupts: number; closes: number; returns: number };
 function fake(script: (call: RecordCall) => AsyncGenerator<SDKMessage> = async function* () { yield* turn(); }) {
 	const calls: RecordCall[] = [], warnings: string[] = [];
-	const deps = { executable: "/fake/claude", dataDir: join(root, "data"), claudeDir: join(root, "home", ".claude"), logger: { debug() {}, warn(m: string) { warnings.push(m); } },
+	const deps = { parkQuietMs: 3, cleanupWaitMs: 5, executable: "/fake/claude", dataDir: join(root, "data"), claudeDir: join(root, "home", ".claude"), logger: { debug() {}, warn(m: string) { warnings.push(m); } },
 		loadQuery: async () => (({ prompt, options }: Parameters<typeof query>[0]) => {
-			const call: RecordCall = { prompt: [], options: options!, pulls: 0, interrupts: 0, closes: 0 };
+			const call: RecordCall = { prompt: [], options: options!, pulls: 0, interrupts: 0, closes: 0, returns: 0 };
 			if (options?.resume) call.file = readFileSync(join(getProjectDir(options.cwd!, deps.claudeDir), options.resume + ".jsonl"), "utf8");
 			calls.push(call);
 			let unblock!: () => void;
@@ -60,6 +60,7 @@ function fake(script: (call: RecordCall) => AsyncGenerator<SDKMessage> = async f
 				yield* script(call);
 			})();
 			return { [Symbol.asyncIterator]() { return this; }, next() { call.pulls++; return Promise.race([iterator.next(), closed]); },
+				return: async () => { call.returns++; return { done: true, value: undefined }; },
 				interrupt: async () => { call.interrupts++; }, close() { call.closes++; unblock(); } };
 		}) as unknown as typeof query };
 	return { deps, calls, warnings, run: (t = transcript(), signal?: AbortSignal) => streamClaudeCode(model, t, { signal }, deps) };
@@ -72,7 +73,11 @@ async function collect(stream: ReturnType<typeof streamClaudeCode>) {
 }
 function noFiles(h: ReturnType<typeof fake>) {
 	const dir = getProjectDir(claudeCodeWorkdir(h.deps.dataDir), h.deps.claudeDir);
-	assert.deepEqual(readdirSync(dir, { recursive: true }).filter(f => String(f).endsWith(".jsonl")), []);
+	let files: string[] = [];
+	try { files = readdirSync(dir, { recursive: true }) as string[]; } catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+	}
+	assert.deepEqual(files.filter(f => f.endsWith(".jsonl")), []);
 }
 async function until(check: () => boolean) { for (let i = 0; i < 100; i++) { if (check()) return; await tick(); } assert.fail("condition did not become true"); }
 
@@ -104,7 +109,8 @@ test("fallback tools/call ends a blocked iterator", { timeout: 2000 }, async () 
 		await new Promise(() => {});
 	});
 	const events = await collect(h.run(transcript(history(), [tool])));
-	assert.equal((events.at(-1) as any).reason, "toolUse"); assert.equal(h.calls[0]!.closes, 1); noFiles(h);
+	assert.equal((events.at(-1) as any).reason, "toolUse"); assert.equal(h.calls[0]!.closes, 1);
+	assert.equal(events.filter(e => e.type === "done").length, 1); assert.equal(h.calls[0]!.returns, 1); assert.deepEqual(h.warnings, []); noFiles(h);
 });
 test("abort before spawning and during a pending pull preserves partial output and cleans up", async () => {
 	const h = fake(async function* () { yield* turn().slice(0, 4); await new Promise(() => {}); });
@@ -135,7 +141,7 @@ test("cap=1 queues FIFO, queued abort never queries, distinct sessions survive u
 	const controller = new AbortController(); const aborted = h.run(transcript(history()), controller.signal);
 	const second = h.run(transcript(history())); await tick(); assert.equal(h.calls.length, 1);
 	const dir = getProjectDir(claudeCodeWorkdir(h.deps.dataDir), h.deps.claudeDir);
-	assert.equal(readdirSync(dir).filter(f => f.endsWith(".jsonl")).length, 3);
+	assert.equal(readdirSync(dir).filter(f => f.endsWith(".jsonl")).length, 1);
 	controller.abort(); assert.equal((await collect(aborted)).at(-1)?.type, "error"); assert.equal(h.calls.length, 1);
 	finish(); await collect(first); await collect(second);
 	assert.equal(h.calls.length, 2); assert.notEqual(h.calls[0]!.options.resume, h.calls[1]!.options.resume); noFiles(h);
@@ -194,6 +200,7 @@ test("abort retains slot and session until the pending next settles", async () =
 	const h = fake(); let closed = 0, pulled = 0;
 	h.deps.loadQuery = async () => (() => ({
 		[Symbol.asyncIterator]() { return this; }, next() { pulled++; return pending; },
+		return: async () => ({ done: true, value: undefined }),
 		interrupt: async () => {}, close() { closed++; },
 	})) as unknown as typeof query;
 	const controller = new AbortController();
@@ -213,6 +220,7 @@ test("watchdog closes again and releases a child whose pending next never settle
 	const h = fake(); let closed = 0, pulled = 0;
 	h.deps.loadQuery = async () => (() => ({
 		[Symbol.asyncIterator]() { return this; }, next() { pulled++; return new Promise(() => {}); },
+		return: async () => ({ done: true, value: undefined }),
 		interrupt: async () => {}, close() { closed++; },
 	})) as unknown as typeof query;
 	const controller = new AbortController(); const stream = h.run(transcript(history()), controller.signal);
@@ -221,4 +229,92 @@ test("watchdog closes again and releases a child whose pending next never settle
 	t.mock.timers.tick(29_999); await tick(); assert.equal(acquired, false);
 	t.mock.timers.tick(1); await waiting; await tick();
 	assert.equal(closed, 2); assert.ok(h.warnings.some(w => w.includes("30s"))); noFiles(h);
+});
+
+function park(c: RecordCall, id: string) {
+	const config = c.options.mcpServers!["custom-tools"] as any;
+	return config.instance.server._requestHandlers.get("tools/call")({ method: "tools/call", params: { name: "work", _meta: { "claudecode/toolUseId": id } } }, { signal: new AbortController().signal });
+}
+
+test("fallback quiet window collects both frames of the same assistant message", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	let second!: () => void;
+	const wait = new Promise<void>(resolve => { second = resolve; });
+	const h = fake(async function* (c) {
+		yield sdk({ type: "assistant", message: { id: "same", content: [toolBlock], usage: {} } });
+		void park(c, "call-1"); await wait;
+		yield sdk({ type: "assistant", message: { id: "same", content: [{ ...toolBlock, id: "call-2" }], usage: {} } });
+		await park(c, "call-2"); await new Promise(() => {});
+	});
+	h.deps.parkQuietMs = 20;
+	const stream = h.run(transcript(history(), [tool]));
+	await until(() => h.calls[0]?.pulls === 2);
+	t.mock.timers.tick(15); second(); await until(() => h.calls[0]?.pulls === 3);
+	t.mock.timers.tick(19); await tick(); assert.equal(h.calls[0]!.closes, 0);
+	t.mock.timers.tick(1); const events = await collect(stream);
+	const done = events.filter(e => e.type === "done"); assert.equal(done.length, 1);
+	assert.equal(done[0]!.reason, "toolUse");
+	assert.deepEqual(done[0]!.message.content.filter(b => b.type === "toolCall").map(b => b.id), ["call-1", "call-2"]);
+});
+
+test("parked tool with unfinished argument deltas cannot end during quiet window", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const h = fake(async function* (c) {
+		yield event("message_start", { message: { id: "open", usage: {} } });
+		yield event("content_block_start", { index: 0, content_block: toolBlock });
+		yield event("content_block_delta", { index: 0, delta: { type: "input_json_delta", partial_json: "{" } });
+		await park(c, "call-1");
+	});
+	const controller = new AbortController(); const stream = h.run(transcript(history(), [tool]), controller.signal);
+	await until(() => h.calls[0]?.pulls === 4); t.mock.timers.tick(20); await tick();
+	assert.equal(h.calls[0]!.closes, 0); controller.abort();
+	assert.equal((await collect(stream)).filter(e => e.type === "done").length, 0);
+});
+
+test("queued abort creates no session file", async () => {
+	process.env.LH_CLAUDE_CODE_MAX_CHILDREN = "1";
+	const release = await acquireClaudeCodeSlot(); const h = fake();
+	const controller = new AbortController(); const stream = h.run(transcript(history()), controller.signal);
+	await tick(); noFiles(h); controller.abort();
+	assert.equal((await collect(stream)).at(-1)?.type, "error"); assert.equal(h.calls.length, 0); noFiles(h); release();
+});
+
+test("child return holds slot and session until cleanup completes", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	process.env.LH_CLAUDE_CODE_MAX_CHILDREN = "1";
+	const h = fake(); h.deps.cleanupWaitMs = 20;
+	const load = h.deps.loadQuery; let finish!: () => void; let returning = false;
+	const cleanup = new Promise<void>(resolve => { finish = resolve; });
+	h.deps.loadQuery = async () => {
+		const queryFn = await load();
+		return ((params: Parameters<typeof query>[0]) => {
+			const child = queryFn(params);
+			if (h.calls.length === 1) child.return = async () => { returning = true; await cleanup; return { done: true, value: undefined }; };
+			return child;
+		}) as typeof query;
+	};
+	const first = h.run(transcript(history())); await collect(first); await until(() => returning);
+	const second = h.run(transcript(history())); await tick(); assert.equal(h.calls.length, 1);
+	const dir = getProjectDir(claudeCodeWorkdir(h.deps.dataDir), h.deps.claudeDir);
+	assert.equal(readdirSync(dir).filter(f => f.endsWith(".jsonl")).length, 1);
+	finish(); await collect(second); assert.equal(h.calls.length, 2); noFiles(h);
+});
+
+test("cleanup timeout releases permit and catches a late return rejection", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	process.env.LH_CLAUDE_CODE_MAX_CHILDREN = "1";
+	const h = fake(); const load = h.deps.loadQuery; let reject!: (e: Error) => void; let returning = false;
+	h.deps.loadQuery = async () => {
+		const queryFn = await load();
+		return ((params: Parameters<typeof query>[0]) => {
+			const child = queryFn(params);
+			child.return = () => { returning = true; return new Promise((_, r) => { reject = r; }); };
+			return child;
+		}) as typeof query;
+	};
+	await collect(h.run(transcript(history()))); await until(() => returning);
+	let acquired = false; const waiting = acquireClaudeCodeSlot().then(release => { acquired = true; release(); });
+	await tick(); assert.equal(acquired, false); t.mock.timers.tick(5); await waiting; await tick();
+	assert.ok(h.warnings.some(w => w.includes("cleanup timed out"))); noFiles(h);
+	reject(new Error("late cleanup rejection")); await tick(); assert.ok(h.warnings.some(w => w.includes("late cleanup rejection")));
 });

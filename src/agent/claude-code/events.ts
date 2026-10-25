@@ -69,6 +69,7 @@ export class EventMapper {
 	}
 	get output(): AssistantMessage { return this.message; }
 	get ended(): boolean { return this.terminal; }
+	get hasOpenBlocks(): boolean { return this.activeBlockIndices.size > 0; }
 	private get blocks(): Array<any> { return this.output.content; }
 	handle(message: SDKMessage): void {
 		if ("parent_tool_use_id" in message && message.parent_tool_use_id != null) {

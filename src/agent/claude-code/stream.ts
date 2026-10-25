@@ -12,8 +12,9 @@ const sweepKey = Symbol.for("lh.claudeCode.swept");
 const state = globalThis as typeof globalThis & { [sweepKey]?: boolean };
 export function resetClaudeCodeStreamForTests(): void { delete state[sweepKey]; }
 export const defaultLoadQuery = () => import("@anthropic-ai/claude-agent-sdk").then(m => m.query);
-type Deps = { executable: string; dataDir: string; claudeDir: string; loadQuery: () => Promise<typeof query>; logger: EventMapperLogger };
+type Deps = { executable: string; dataDir: string; claudeDir: string; loadQuery: () => Promise<typeof query>; logger: EventMapperLogger; parkQuietMs?: number; cleanupWaitMs?: number };
 
+/** options.maxTokens and LH_MAX_OUTPUT_TOKENS do not apply to this provider (no verified SDK surface). */
 export function streamClaudeCode(model: Model<any>, transcript: TranscriptContext, options: SimpleStreamOptions | undefined, deps: Deps): AssistantMessageEventStream {
 	const stream = createAssistantMessageEventStream();
 	const toolNameMap = new Map<string, string>();
@@ -25,11 +26,13 @@ export function streamClaudeCode(model: Model<any>, transcript: TranscriptContex
 		let cwd = "", sessionId: string | undefined, release: (() => void) | undefined;
 		let child: Query | undefined, server: ReturnType<typeof createToolServer> | undefined;
 		let pending: Promise<unknown> | undefined, settled = true, closed = false;
+		let parkTimer: ReturnType<typeof setTimeout> | undefined;
 		let wake!: () => void;
 		const ended = new Promise<undefined>(resolve => { wake = () => resolve(undefined); });
 		const warn = (error: unknown) => deps.logger.warn(`claude-code: ${String(error)}`);
 		const abort = () => { stopChild("aborted"); mapper.fail("aborted", "aborted"); wake(); };
 		function stopChild(reason: string): void {
+			clearTimeout(parkTimer);
 			if (closed || !child) return;
 			closed = true;
 			try { void child.interrupt().catch(warn); } catch (error) { warn(error); }
@@ -37,9 +40,14 @@ export function streamClaudeCode(model: Model<any>, transcript: TranscriptContex
 			server?.closeAll(reason);
 		}
 		function checkParked(): void {
-			const ids = mapper.output.content.filter(b => b.type === "toolCall").map(b => b.id);
-			if (!mapper.ended && ids.length && ids.every(id => server?.calls.includes(id))) mapper.endToolTurn("all tool calls parked");
+			clearTimeout(parkTimer);
+			if (mapper.ended) return;
+			parkTimer = setTimeout(() => {
+				const ids = mapper.output.content.filter(b => b.type === "toolCall").map(b => b.id);
+				if (!mapper.ended && !mapper.hasOpenBlocks && ids.length && ids.every(id => server?.calls.includes(id))) mapper.endToolTurn("all tool calls parked");
+			}, deps.parkQuietMs ?? 500);
 		}
+
 		mapper.onToolTurnEnded = () => { wake(); stopChild("turn ended"); };
 		try {
 			if (overageLatched()) throw new Error(OVERAGE_REFUSAL);
@@ -48,6 +56,9 @@ export function streamClaudeCode(model: Model<any>, transcript: TranscriptContex
 			const { systemPrompt, tools, history } = foldTranscript(transcript);
 			const split = splitPrompt(history);
 			if (split.kind === "invalid") throw new Error("claude-code: nothing to send");
+			release = await acquireClaudeCodeSlot(options?.signal);
+			if (mapper.ended || options?.signal?.aborted) { abort(); return; }
+			if (overageLatched()) throw new Error(OVERAGE_REFUSAL);
 			for (const tool of tools) toolNameMap.set(MCP_TOOL_PREFIX + tool.name, tool.name);
 			const { anthropicMessages } = convertPiMessages(split.prior, new Map([...toolNameMap].map(([sdk, pi]) => [pi, sdk])));
 			cwd = claudeCodeWorkdir(deps.dataDir);
@@ -56,9 +67,6 @@ export function streamClaudeCode(model: Model<any>, transcript: TranscriptContex
 				({ sessionId } = writeSessionFile({ messages: anthropicMessages, cwd, claudeDir: deps.claudeDir, model: model.id }));
 				markSessionActive(sessionId);
 			} catch (error) { if (!(error instanceof Error && error.message === "claude-code: empty history")) throw error; }
-			release = await acquireClaudeCodeSlot(options?.signal);
-			if (mapper.ended || options?.signal?.aborted) { abort(); return; }
-			if (overageLatched()) throw new Error(OVERAGE_REFUSAL);
 			if (tools.length) server = createToolServer(tools, { timeoutMs: 3_600_000, onCall: checkParked });
 			const queryOptions = buildQueryOptions({ executable: deps.executable, cwd, cliModel: model.id,
 				effort: resolveEffort(model, options?.reasoning), appendPrompt: systemPrompt, resumeId: sessionId,
@@ -100,6 +108,16 @@ export function streamClaudeCode(model: Model<any>, transcript: TranscriptContex
 					timer.unref();
 				})]);
 				clearTimeout(timer);
+			}
+			if (child) {
+				let timer: ReturnType<typeof setTimeout> | undefined;
+				try {
+					const cleanup = child.return(undefined).catch(warn);
+					await Promise.race([cleanup, new Promise<void>(resolve => {
+						timer = setTimeout(() => { warn("child cleanup timed out"); resolve(); }, deps.cleanupWaitMs ?? 10_000);
+						timer.unref();
+					})]);
+				} catch (error) { warn(error); } finally { clearTimeout(timer); }
 			}
 			release?.();
 			if (sessionId) {
