@@ -105,7 +105,7 @@ export class EventMapper {
 				if (!this.requests.some(r => r.finalUsage) || aggregate.usage.totalTokens > this.output.usage.totalTokens)
 					this.output.usage = aggregate.usage;
 			}
-			if (this.currentRequest && !this.currentRequest.streamed.size && result.stop_reason != null)
+			if (result.stop_reason != null && (!this.currentRequest?.stopReason || result.stop_reason === "max_tokens"))
 				this.output.stopReason = mapStopReason(result.stop_reason);
 		}
 		let text = resultErrorText(result);
@@ -363,7 +363,7 @@ export class EventMapper {
 		const id = assistantMsg.id;
 		const supersedes = (message as { supersedes?: string[] }).supersedes;
 		if (supersedes?.length) this.supersedeFrames(supersedes);
-		if (this.currentRequest?.id !== id && this.currentRequest?.fallbackTools) {
+		if (this.currentRequest?.id !== id && this.currentRequest?.fallbackTools && this.turnSawToolCall) {
 			this.endToolTurn("different assistant id");
 			return;
 		}
