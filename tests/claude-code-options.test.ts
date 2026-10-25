@@ -87,8 +87,8 @@ describe("Claude Code query contract", () => {
 		const allowed = Object.fromEntries(CHILD_ENV_ALLOWLIST.map(key => [key, `/test/${key}`]));
 		const poisoned = { NODE_ENV: "test" as const, ...poison, ...allowed, ENABLE_CLAUDEAI_MCP_SERVERS: "1", DISABLE_AUTO_COMPACT: "0", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "0" };
 		assert.deepStrictEqual(buildChildEnv(poisoned), { ...allowed, ...flags });
-		const prepended = buildChildEnv({ ...poisoned, PATH: "/test/PATH:/Users/example/bin::" }, null, "/Users/example/bin/claude");
-		assert.equal(prepended.PATH, "/Users/example/bin:/test/PATH");
+		const prepended = buildChildEnv({ ...poisoned, PATH: "/test/PATH:/example/bin::" }, null, "/example/bin/claude");
+		assert.equal(prepended.PATH, "/example/bin:/test/PATH");
 		for (const key of Object.keys(poison)) assert.equal(Object.hasOwn(prepended, key), false);
 		withEnv(poisoned, home => {
 			const env = buildQueryOptions(required).env;

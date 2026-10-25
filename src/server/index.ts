@@ -46,5 +46,4 @@ export * from "./model-catalog.ts";
 export { subscriptionControlsResponse, subscriptionBrowserResponse } from "./web-subscription-http.ts";
 export { sessionCost } from "./pricing.ts";
 
-export { getClaudeCodeStatus, putClaudeCodeConnection, postClaudeCodeLogin } from "./claude-code-connection.ts";
-
+export { getClaudeCodeConnection, putClaudeCodeConnection, postClaudeCodeLogin, deleteClaudeCodeEndpoint } from "./claude-code-connection.ts";
