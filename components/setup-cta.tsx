@@ -39,6 +39,11 @@ export function hasKeylessProvider(catalog: ModelCatalogResponse | undefined): b
 	return catalog?.providers.some((p) => p.keyless && p.keyPresent) ?? false;
 }
 
+/** Unknown catalog availability must not intercept a send. */
+export function zeroKeysVerdict(zeroKeys: boolean, catalog: ModelCatalogResponse | undefined): boolean {
+	return zeroKeys && catalog !== undefined && !hasKeylessProvider(catalog);
+}
+
 /** The zero-keys truth for the calling page: TRUE only after a
  *  successful read says no provider key exists (pending and failed
  *  reads render nothing — the pill must never flash on a gap, and a
@@ -64,7 +69,7 @@ export function useZeroKeys(): boolean {
 			refresh();
 		}
 	});
-	return zeroKeys && !hasKeylessProvider(catalog);
+	return zeroKeysVerdict(zeroKeys, catalog);
 }
 
 /** The pill itself — the models CTA's chrome and placement, the keys

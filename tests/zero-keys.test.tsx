@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { hasKeylessProvider, hasProviderKey, strongKeyless, ZeroKeysPill } from "../components/setup-cta.tsx";
+import { zeroKeysVerdict, hasKeylessProvider, hasProviderKey, strongKeyless, ZeroKeysPill } from "../components/setup-cta.tsx";
 import type { ModelCatalogResponse } from "../src/core/index.ts";
 import { SetupKeysBody } from "../components/setup-dialog.tsx";
 import { DICTATION_KEYLESS, DEEPGRAM_KEY_ID } from "../components/dictation.tsx";
@@ -165,10 +165,11 @@ describe("strongKeyless — the pre-send guard's truth (owner interlude, no-orph
 
 
 describe("keyless provider availability for the zero-keys guard", () => {
-	it("no keys and no keyless provider (or pending catalog) still requires setup", () => {
-		for (const value of [undefined, catalog(null)]) {
-			assert.equal(!hasProviderKey([], undefined) && !hasKeylessProvider(value), true);
-		}
+	it("only a known catalog without keyless providers requires key setup", () => {
+		assert.equal(zeroKeysVerdict(true, undefined), false);
+		assert.equal(zeroKeysVerdict(true, catalog(null)), true);
+		assert.equal(zeroKeysVerdict(false, undefined), false);
+		assert.equal(zeroKeysVerdict(false, catalog(null)), false);
 		const unavailable = catalog(null);
 		unavailable.providers.push({ id: "claude-code", envVar: "LH_CLAUDE_CODE_EXECUTABLE", keyless: true, keyPresent: false });
 		assert.equal(hasKeylessProvider(unavailable), false);
@@ -180,11 +181,13 @@ describe("keyless provider availability for the zero-keys guard", () => {
 		const { modelCatalog } = await import("../src/server/model-catalog.ts");
 		try {
 			enableClaudeCodeProvider("/nonexistent/claude");
-			assert.equal(!hasProviderKey([], undefined) && !hasKeylessProvider(modelCatalog()), false);
+			assert.equal(zeroKeysVerdict(!hasProviderKey([], undefined), modelCatalog()), false);
+			assert.equal(zeroKeysVerdict(false, modelCatalog()), false);
 		} finally {
 			resetClaudeCodeProviderForTests();
 		}
 		assert.equal(modelCatalog().providers.some((p) => p.keyless), false);
 		assert.equal(hasKeylessProvider(modelCatalog()), false);
+		assert.equal(zeroKeysVerdict(true, modelCatalog()), true);
 	});
 });

@@ -4,7 +4,7 @@ import { useContext } from "react";
 import { CheckIcon, SettingsIcon, XIcon } from "lucide-react";
 import { JobsContext } from "@/components/jobs-context";
 import { ChatActionsContext } from "@/components/chat";
-import { isModelsRefusal, isProviderKeyRefusal, type JobKind, type JobRecord } from "@/src/core";
+import { CLAUDE_CODE_OFF_REFUSAL, isModelsRefusal, isProviderKeyRefusal, type JobKind, type JobRecord } from "@/src/core";
 import { BrailleSpinner } from "@/components/braille-spinner";
 
 /**
@@ -43,6 +43,9 @@ export function DispatchCard({ toolCallId, kind }: { toolCallId: string; kind: J
 	if (isModelsRefusal(job.error)) {
 		return <DispatchRefusedCard label={label} line="needs model setup" button="Set up models" />;
 	}
+	if (job.error === CLAUDE_CODE_OFF_REFUSAL) {
+		return <DispatchRefusedCard label={label} line={CLAUDE_CODE_OFF_REFUSAL} />;
+	}
 	if (isProviderKeyRefusal(job.error)) {
 		return <DispatchRefusedCard label={label} line="needs a provider key" button="Add a key" />;
 	}
@@ -60,7 +63,7 @@ export function DispatchCard({ toolCallId, kind }: { toolCallId: string; kind: J
 }
 
 /** The refused card: quiet info tone — nothing red, nothing "failed". */
-function DispatchRefusedCard({ label, line, button }: { label: string; line: string; button: string }) {
+function DispatchRefusedCard({ label, line, button }: { label: string; line: string; button?: string }) {
 	const ctx = useContext(ChatActionsContext);
 	return (
 		<div
@@ -70,7 +73,7 @@ function DispatchRefusedCard({ label, line, button }: { label: string; line: str
 			<SettingsIcon className="size-3.5" />
 			<span className="font-medium uppercase tracking-wide">{label}</span>
 			<span>{line}</span>
-			{ctx && (
+			{ctx && button && (
 				<button
 					type="button"
 					data-testid="dispatch-setup-link"

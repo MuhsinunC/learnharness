@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseModelsRefusal, parseProviderKeyRefusal } from "../components/chat.tsx";
+import { providerRefusalAction, refusalBannerText, parseModelsRefusal, parseProviderKeyRefusal } from "../components/chat.tsx";
 import { prefillFromSlots, prefillLevelFromPin, setupStage } from "../components/setup-dialog.tsx";
 import {
 	isModelsRefusal,
@@ -173,5 +173,22 @@ describe("setupStage — unchanged by the BYOK wave", () => {
 		assert.equal(setupStage(null), "keys");
 		assert.equal(setupStage([{ id: "x", keyPresent: false }]), "keys");
 		assert.equal(setupStage([{ id: "x", keyPresent: true }]), "pickers");
+	});
+});
+
+describe("provider refusal remedy and banner", () => {
+	it("keeps Claude Code notices visible while keyed providers open setup", () => {
+		assert.equal(providerRefusalAction(JSON.stringify(providerKeyMissing("claude-code", ["strong"]))), "notice");
+		assert.equal(providerRefusalAction(JSON.stringify(providerKeyMissing("openrouter", ["strong"]))), "setup");
+		for (const message of [undefined, REFUSAL, "garbage", '{"code":"provider_key_missing","error":"garbage"}']) {
+			assert.equal(providerRefusalAction(message), null);
+		}
+	});
+
+	it("shows restart instructions instead of JSON for the subscription refusal", () => {
+		assert.equal(refusalBannerText(JSON.stringify(providerKeyMissing("claude-code", ["strong"]))), CLAUDE_CODE_OFF_REFUSAL);
+		for (const message of ["garbage", REFUSAL, JSON.stringify(providerKeyMissing("openrouter", ["strong"]))]) {
+			assert.equal(refusalBannerText(message), message);
+		}
 	});
 });

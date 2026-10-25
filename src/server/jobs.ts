@@ -595,7 +595,8 @@ function failJob(jobId: string, err: Error): void {
 	// delivery error. Non-running records are never overwritten here.
 	const job = stores.jobStore.getJob(jobId);
 	if (!job || job.status !== "running") return;
-	stores.jobStore.updateJob(jobId, { status: "error", error: err.message, activity: "delivery failed" });
+	console.error(`[job ${jobId}] wake delivery failed:`, err);
+	stores.jobStore.updateJob(jobId, { status: "error", error: job.error ?? err.message, activity: "delivery failed" });
 }
 
 /**

@@ -67,3 +67,78 @@ it("production extraction refuses a disabled Claude Code pin with ProviderKeyMis
 		});
 	});
 });
+
+function sweep() {
+	const state = (globalThis as { __lhWakePipeline?: { lastSweepAt: number } }).__lhWakePipeline;
+	if (state) state.lastSweepAt = 0;
+	recoverStaleJobs();
+}
+
+async function waitFor(check: () => boolean) {
+	for (let i = 0; i < 300; i++) {
+		if (check()) return;
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+	assert.fail("background job did not reach the expected state");
+}
+
+it("a refusing job preserves its original error when the teacher wake returns 503", async () => {
+	await withDisabledPin(async () => {
+		setTurnRunner(async () => 503);
+		const chat = stores.chatStore.createChat("Refusal with failed wake");
+		const job = stores.jobStore.createJob({ chatId: chat.id, kind: "research", toolCallId: "failed-wake" });
+		sweep();
+		await waitFor(() => stores.jobStore.getJob(job.id)?.status === "error");
+		assert.equal(stores.jobStore.getJob(job.id)?.error, providerKeyMissing("claude-code", ["cheap"]).error);
+		assert.equal(stores.jobStore.getJob(job.id)?.activity, "delivery failed");
+	});
+});
+
+it("production respawn delivers a failure result for an available provider's missing catalog model", async () => {
+	const saved = stores.settingsStore.readSettings();
+	try {
+		enableClaudeCodeProvider("/nonexistent/claude");
+		stores.settingsStore.writeSettings({ version: 1, models: { cheap: { model: { provider: "claude-code", id: "no-such-model" } } } });
+		let wakes = 0;
+		setTurnRunner(async () => { wakes++; return 200; });
+		const chat = stores.chatStore.createChat("Missing catalog model");
+		const job = stores.jobStore.createJob({ chatId: chat.id, kind: "research", toolCallId: "missing-model" });
+		sweep();
+		await waitFor(() => stores.jobStore.getJob(job.id)?.status === "error");
+		const done = stores.jobStore.getJob(job.id)!;
+		assert.equal(done.error, "claude-code catalog has no model no-such-model");
+		assert.equal(done.activity, "failed");
+		assert.match(JSON.stringify(done.result), /claude-code catalog has no model no-such-model/);
+		assert.equal(wakes, 1);
+	} finally {
+		stores.settingsStore.writeSettings(saved ?? { version: 1 });
+		resetClaudeCodeProviderForTests();
+	}
+});
+
+it("a parked refusal stays live and stale recovery does not queue duplicate steers", async () => {
+	await withDisabledPin(async () => {
+		const { isJobLive } = await import("../src/agent/subagents/aborts.ts");
+		setTurnRunner(async () => 200);
+		const chat = stores.chatStore.createChat("Parked refusal");
+		stores.chatStore.saveMessages(chat.id, [{
+			id: "pending-quiz", role: "assistant",
+			content: [{ type: "toolCall", id: "quiz-call", name: "quiz", arguments: { question: "q", choices: ["a", "b"] } }],
+			api: "openai-completions", provider: "openrouter", model: "test",
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, stopReason: "toolUse", timestamp: 1,
+		} as never]);
+		const job = stores.jobStore.createJob({ chatId: chat.id, kind: "research", toolCallId: "parked-refusal" });
+		try {
+			sweep();
+			await waitFor(() => !!stores.jobStore.getJob(job.id)?.result);
+			sweep();
+			const state = (globalThis as { __lhWakePipeline?: { queues: Map<string, unknown[]> } }).__lhWakePipeline!;
+			assert.equal(state.queues.get(chat.id)?.length, 1);
+			assert.notEqual(stores.jobStore.getJob(job.id)?.activity, "recovering: re-delivering");
+			assert.equal(isJobLive(job.id), true);
+		} finally {
+			stores.chatStore.saveMessages(chat.id, []);
+			await waitFor(() => stores.jobStore.getJob(job.id)?.status === "error" && !isJobLive(job.id));
+		}
+	});
+});
