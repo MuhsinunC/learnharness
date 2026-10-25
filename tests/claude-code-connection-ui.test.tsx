@@ -505,3 +505,48 @@ for (const baseUrl of ["http://127.0.0.1:9000", "http://localhost:9000", "https:
 	fixture(); await mount(); await type("Base URL", baseUrl);
 	assert.equal(text().includes("This address isn't encrypted; anything else running on this computer could read the token."), baseUrl.startsWith("http:"));
 });
+
+test("removal clears unsaved credentials before another address can be saved", async () => {
+	const f = fixture({ endpoint: { baseUrl: "https://relay.example", tokenSet: true } }); await mount();
+	await type("Base URL", "https://draft.example");
+	await type("Token", "unsaved-test-token");
+	await click(button("Remove saved endpoint"));
+	assert.equal(input("Token").value, "");
+	assert.equal(input("Base URL").value, "");
+	await type("Base URL", "https://new.example");
+	await click(button("Save"));
+	assert(text().includes("Enter a token."));
+	assert.equal(puts(f).length, 0);
+});
+for (const view of [
+	{ found: false, discovered: null },
+	{ ...repair },
+	{ envOverride: true },
+]) test("saved endpoint can be removed in view " + JSON.stringify(view), async () => {
+	const f = fixture({ ...view, endpoint: { baseUrl: "https://relay.example", tokenSet: true } }); await mount();
+	assert(button("Remove saved endpoint"));
+	await click(button("Remove saved endpoint"));
+	assert.deepEqual(f.calls.at(-1), { method: "DELETE", path: "/api/claude-code/endpoint" });
+});
+test("endpoint mode allows removal of malformed saved credentials", async () => {
+	const f = fixture({ mode: "endpoint", endpoint: { baseUrl: null, tokenSet: false } }); await mount();
+	await click(button("Remove saved endpoint"));
+	assert.deepEqual(f.calls.at(-1), { method: "DELETE", path: "/api/claude-code/endpoint" });
+});
+test("a lost DELETE response cancels pending login activation", async t => {
+	t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+	const f = fixture({ endpoint: { baseUrl: "https://relay.example", tokenSet: true } }); await mount();
+	await click(button("Log in with Claude"));
+	assert(storage.has("lh:claude-login"));
+	const fetchStatus = globalThis.fetch;
+	globalThis.fetch = (async (path, options) => {
+		if (options?.method === "DELETE") throw new Error("lost response");
+		return fetchStatus(path, options);
+	}) as typeof fetch;
+	await click(button("Remove saved endpoint"));
+	assert.equal(storage.has("lh:claude-login"), false);
+	f.set({ loggedIn: true, mode: "off" });
+	await act(async () => t.mock.timers.tick(CLAUDE_LOGIN_POLL_MS));
+	assert.equal(f.calls.filter(c => c.method === "GET").length, 2);
+	assert.equal(puts(f).length, 0);
+});
