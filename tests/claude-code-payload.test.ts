@@ -52,7 +52,7 @@ describe("Claude Code payload guard", () => {
 		});
 	});
 
-	it("flags platform symlinks regardless of their target", () => {
+	it("flags symlinks without ordinary SDK package metadata", () => {
 		withTree((root) => {
 			const scope = path.join(root, "node_modules", "@anthropic-ai");
 			fs.mkdirSync(scope, { recursive: true });
@@ -66,6 +66,39 @@ describe("Claude Code payload guard", () => {
 				fs.symlinkSync(target, path.join(scope, name));
 			}
 			assert.deepEqual(findForbiddenPayload(root), Object.keys(targets).map(name => `node_modules/@anthropic-ai/${name}`).sort());
+		});
+	});
+
+	it("allows a Turbopack alias only when it resolves to the ordinary SDK", () => {
+		withTree((root) => {
+			const scope = path.join(root, "node_modules", "@anthropic-ai");
+			const sdk = path.join(scope, "claude-agent-sdk");
+			fs.mkdirSync(sdk, { recursive: true });
+			fs.writeFileSync(path.join(sdk, "package.json"), JSON.stringify({ name: "@anthropic-ai/claude-agent-sdk" }));
+			fs.symlinkSync("./claude-agent-sdk", path.join(scope, "claude-agent-sdk-018a1d78d3bd9393"));
+			assert.deepEqual(findForbiddenPayload(root), []);
+		});
+	});
+
+	it("flags platform packages and hash-style aliases pointing to them", () => {
+		withTree((root) => {
+			const scope = path.join(root, "node_modules", "@anthropic-ai");
+			const platform = "claude-agent-sdk-darwin-arm64";
+			fs.mkdirSync(path.join(scope, platform), { recursive: true });
+			fs.writeFileSync(path.join(scope, platform, "package.json"), JSON.stringify({ name: `@anthropic-ai/${platform}` }));
+			const alias = "claude-agent-sdk-018a1d78d3bd9393";
+			fs.symlinkSync(`./${platform}`, path.join(scope, alias));
+			assert.deepEqual(findForbiddenPayload(root), [alias, platform].map(name => `node_modules/@anthropic-ai/${name}`));
+		});
+	});
+
+	it("fails closed on malformed metadata and missing or other package names", () => {
+		for (const metadata of ["{", "null", "{}", JSON.stringify({ name: "other" })]) withTree((root) => {
+			const relative = "node_modules/@anthropic-ai/claude-agent-sdk-018a1d78d3bd9393";
+			const dir = path.join(root, relative);
+			fs.mkdirSync(dir, { recursive: true });
+			fs.writeFileSync(path.join(dir, "package.json"), metadata);
+			assert.deepEqual(findForbiddenPayload(root), [relative]);
 		});
 	});
 
