@@ -23,6 +23,7 @@ import { piModels } from "../agent/models.ts";
 import { settingsStore } from "../store/settings.ts";
 import { effectiveSettings } from "./stores.ts";
 import { keyValue } from "./keys.ts";
+import { bootClaudeCodeProvider } from "./claude-code-boot.ts";
 import type { ChatSettings } from "../core/contracts/chat.ts";
 import type {
 	CatalogDefaults,
@@ -35,6 +36,8 @@ import type {
 import type { EffectiveModelSpec, EffectiveSlot } from "../core/settings-resolution.ts";
 import { AUTH_PROVIDER_KEYS } from "../core/auth-keys.ts";
 import { BACKGROUND_MODEL_ROLES, MODEL_SLOTS, type BackgroundModelRole, type ModelSlotName, type ModelsSettings } from "../core/settings.ts";
+
+bootClaudeCodeProvider();
 
 /** The picker's client-safe model entry (contract: core/contracts/models.ts). */
 export type ModelDto = ModelCatalogEntry;
@@ -121,16 +124,18 @@ export function catalogSlots(): SlotPins {
  *  with keyPresent read env-wins through the keys seam, fresh per call —
  *  saving a key immediately federates the provider into the picker. */
 export function catalogProviders(): CatalogProvider[] {
-	return AUTH_PROVIDER_KEYS.map((p) => ({
+	const providers: CatalogProvider[] = AUTH_PROVIDER_KEYS.map((p) => ({
 		id: p.id,
 		envVar: p.envVar,
 		keyPresent: keyValue(p.envVar) !== undefined,
-	})).sort((a, b) => a.id.localeCompare(b.id));
+	}));
+	if (piModels().getProvider("claude-code")) {
+		providers.push({ id: "claude-code", envVar: "LH_CLAUDE_CODE_EXECUTABLE", keyPresent: true, keyless: true });
+	}
+	return providers.sort((a, b) => a.id.localeCompare(b.id));
 }
 
-/** The providers whose key is present — the picker federates exactly
- *  these (a keyless provider's models are unreachable by design; the
- *  Keys page is the discovery surface, same discipline as search). */
+/** The configured providers, including the boot-gated keyless provider. */
 function keyedProviderIds(): Set<string> {
 	return new Set(catalogProviders().filter((p) => p.keyPresent).map((p) => p.id));
 }

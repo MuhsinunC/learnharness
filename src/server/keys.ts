@@ -132,6 +132,10 @@ export function initAuthEnv(): void {
 	}
 }
 
+export function isFillGapped(name: string): boolean {
+	return boot().fillGap.has(name);
+}
+
 /** Is this env-var name one the keys system manages (curated, provider,
  *  or held in the file)? */
 function isManagedName(name: string): boolean {

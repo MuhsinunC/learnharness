@@ -69,9 +69,8 @@ export interface ModelCatalogResponse {
 	slots: SlotPins;
 	/** Providers with a PRESENT key, and which env var gates each — the
 	 *  model slots wave's federation surface (2026-09-20): the picker lists
-	 *  models from these providers' pi-ai catalogs only. Keyless providers
-	 *  are simply absent (the Keys page is the discovery surface, same
-	 *  discipline as the search engines). */
+	 *  models from these providers' pi-ai catalogs only. The opt-in Claude
+	 *  Code provider is marked keyless and requires its executable boot gate. */
 	providers: CatalogProvider[];
 }
 
@@ -82,4 +81,5 @@ export interface CatalogProvider {
 	envVar: string;
 	/** Whether that var is currently present (env or auth file). */
 	keyPresent: boolean;
+	keyless?: true;
 }
