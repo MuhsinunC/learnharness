@@ -4,10 +4,15 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { execFileSync } from "node:child_process";
 import { it } from "node:test";
+import { bootClaudeCodeProvider, resetClaudeCodeBootForTests } from "../src/server/claude-code-boot.ts";
+import { piModels, resetClaudeCodeProviderForTests } from "../src/agent/models.ts";
+import { providerKeyPresent } from "../src/server/keys.ts";
 
 const root = path.resolve(import.meta.dirname, "..");
 const loader = path.join(root, "node_modules/tsx/dist/loader.mjs");
 const variable = "LH_CLAUDE_CODE_EXECUTABLE";
+// The subprocess scenarios use a /bin/sh stub and POSIX exec bits.
+const posixOnly = { skip: process.platform === "win32" && "POSIX executable checks" };
 
 function scenario(kind: string, entry: "catalog" | "chat" = "catalog") {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-cc-catalog-"));
@@ -104,16 +109,17 @@ for (const [kind, reason] of [
 	["relative", "not an absolute path"], ["non-executable", "not executable"],
 	["directory", "not a file"], ["missing", "not a file"],
 ] as const) {
-	it(`rejects ${kind} with one private reason line`, () => {
+	it(`rejects ${kind} with one private reason line`, kind === "ignore" ? {} : posixOnly, () => {
 		const result = scenario(kind);
 		assert.deepEqual(result.first, scenario("unset").first);
 		assert.deepEqual(result.warnings, [`claude-code: LH_CLAUDE_CODE_EXECUTABLE ignored (${reason})`]);
 		assert.ok(!result.warnings[0].includes(result.stub));
 		assert.equal(result.fillGapped, kind === "fill-gap");
+		assert.equal(result.keyPresent, false);
 	});
 }
 
-it("production import enables the catalog and accepted decisions re-register", () => {
+it("production import enables the catalog and accepted decisions re-register", posixOnly, () => {
 	for (const kind of ["accepted", "restore"]) {
 		const result = scenario(kind);
 		const row = { id: "claude-code", envVar: variable, keyPresent: true, keyless: true };
@@ -137,14 +143,14 @@ it("an unset boot decision stays disabled after an env change", () => {
 	assert.deepEqual(result.warnings, []);
 });
 
-it("a rejected decision logs once across repeated boots", () => {
+it("a rejected decision logs once across repeated boots", posixOnly, () => {
 	const result = scenario("reject-repeat");
 	assert.deepEqual(result.first.ids, []);
 	assert.deepEqual(result.final, result.first);
 	assert.deepEqual(result.warnings, ["claude-code: LH_CLAUDE_CODE_EXECUTABLE ignored (not executable)"]);
 });
 
-it("chat-handler import boots the provider and engine only with the executable env", () => {
+it("chat-handler import boots the provider and engine only with the executable env", posixOnly, () => {
 	const accepted = scenario("accepted", "chat");
 	assert.equal(accepted.providerPresent, true);
 	assert.equal(accepted.engineModel, "claude-opus-5-5");
@@ -153,4 +159,55 @@ it("chat-handler import boots the provider and engine only with the executable e
 	assert.equal(unset.providerPresent, false);
 	assert.equal(unset.engineModel, null);
 	assert.deepEqual(unset.warnings, []);
+});
+
+function bootWith(env: Record<string, string>, platform: NodeJS.Platform) {
+	const warnings: string[] = [];
+	const warn = console.warn;
+	console.warn = (...args: unknown[]) => void warnings.push(args.join(" "));
+	resetClaudeCodeBootForTests();
+	resetClaudeCodeProviderForTests();
+	try {
+		bootClaudeCodeProvider(env as NodeJS.ProcessEnv, platform);
+		return { warnings, registered: piModels().getProvider("claude-code") !== undefined, keyPresent: providerKeyPresent("claude-code") };
+	} finally {
+		console.warn = warn;
+		resetClaudeCodeBootForTests();
+		resetClaudeCodeProviderForTests();
+	}
+}
+
+it("only darwin and linux are allowed; other platforms refuse before any path check", () => {
+	const secret = "/nonexistent/secret-claude-path";
+	for (const [platform, reason] of [
+		["win32", "Windows is not supported"], ["freebsd", "unsupported platform freebsd"], ["aix", "unsupported platform aix"],
+	] as const) {
+		const result = bootWith({ [variable]: secret }, platform);
+		assert.deepEqual(result.warnings, [`claude-code: LH_CLAUDE_CODE_EXECUTABLE ignored (${reason})`]);
+		assert.ok(!result.warnings[0]!.includes(secret));
+		assert.equal(result.registered, false);
+		assert.equal(result.keyPresent, false);
+	}
+});
+
+it("darwin and linux accept an executable", posixOnly, () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-cc-platform-"));
+	try {
+		const stub = path.join(dir, "claude");
+		fs.writeFileSync(stub, "#!/bin/sh\nexit 0\n");
+		fs.chmodSync(stub, 0o755);
+		for (const platform of ["darwin", "linux"] as const) {
+			assert.deepEqual(bootWith({ [variable]: stub }, platform), { warnings: [], registered: true, keyPresent: true });
+		}
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+it("LH_IGNORE_ENV_KEYS is read from the env passed to the boot gate", () => {
+	assert.equal(process.env.LH_IGNORE_ENV_KEYS, undefined);
+	assert.equal(process.env[variable], undefined);
+	const result = bootWith({ [variable]: "/nonexistent/claude", LH_IGNORE_ENV_KEYS: "1" }, "linux");
+	assert.deepEqual(result.warnings, ["claude-code: LH_CLAUDE_CODE_EXECUTABLE ignored (LH_IGNORE_ENV_KEYS=1)"]);
+	assert.equal(result.registered, false);
 });

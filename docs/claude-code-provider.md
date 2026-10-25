@@ -48,6 +48,6 @@ Server tools execute in the harness and resume in a fresh child with tool result
 
 The SDK platform binary is never shipped in the desktop payload; the build fails if it is present. The launcher is supplied by the owner.
 
-`LH_MAX_OUTPUT_TOKENS` and `maxTokens` do not apply to this provider: Claude Code sets its own output limit. Thinking `off` sends no effort, so Claude Code's default thinking applies. Usage cost shows as unpriced ("—").
+`LH_MAX_OUTPUT_TOKENS` and `maxTokens` do not cap this provider: Claude Code sets its own output limit. An invalid `LH_MAX_OUTPUT_TOKENS` still fails every engine build, this one included, because it is validated for all providers: set it to an integer >= 1024 or leave it unset. Thinking `off` sends no effort, so Claude Code's default thinking applies. Usage cost shows as unpriced ("—").
 
 Developers who export the variable in their shell will see an extra provider row in `tests/model-catalog.test.ts`-style outputs. Run the test suite with `LH_CLAUDE_CODE_EXECUTABLE` unset.
