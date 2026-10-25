@@ -1,9 +1,25 @@
 import { randomUUID } from "node:crypto";
-import { lstatSync, mkdirSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { createSession, deleteSession, getProjectDir, type Message } from "cc-session-io";
+import { lstatSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
+import { join } from "node:path";
+import { createSession, deleteSession, getProjectDir, normalizeProjectPath, type Message } from "cc-session-io";
 
 import type { AnthropicMessage } from "./convert.ts";
+
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const activeSessionsKey = Symbol.for("learnharness.claude-code.active-sessions");
+
+function activeSessions(): Set<string> {
+	const registry = globalThis as typeof globalThis & { [activeSessionsKey]?: Set<string> };
+	return registry[activeSessionsKey] ??= new Set<string>();
+}
+
+export function markSessionActive(id: string): void {
+	activeSessions().add(id);
+}
+
+export function markSessionDone(id: string): void {
+	activeSessions().delete(id);
+}
 
 export function writeSessionFile({ messages, cwd, claudeDir, model }: {
 	messages: AnthropicMessage[];
@@ -11,22 +27,22 @@ export function writeSessionFile({ messages, cwd, claudeDir, model }: {
 	claudeDir: string;
 	model: string;
 }): { sessionId: string; jsonlPath: string } {
+	// With no prior history the orchestrator sends a fresh query without resume.
+	if (messages.length === 0) throw new Error("claude-code: empty history");
 	const session = createSession({ projectPath: cwd, claudeDir, sessionId: randomUUID(), model });
 	// cc-session-io preserves redacted thinking at runtime but omits it from its types.
 	session.importMessages(messages as Message[]);
 	session.save();
-	if (session.records.length === 0) {
-		// save() skips sessions with no pending records.
-		mkdirSync(dirname(session.jsonlPath), { recursive: true });
-		writeFileSync(session.jsonlPath, "", { flag: "wx" });
-	}
+	if (session.records.length === 0) throw new Error("claude-code: empty history");
 	return { sessionId: session.sessionId, jsonlPath: session.jsonlPath };
 }
 
 export function deleteSessionFile(id: string, cwd: string, claudeDir: string): void {
+	if (!SESSION_ID.test(id)) throw new Error(`claude-code: invalid session id "${id}"`);
 	deleteSession(id, cwd, claudeDir);
 }
 
+/** Liveness is in-process only: one server owns a data dir; cross-process liveness is out of scope. */
 export function sweepStaleSessions(
 	cwd: string,
 	claudeDir: string,
@@ -43,8 +59,14 @@ export function sweepStaleSessions(
 	}
 	for (const entry of entries) {
 		if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
-		if (lstatSync(join(projectDir, entry.name)).mtimeMs < now - olderThanMs) {
-			deleteSessionFile(entry.name.slice(0, -".jsonl".length), cwd, claudeDir);
+		const id = entry.name.slice(0, -".jsonl".length);
+		if (!SESSION_ID.test(id) || activeSessions().has(id)) continue;
+		try {
+			if (lstatSync(join(projectDir, entry.name)).mtimeMs < now - olderThanMs) {
+				deleteSessionFile(id, cwd, claudeDir);
+			}
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 		}
 	}
 }
@@ -52,5 +74,10 @@ export function sweepStaleSessions(
 export function claudeCodeWorkdir(dataDir: string): string {
 	const cwd = join(dataDir, "claude-code", "cwd");
 	mkdirSync(cwd, { recursive: true });
-	return realpathSync(cwd);
+	const realCwd = realpathSync(cwd);
+	const normalized = normalizeProjectPath(realCwd);
+	if (normalized.length > 200) {
+		throw new Error(`claude-code: workdir path is ${normalized.length} characters; cc-session-io/Claude Code resume requires at most 200 (${normalized}); use a shorter data directory`);
+	}
+	return realCwd;
 }
