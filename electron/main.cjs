@@ -31,6 +31,7 @@ const { createSubscriptions, loadSubscriptionSDK } = require("./subscriptions.cj
 const { attachSubscriptionChild, subscriptionControl } = require("./subscription-ipc.cjs");
 const { desktopAPIHeaders } = require("./desktop-api.cjs");
 const { openWebSubscriptionBrowser } = require("./web-subscription-browser.cjs");
+const { isForkBuild } = require("./updater-gate.cjs");
 const { randomBytes } = require("node:crypto");
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
@@ -473,6 +474,10 @@ function automaticUpdatesEnabled() {
 }
 
 function checkForUpdates({ manual = false } = {}) {
+	if (manual && isForkBuild(app.getVersion())) {
+		dialog.showMessageBox({ type: "info", message: "Updates are disabled in this build." });
+		return;
+	}
 	if (!autoUpdater) return;
 	if (!manual && !automaticUpdatesEnabled()) {
 		log("auto-update: automatic check skipped (turned off in Settings)");
@@ -506,6 +511,11 @@ function installUpdateNow() {
 function setupAutoUpdater() {
 	if (!app.isPackaged) {
 		log("auto-update: dev build — updater disabled");
+		reportUpdateStatus("disabled");
+		return;
+	}
+	if (isForkBuild(app.getVersion())) {
+		log("auto-update: fork build — updater disabled");
 		reportUpdateStatus("disabled");
 		return;
 	}
