@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { notifySettingsSaved } from "@/components/settings-signal";
 import { Toggle } from "./controls";
-import { normalizeEndpointUrl } from "@/src/core";
+import { isAllowedEndpointUrl } from "@/src/core";
 
 export const CLAUDE_LOGIN_POLL_MS = 2000;
 export const CLAUDE_LOGIN_POLL_LIMIT_MS = 600000;
@@ -16,7 +16,7 @@ type Status = {
 	executable: string | null; found: boolean; candidates?: string[] | null; version?: string | null;
 	loggedIn: boolean; account?: { email?: string | null; subscriptionType: string | null } | null;
 	login?: Login | null; endpoint?: { baseUrl: string | null; tokenSet: boolean } | null; error?: string | null;
-	// Newer servers: `ok: true` marks a committed write; `probeError` is a diagnostic, not a failure.
+	// Newer servers: `ok` says whether a write committed; `probeError` is a diagnostic, not a failure.
 	ok?: boolean; probeError?: string | null; discovered?: string | null;
 };
 type Change = { mode: Status["mode"]; baseUrl?: string; token?: string };
@@ -108,16 +108,25 @@ export function ClaudeCodeConnection() {
 		try {
 			const response = await fetch(method === "POST" ? "/api/claude-code/login" : "/api/claude-code", method === "GET" ? { cache: "no-store" } : { method, headers: { "Content-Type": "application/json" }, ...(body ? { body: JSON.stringify(body) } : {}) });
 			const reply = await response.json();
-			const committed = response.ok && (reply.ok === true || (reply.ok === undefined && (reply.error == null || (typeof reply.found === "boolean" && (reply.mode !== previous?.mode || reply.active !== previous?.active)))));
-			if (method === "PUT" && committed) {
+			// A 2xx write commits unless the server says `ok: false`; older servers send no `ok`.
+			const committed = method === "PUT" && response.ok && (reply.ok === undefined || reply.ok === true);
+			if (committed) {
 				if (!automatic) { modeGeneration.current++; clearActivation(); }
 				notifySettingsSaved("keys");
 			}
 			if (method === "POST" && (!response.ok || reply.error != null || reply.login?.state === "failed")) clearActivation();
 			if (!mounted.current || owner !== sequence.current) return;
-			if (!response.ok) { showError(safeError(reply.error, fallback, sentToken), background); return; }
+			if (!response.ok) {
+				if (method === "POST" && reply.login?.state === "failed") showError(safeError(reply.login.error, LOGIN_ERROR, sentToken));
+				else showError(safeError(reply.error, fallback, sentToken), background);
+				return;
+			}
 			if (background && errorSource.current === "background") { errorSource.current = null; setError(null); }
-			if (reply.error != null) {
+			if (committed && reply.error != null) {
+				// The write landed; the server's error describes a follow-up probe, so show it muted.
+				accept({ ...reply, probeError: reply.probeError ?? reply.error }, sentToken, body?.mode === "endpoint"); return;
+			}
+			if (reply.error != null || (method === "PUT" && !committed)) {
 				if (typeof reply.found === "boolean") accept({ ...reply, error: safeError(reply.error, fallback, sentToken) }, sentToken, method === "PUT" && body?.mode === "endpoint");
 				showError(safeError(reply.error, fallback, sentToken), background); return;
 			}
@@ -147,8 +156,8 @@ export function ClaudeCodeConnection() {
 		// Requests and the polling timer read current status through refs.
 	}, []);
 	function saveEndpoint() {
-		const url = normalizeEndpointUrl(baseUrl);
-		if (url === null) { showError("Enter an https:// URL, or http://localhost or http://127.0.0.1 for a relay on this computer."); return; }
+		const url = baseUrl.trim();
+		if (!isAllowedEndpointUrl(url)) { showError("Enter an https:// URL, or http://localhost or http://127.0.0.1 for a relay on this computer."); return; }
 		const token = tokenInput.current?.value ?? "";
 		if (!token && !status?.endpoint?.tokenSet) { showError("Enter a token."); return; }
 		void request("PUT", { mode: "endpoint", baseUrl: url, ...(token ? { token } : {}) });
