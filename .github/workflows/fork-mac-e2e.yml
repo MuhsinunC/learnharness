@@ -107,11 +107,10 @@ jobs:
           printf '{"OPENROUTER_API_KEY":"ci-dummy-not-a-real-key"}\n' > "$data/auth.json"
           printf '{"fixture":"credential"}\n' > "$data/nested dir/foo-credentials.json"
           chmod 600 "$data/auth.json" "$data/nested dir/foo-credentials.json"
-          printf '{}\n' > "$data/data/chats/one.json"
-          printf '{"chat":2}\n' > "$data/data/chats/two.json"
-          printf '{}\n' > "$data/data/graph/sources.json"
-          printf '{}\n' > "$data/data/graph/positions.json"
-          printf '{}\n' > "$data/data/settings.json"
+          golden="$GITHUB_WORKSPACE/tests/fixtures/golden-data"
+          cp "$golden/chats/"*.json "$data/data/chats/"
+          cp "$golden/graph/"* "$data/data/graph/"
+          cp "$golden/settings.json" "$data/data/settings.json"
           printf 'fixture bytes\n' > "$data/nested dir/file with space"
           bash tests/fork-mac-e2e/data-manifest.sh write "$data" "$ART/data-manifest.jsonl"
       - name: Quarantine downloaded fork
@@ -123,7 +122,7 @@ jobs:
         run: |
           set -euo pipefail
           env -u LH_NO_GUI scripts/migrate-to-fork.sh --dmg "$DMG" --sha256 "$DMG_SHA256" 2>&1 | tee "$ART/migrate-output.txt"
-          for line in 'Chats: 2; graph files: 2; settings: yes' 'Sign-in files (names only):' \
+          for line in 'Chats: 2; graph files: 7; settings: yes' 'Sign-in files (names only):' \
             '  auth.json' '  nested dir/foo-credentials.json' 'Launching LearnHarness...' 'Done.'; do
             grep -Fx "$line" "$ART/migrate-output.txt"
           done
@@ -157,7 +156,6 @@ jobs:
           set -euo pipefail
           pid=$(ps -axo pid=,command= | awk '$2=="/Applications/LearnHarness.app/Contents/MacOS/LearnHarness" && NF==2 {print $1}')
           [[ $pid =~ ^[0-9]+$ ]]
-          screencapture -x "$ART/after-launch.png" || true
           for ((i=0; i<30; i++)); do kill -0 "$pid"; sleep 1; done
           log="$HOME/Library/Application Support/LearnHarness/logs/main.log"
           port=
@@ -181,6 +179,24 @@ jobs:
           echo "::add-mask::$secret"
           [[ $(curl --max-time 60 -sS -H "x-learnharness-desktop: $secret" \
             -o "$RUNNER_TEMP/models.json" -w '%{http_code}' "http://127.0.0.1:$port/api/models") == 200 ]]
+          [[ $(curl --max-time 60 -sS -H "x-learnharness-desktop: $secret" \
+            -o "$RUNNER_TEMP/chats.json" -w '%{http_code}' "http://127.0.0.1:$port/api/chats") == 200 ]]
+          [[ $(curl --max-time 60 -sS -H "x-learnharness-desktop: $secret" \
+            -o "$RUNNER_TEMP/graph.json" -w '%{http_code}' "http://127.0.0.1:$port/api/graph") == 200 ]]
+          python3 - "$RUNNER_TEMP/chats.json" "$RUNNER_TEMP/graph.json" "$GITHUB_WORKSPACE/tests/fixtures/golden-data" <<'PY'
+          import json, sys
+          from pathlib import Path
+          golden = Path(sys.argv[3])
+          expected_chats = {p.stem for p in (golden / 'chats').glob('*.json')}
+          chats = json.loads(Path(sys.argv[1]).read_text())['chats']
+          assert expected_chats <= {chat['id'] for chat in chats}
+          print(f'chats ok: {len(expected_chats)}')
+          expected_nodes = {json.loads(line)['id'] for line in (golden / 'graph/nodes.jsonl').read_text().splitlines() if line.strip()}
+          propositions = json.loads(Path(sys.argv[2]).read_text())['propositions']
+          # getGraph merges repeated lines by id; graphSnapshot preserves that id set.
+          assert propositions and {node['id'] for node in propositions} == expected_nodes
+          print(f'propositions: {len(propositions)}')
+          PY
           unset secret candidate
           python3 - "$RUNNER_TEMP/models.json" <<'PY'
           import json, sys
@@ -188,7 +204,16 @@ jobs:
           assert isinstance(data['models'], list) and data['models']
           assert any(m['provider'] == 'openrouter' and m['id'] for m in data['models'])
           PY
-          screencapture -x "$ART/after-checks.png" || true
+          for ((i=0; i<3; i++)); do
+            if screencapture -x "$ART/after-launch.png" &&
+              test -f "$ART/after-launch.png" &&
+              [[ $(stat -f %z "$ART/after-launch.png") -ge 10240 ]]; then
+              break
+            fi
+            if ((i < 2)); then sleep 2; fi
+          done
+          test -f "$ART/after-launch.png"
+          [[ $(stat -f %z "$ART/after-launch.png") -ge 10240 ]]
       - name: Check new crash reports and preserve main log
         run: |
           set -euo pipefail
@@ -234,9 +259,10 @@ jobs:
       - name: Verify seeded data survived the app run
         run: |
           set -euo pipefail
-          # No seeded-file exceptions: settings.ts reads without rewriting;
-          # chats.ts stamps only on writes; graph reads do not write sources or
-          # positions. Startup purges only unseeded legacy graph ledgers.
+          # No seeded-file exceptions: the two golden chats, seven golden graph
+          # files and golden settings are read without rewriting or stamping.
+          # Startup purges only unseeded edges/events ledgers; no jobs are seeded.
+          # Dummy sign-in files and the nested space-named file must also survive.
           # Logs, Chromium profile and caches may be added and are listed by name.
           # Runs after the quit so the live Chromium profile is not walked mid-write.
           bash tests/fork-mac-e2e/data-manifest.sh subset \
