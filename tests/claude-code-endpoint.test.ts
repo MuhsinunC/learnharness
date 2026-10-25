@@ -31,7 +31,7 @@ test("R1: credentials reach only the explicit child env, never keys, errors or l
 			assert.throws(() => writeEndpointConfig(cfg), error => { noSentinel((error as Error).message); return true; });
 		}
 		const endpoint = readEndpointConfig()!;
-		const env = buildChildEnv(process.env, endpoint);
+		const env = buildChildEnv(process.env, endpoint, required.executable);
 		assert.equal(env.ANTHROPIC_AUTH_TOKEN, SENTINEL);
 		const { ANTHROPIC_AUTH_TOKEN: token, ...rest } = env;
 		assert.equal(token, SENTINEL); noSentinel(rest);

@@ -49,7 +49,7 @@ export function buildQueryOptions(inputs: QueryInputs, platform: NodeJS.Platform
 		...(inputs.mcpServers !== undefined ? { mcpServers: inputs.mcpServers } : {}),
 		maxTurns: 1,
 		persistSession: false,
-		env: buildChildEnv(process.env, inputs.endpoint),
+		env: buildChildEnv(process.env, inputs.endpoint, inputs.executable),
 		permissionMode: "dontAsk",
 		settingSources: [],
 		tools: [],
