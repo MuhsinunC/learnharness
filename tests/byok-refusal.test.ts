@@ -8,6 +8,7 @@ import {
 	modelsNotConfigured,
 	providerKeyMissing,
 	PROVIDER_KEY_MISSING_CODE,
+	CLAUDE_CODE_OFF_REFUSAL,
 } from "../src/core/settings.ts";
 import type { ModelCatalogEntry, ModelSlotName } from "../src/core/index.ts";
 
@@ -58,6 +59,15 @@ describe("providerKeyMissing — the envelope factory (provider-key interlude, 2
 			slots: ["strong"],
 		});
 		assert.equal(envelope.code, "provider_key_missing");
+	});
+
+	it("Claude Code gives boot instructions and remains a provider-key refusal", () => {
+		const envelope = providerKeyMissing("claude-code", ["strong"]);
+		assert.equal(envelope.error, "Claude Code (your subscription) is off. Start LearnHarness with LH_CLAUDE_CODE_EXECUTABLE set (see docs/claude-code-provider.md), or pick another model.");
+		assert.equal(envelope.error, CLAUDE_CODE_OFF_REFUSAL);
+		assert.deepEqual({ code: envelope.code, provider: envelope.provider, slots: envelope.slots }, { code: "provider_key_missing", provider: "claude-code", slots: ["strong"] });
+		assert.equal(isProviderKeyRefusal(envelope.error), true);
+		assert.equal(parseProviderKeyRefusal(JSON.stringify(envelope)), true);
 	});
 
 	it("an unknown provider falls back to its raw id as the label", () => {
