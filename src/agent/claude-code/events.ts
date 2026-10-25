@@ -42,7 +42,7 @@ type RateLimitInfo = { status?: string; rateLimitType?: string; resetsAt?: numbe
 
 type RequestState = {
 	id: string | undefined; blocks: any[]; streamed: Map<number, any>; ordinal: number;
-	usage: AssistantMessage["usage"]; fallbackTools: boolean; finalUsage: boolean; open: boolean; stopReason?: string;
+	usage: AssistantMessage["usage"]; fallbackTools: boolean; finalUsage: boolean; open: boolean; fromStream: boolean; stopReason?: string;
 };
 function emptyUsage(): AssistantMessage["usage"] {
 	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
@@ -191,12 +191,15 @@ export class EventMapper {
 	}
 	private beginRequest(id: string | undefined): RequestState {
 		const request: RequestState = { id, blocks: [], streamed: new Map(), ordinal: 0,
-			usage: emptyUsage(), fallbackTools: false, finalUsage: false, open: false };
+			usage: emptyUsage(), fallbackTools: false, finalUsage: false, open: false, fromStream: false };
 		this.requests.push(request);
 		this.currentRequest = request;
 		this.output.stopReason = "stop";
 		return request;
 	}
+	// A stream that never finished, or finished without a stop reason, was abandoned. Fallback-only
+	// frames rarely carry a stop reason, so they count as complete; refusals are evicted via supersedes.
+	private abandoned(request: RequestState): boolean { return request.open || (request.fromStream && !request.stopReason); }
 	private dropAbandonedStreamBlocks(why: string): void {
 		const request = this.currentRequest;
 		if (!request) return;
@@ -244,12 +247,10 @@ export class EventMapper {
 		const event = (message as SDKMessage & { event: any }).event;
 
 		if (event?.type === "message_start") {
-			// A completed request with an explicit stop reason is a continuation;
-			// without that signal it is an abandoned attempt. Later supersedes can evict it too.
-			if (this.currentRequest && (this.currentRequest.open || !this.currentRequest.stopReason || this.currentRequest.id === event.message?.id))
+			if (this.currentRequest && (this.abandoned(this.currentRequest) || this.currentRequest.id === event.message?.id))
 				this.dropAbandonedStreamBlocks(`restreamed as ${event.message?.id}`);
 			const request = this.beginRequest(event.message?.id);
-			request.open = true;
+			request.open = request.fromStream = true;
 			if (event.message?.usage) this.updateUsage(request, event.message.usage);
 			this.refreshUsage();
 			return;
@@ -368,7 +369,7 @@ export class EventMapper {
 			return;
 		}
 		if (this.currentRequest?.id !== id) {
-			if (this.currentRequest && (this.currentRequest.open || !this.currentRequest.stopReason))
+			if (this.currentRequest && this.abandoned(this.currentRequest))
 				this.dropAbandonedStreamBlocks(`non-streaming fallback ${id}`);
 			this.beginRequest(id);
 		}

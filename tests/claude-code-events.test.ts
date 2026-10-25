@@ -455,6 +455,13 @@ for (const aggregate of [false, true]) test(`R2-F4: sequential requests aggregat
  assert.deepEqual(h.mapper.output.content, [{ type: "text", text: "first" }, { type: "text", text: "second" }]);
 });
 
+test("R2-F3/F4: fallback-only continuation without stop reasons keeps both requests", () => {
+ const h = harness(); h.send(assistant("A", [{ type: "text", text: "first" }], { input_tokens: 10, output_tokens: 5 }),
+  assistant("B", [{ type: "text", text: "second" }], { input_tokens: 20, output_tokens: 7 }), success);
+ assert.deepEqual(h.mapper.output.content, [{ type: "text", text: "first" }, { type: "text", text: "second" }]);
+ assert.equal(h.mapper.output.usage.input, 30); assert.equal(h.mapper.output.usage.output, 12);
+});
+
 test("R2-F5: initial text thinking and signature are preserved with deltas", () => {
  const h = harness(); h.send(start(), block(0, { type: "text", text: "Hi" }), delta(0, { type: "text_delta", text: " there" }), stop(0),
   block(1, { type: "thinking", thinking: "initial thought", signature: "sig" }), stop(1), event("message_stop"), success);
