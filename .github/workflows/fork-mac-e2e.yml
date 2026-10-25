@@ -157,7 +157,6 @@ jobs:
           set -euo pipefail
           pid=$(ps -axo pid=,command= | awk '$2=="/Applications/LearnHarness.app/Contents/MacOS/LearnHarness" && NF==2 {print $1}')
           [[ $pid =~ ^[0-9]+$ ]]
-          echo "APP_PID=$pid" >> "$GITHUB_ENV"
           screencapture -x "$ART/after-launch.png" || true
           for ((i=0; i<30; i++)); do kill -0 "$pid"; sleep 1; done
           log="$HOME/Library/Application Support/LearnHarness/logs/main.log"
@@ -170,7 +169,6 @@ jobs:
             sleep 1
           done
           [[ $port =~ ^[0-9]+$ ]]
-          echo "PORT=$port" >> "$GITHUB_ENV"
           [[ $(curl --max-time 20 -sSL -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/") == 200 ]]
           [[ $(curl --max-time 20 -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/api/models") == 403 ]]
           # Inspect only descendants; never log the child's environment or secret.
