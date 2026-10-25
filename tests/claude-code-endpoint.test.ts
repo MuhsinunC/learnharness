@@ -9,7 +9,7 @@ import { buildQueryOptions } from "../src/agent/claude-code/query-options.ts";
 const root = fs.mkdtempSync(join(tmpdir(), "lh-endpoint-"));
 const dir = join(root, "credentials");
 process.env.LH_AUTH_FILE = join(dir, "auth.json");
-const { endpointFile, isAllowedEndpointUrl, readEndpointConfig, writeEndpointConfig, clearEndpointConfig, endpointStatus } = await import("../src/server/claude-code-endpoint.ts");
+const { EndpointTokenRequiredError, endpointFile, isAllowedEndpointUrl, readEndpointConfig, writeEndpointConfig, clearEndpointConfig, endpointStatus } = await import("../src/server/claude-code-endpoint.ts");
 const SENTINEL = "lh27-SENTINEL-token-do-not-leak";
 const B1 = "https://relay.example/v1", B2 = "http://localhost:9000/x";
 const required = { executable: "/example/bin/claude", cwd: "/workspace", cliModel: "test-model", appendPrompt: "system" };
@@ -166,7 +166,12 @@ test("stored tokens are bound to normalized origins", () => {
 			assert.ok(readEndpointConfig()?.token === SENTINEL);
 			assert.equal(readEndpointConfig()?.baseUrl, to);
 		} else {
-			assert.throws(() => writeEndpointConfig({ baseUrl: to }), { message });
+			assert.throws(() => writeEndpointConfig({ baseUrl: to }), error => {
+				assert.ok(error instanceof EndpointTokenRequiredError);
+				assert.equal(error.code, "ENDPOINT_TOKEN_REQUIRED");
+				assert.equal(error.message, message);
+				return true;
+			});
 			assert.ok(fs.readFileSync(endpointFile()).equals(bytes));
 		}
 	}
