@@ -156,7 +156,7 @@ export interface ProviderKeyMissing {
 /** The refusal wording's invariant tail — the matcher below keys on it
  * (the label prefix varies by provider). */
 const PROVIDER_KEY_MISSING_TAIL = "key is set — add one in Settings → Keys";
-export const CLAUDE_CODE_OFF_REFUSAL = "Claude Code (your subscription) is off. Start LearnHarness with LH_CLAUDE_CODE_EXECUTABLE set (see docs/claude-code-provider.md), or pick another model.";
+export const CLAUDE_CODE_OFF_REFUSAL = "Claude isn't turned on. Open Settings → Subscriptions → Claude and log in with your Claude account.";
 export function providerKeyMissing(provider: string, slots: ModelSlotName[]): ProviderKeyMissing {
 	const label = AUTH_PROVIDER_KEYS.find((p) => p.id === provider)?.label ?? provider;
 	return {
