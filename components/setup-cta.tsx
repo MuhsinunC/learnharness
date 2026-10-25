@@ -33,16 +33,6 @@ export function hasProviderKey(
 	return classifyKeys(statuses, providers).providerRows.some((s) => s.present);
 }
 
-/** Pure: a registered keyless provider can run without an API key. */
-export function hasKeylessProvider(catalog: ModelCatalogResponse | undefined): boolean {
-	return catalog?.providers.some((p) => p.keyless && p.keyPresent) ?? false;
-}
-
-/** Loading is unknown; a failed catalog falls back to the keys answer. */
-export function zeroKeysVerdict(zeroKeys: boolean, catalog: ModelCatalogResponse | undefined, catalogFailed: boolean): boolean {
-	return catalog === undefined ? zeroKeys && catalogFailed : zeroKeys && !hasKeylessProvider(catalog);
-}
-
 /** The zero-keys truth for the calling page: TRUE only after a
  *  successful read says no provider key exists (pending and failed
  *  reads render nothing — the pill must never flash on a gap, and a
@@ -97,15 +87,16 @@ export function ClaudeCodeOffNotice() {
 	);
 }
 
-/** The strong-slot keyless truth for the PRE-SEND guard (home / /chat/new):
- *  the catalog seam with re-reads on BOTH signals that can flip it — "keys"
- *  (a provider key saved or deleted) and "models" (the strong slot
- *  re-pinned). Live-updates with the page, never mid-send. */
+/** Choose the pre-send remedy from the live provider catalog. */
 export function usePreSendRemedy(zeroKeys: boolean): "setup" | "notice" | null {
 	const { catalog } = useModelCatalog();
 	return preSendRemedy(zeroKeys, catalog);
 }
 
+/** The strong-slot keyless truth for the PRE-SEND guard (home / /chat/new):
+ *  the catalog seam with re-reads on BOTH signals that can flip it — "keys"
+ *  (a provider key saved or deleted) and "models" (the strong slot
+ *  re-pinned). Live-updates with the page, never mid-send. */
 export function useStrongKeyless(): boolean {
 	const { catalog } = useModelCatalog();
 	return strongKeyless(catalog);

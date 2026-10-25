@@ -8,9 +8,12 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { createElement } from "react";
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
+import { parseHTML } from "linkedom";
 import { renderToStaticMarkup } from "react-dom/server";
-import { preSendRemedy, zeroKeysVerdict, hasKeylessProvider, hasProviderKey, strongKeyless, ZeroKeysPill } from "../components/setup-cta.tsx";
+import { preSendRemedy, useZeroKeys, hasProviderKey, strongKeyless, ZeroKeysPill } from "../components/setup-cta.tsx";
+import { notifySettingsSaved } from "../components/settings-signal.ts";
 import type { ModelCatalogResponse } from "../src/core/index.ts";
 import { SetupKeysBody } from "../components/setup-dialog.tsx";
 import { DICTATION_KEYLESS, DEEPGRAM_KEY_ID } from "../components/dictation.tsx";
@@ -165,47 +168,35 @@ describe("strongKeyless — the pre-send guard's truth (owner interlude, no-orph
 });
 
 
-describe("keyless provider availability for the zero-keys guard", () => {
-	it("hasKeylessProvider excludes unavailable and keyed provider rows", () => {
-		const unavailable = catalog(null);
-		unavailable.providers.push({ id: "claude-code", envVar: "LH_CLAUDE_CODE_EXECUTABLE", keyless: true, keyPresent: false });
-		assert.equal(hasKeylessProvider(unavailable), false);
-		assert.equal(hasKeylessProvider(catalog(null, "openrouter")), false);
-	});
-
-	it("a real registered keyless catalog provider lets a user with no keys proceed", async () => {
-		const { enableClaudeCodeProvider, resetClaudeCodeProviderForTests } = await import("../src/agent/models.ts");
-		const { modelCatalog } = await import("../src/server/model-catalog.ts");
-		try {
-			enableClaudeCodeProvider("/nonexistent/claude");
-			assert.equal(zeroKeysVerdict(!hasProviderKey([], undefined), modelCatalog(), false), false);
-			assert.equal(zeroKeysVerdict(false, modelCatalog(), false), false);
-		} finally {
-			resetClaudeCodeProviderForTests();
-		}
-		assert.equal(modelCatalog().providers.some((p) => p.keyless), false);
-		assert.equal(hasKeylessProvider(modelCatalog()), false);
-		assert.equal(zeroKeysVerdict(true, modelCatalog(), false), true);
-	});
-});
-
-
-describe("zeroKeysVerdict catalog states", () => {
-	const keyless = catalog("claude-code", "claude-code");
-	keyless.providers[0]!.keyless = true;
-	for (const zeroKeys of [true, false]) {
-		for (const [name, value, failed, needsKey] of [
-			["loading", undefined, false, false],
-			["failed", undefined, true, true],
-			["known without keyless", catalog(null), false, true],
-			["known with keyless", keyless, false, false],
-		] as const) {
-			it(`zeroKeys=${zeroKeys}, catalog=${name}`, () => {
-				assert.equal(zeroKeysVerdict(zeroKeys, value, failed), zeroKeys && needsKey);
-			});
-		}
+it("an available Claude Code catalog row suppresses the zero-keys pill without API keys", async () => {
+	const { window } = parseHTML("<html><body></body></html>");
+	const previous = Object.fromEntries(["window", "document", "CustomEvent", "IS_REACT_ACT_ENVIRONMENT"].map((key) => [key, Reflect.get(globalThis, key)]));
+	const originalFetch = globalThis.fetch;
+	Object.assign(globalThis, { window, document: window.document, CustomEvent: window.CustomEvent, IS_REACT_ACT_ENVIRONMENT: true });
+	const available = catalog("claude-code");
+	available.providers.push({ id: "claude-code", envVar: "LH_CLAUDE_CODE_EXECUTABLE", keyless: true, keyPresent: true });
+	globalThis.fetch = async (input) => {
+		assert.equal(input, "/api/models");
+		return Response.json(available);
+	};
+	function Probe() {
+		return useZeroKeys() ? createElement(ZeroKeysPill, { onOpen() {} }) : null;
+	}
+	const host = document.createElement("div");
+	const root = createRoot(host);
+	try {
+		await act(async () => root.render(createElement(Probe)));
+		assert.equal(host.querySelector('[data-testid="setup-cta-keys"]'), null);
+		available.providers = [];
+		await act(async () => notifySettingsSaved("keys"));
+		assert.ok(host.querySelector('[data-testid="setup-cta-keys"]'));
+	} finally {
+		await act(async () => root.unmount());
+		globalThis.fetch = originalFetch;
+		Object.assign(globalThis, previous);
 	}
 });
+
 
 describe("preSendRemedy", () => {
 	it("a disabled Claude Code strong pin needs a notice even when no keys exist", () => {
