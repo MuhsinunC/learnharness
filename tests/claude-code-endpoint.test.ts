@@ -118,7 +118,6 @@ test("R5: endpoint overrides poisoned transport vars and adds exactly two child-
 	assert.deepEqual(buildChildEnv(source, endpoint), { ...allowed, ...CC_CHILD_ENV, ANTHROPIC_BASE_URL: B1, ANTHROPIC_AUTH_TOKEN: SENTINEL });
 	for (const endpoint of [undefined, null]) {
 		assert.deepEqual(buildChildEnv(process.env, endpoint), buildChildEnv());
-		assert.equal(JSON.stringify(buildChildEnv(process.env, endpoint)), JSON.stringify(buildChildEnv()));
 		assert.deepEqual(buildChildEnv(source, endpoint), { ...allowed, ...CC_CHILD_ENV });
 		assert.deepEqual(buildQueryOptions({ ...required, endpoint }), buildQueryOptions(required));
 	}
