@@ -1,9 +1,7 @@
-import { accessSync, constants, statSync } from "node:fs";
-import { isAbsolute } from "node:path";
 import { PATHS } from "../../config.ts";
 import { disableClaudeCodeProvider, enableClaudeCodeProvider } from "../agent/models.ts";
 import { isFillGapped } from "./keys.ts";
-import { readClaudeCodeSettings } from "./claude-code-connection.ts";
+import { claudeExecutableProblem, readClaudeCodeSettings } from "./claude-code-connection.ts";
 
 type BootDecision =
 	| { kind: "unset" }
@@ -21,17 +19,8 @@ function decide(env: NodeJS.ProcessEnv, platform: NodeJS.Platform, saved = false
 	if (platform === "win32") return reject("Windows is not supported");
 	if (platform !== "darwin" && platform !== "linux") return reject(`unsupported platform ${platform}`);
 	if (!saved && isFillGapped("LH_CLAUDE_CODE_EXECUTABLE")) return reject("set only via auth.json");
-	if (!isAbsolute(p)) return reject("not an absolute path");
-	try {
-		if (!statSync(p).isFile()) return reject("not a file");
-	} catch {
-		return reject("not a file");
-	}
-	try {
-		accessSync(p, constants.X_OK);
-	} catch {
-		return reject("not executable");
-	}
+	const problem = claudeExecutableProblem(p);
+	if (problem) return reject(problem);
 	return { kind: "accepted", path: p };
 }
 
