@@ -136,9 +136,10 @@ function resolveExecutable() {
 	const candidates = discoverClaudeExecutables();
 	return { override, settings, candidates, executable: override.path ?? settings.executable ?? candidates[0] ?? null };
 }
-export async function getClaudeCodeStatus() {
+export async function getClaudeCodeStatus(validation?: { executable: string; version: string }) {
 	const { override, settings, candidates, executable } = resolveExecutable();
-	const validated = executable ? await validateClaudeExecutable(executable) : { version: null, error: "Claude Code not found" };
+	const validated = validation?.executable === executable ? { version: validation.version, error: null }
+		: executable ? await validateClaudeExecutable(executable) : { version: null, error: "Claude Code not found" };
 	const auth = validated.version && executable ? await readClaudeAuthStatus(executable) : { loggedIn: false, account: null, error: null };
 	return { mode: override.enabled ? "local" : settings.mode, envOverride: override.enabled, active: piModels().getProvider("claude-code") !== undefined, executable, found: !!executable && !claudeExecutableProblem(executable), candidates, version: validated.version, loggedIn: auth.loggedIn, account: auth.account, login: { ...loginState.current.login }, endpoint: { baseUrl: null, tokenSet: false }, error: validated.error ?? auth.error };
 }
@@ -155,16 +156,18 @@ export async function putClaudeCodeConnection(request: Request): Promise<Respons
 	if (Object.hasOwn(body, "executable") && (typeof body.executable !== "string" || !body.executable || !isAbsolute(body.executable))) return json({ error: "executable must be an absolute path" }, 400);
 	const saved = readClaudeCodeSettings();
 	let executable = saved.executable;
+	let validation: { executable: string; version: string } | undefined;
 	if (body.mode === "local") {
 		executable = body.executable ?? saved.executable ?? discoverClaudeExecutables()[0];
 		if (!executable) return json({ error: "Claude Code not found" }, 400);
 		const result = await validateClaudeExecutable(executable);
 		if (result.error) return json({ error: result.error }, 400);
+		validation = { executable, version: result.version! };
 	}
 	try { writeSettings({ mode: body.mode, executable }); }
 	catch { return json({ error: "unable to save connection settings" }, 500); }
 	applyClaudeCodeSettings();
-	return json(await getClaudeCodeStatus());
+	return json(await getClaudeCodeStatus(validation));
 }
 export async function postClaudeCodeLogin(request: Request): Promise<Response> {
 	if (!isJson(request)) return json({ error: "application/json required" }, 415);
