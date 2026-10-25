@@ -174,7 +174,7 @@ jobs:
           # Inspect only descendants; never log the child's environment or secret.
           secret=
           for child in $(pgrep -P "$pid"); do
-            candidate=$(ps eww -o command= -p "$child" | sed -nE 's/.*LH_DESKTOP_API_SECRET=([0-9a-f]{64})( |$).*/\1/p')
+            candidate=$(ps eww -o command= -p "$child" | sed -nE 's/.*LH_DESKTOP_API_SECRET=([0-9a-f]{64})( |$).*/\1/p') || candidate=
             if [[ $candidate =~ ^[0-9a-f]{64}$ ]]; then secret=$candidate; break; fi
           done
           [[ $secret =~ ^[0-9a-f]{64}$ ]]
@@ -189,15 +189,6 @@ jobs:
           assert any(m['provider'] == 'openrouter' and m['id'] for m in data['models'])
           PY
           screencapture -x "$ART/after-checks.png" || true
-      - name: Verify seeded data survived launch
-        run: |
-          set -euo pipefail
-          # No seeded-file exceptions: settings.ts reads without rewriting;
-          # chats.ts stamps only on writes; graph reads do not write sources or
-          # positions. Startup purges only unseeded legacy graph ledgers.
-          # Logs, Chromium profile and caches may be added and are listed by name.
-          bash tests/fork-mac-e2e/data-manifest.sh subset \
-            "$HOME/Library/Application Support/LearnHarness" "$ART/data-manifest.jsonl" > "$ART/new-data-entries.jsonl"
       - name: Check new crash reports and preserve main log
         run: |
           set -euo pipefail
@@ -240,6 +231,16 @@ jobs:
             for pid in $(app_pids); do kill -KILL "$pid" 2>/dev/null || true; done
           fi
           [[ -z $(app_pids) ]]
+      - name: Verify seeded data survived the app run
+        run: |
+          set -euo pipefail
+          # No seeded-file exceptions: settings.ts reads without rewriting;
+          # chats.ts stamps only on writes; graph reads do not write sources or
+          # positions. Startup purges only unseeded legacy graph ledgers.
+          # Logs, Chromium profile and caches may be added and are listed by name.
+          # Runs after the quit so the live Chromium profile is not walked mid-write.
+          bash tests/fork-mac-e2e/data-manifest.sh subset \
+            "$HOME/Library/Application Support/LearnHarness" "$ART/data-manifest.jsonl" > "$ART/new-data-entries.jsonl"
       - name: Record quarantined Gatekeeper behavior
         continue-on-error: true
         run: |
