@@ -34,7 +34,7 @@ const { buildAnswer, normalizeOptions, resolveCorrect } = await import("../src/c
 const { createJobRunner } = await import("../src/agent/subagents/runner.ts");
 const { deliverJobResult } = await import("../src/server/jobs.ts");
 const { resolveRoleSpec } = await import("../src/core/settings-resolution.ts");
-const { turnCost, jobCost } = await import("../src/core/prices.ts");
+const { turnCost, jobCost } = await import("../src/server/pricing.ts");
 
 const strong = { provider: "claude-code", id: "claude-opus-5-5" };
 const cheap = { provider: "claude-code", id: "claude-haiku-5-5" };

@@ -105,3 +105,8 @@ export function usePreSendRemedy(zeroKeys: boolean): "setup" | "notice" | null {
 	const { catalog } = useModelCatalog();
 	return preSendRemedy(zeroKeys, catalog);
 }
+
+export function useStrongKeyless(): boolean {
+	const { catalog } = useModelCatalog();
+	return strongKeyless(catalog);
+}

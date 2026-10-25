@@ -9,7 +9,7 @@ import { isSubscriptionModel, sessionCost as foldSessionCost, turnCost as foldTu
 
 function catalogModel(id: string) {
 	const colon = id.indexOf(":");
-	if (colon < 0 || isSubscriptionModel(id)) return undefined;
+	if (colon < 0 || id.startsWith("claude-code:") || isSubscriptionModel(id)) return undefined;
 	return piModels().getModel(id.slice(0, colon), id.slice(colon + 1));
 }
 
