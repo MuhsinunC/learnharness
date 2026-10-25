@@ -274,14 +274,14 @@ describe("dispatch card rendering (the tool-call ack box)", () => {
 		assert.match(html, /Dispatched…/);
 	});
 
-	it("settles to a quiet delivered one-liner when done (artifact lives in the steer)", () => {
+	it("settles to a quiet finished one-liner when the worker is done", () => {
 		const html = renderToStaticMarkup(
 			<JobsContext.Provider value={[mkJob("done", "delivered")]}>
 				<JobCard part={ackPart as never} />
 			</JobsContext.Provider>,
 		);
 		assert.match(html, /Research agent/);
-		assert.match(html, /delivered/);
+		assert.match(html, /finished/);
 		assert.ok(!html.includes("web_search"), "no stale activity line once settled");
 	});
 
@@ -325,7 +325,7 @@ describe("dispatch card rendering (the tool-call ack box)", () => {
 		assert.match(html, /pdf_render/);
 	});
 
-	it("pdf dispatch settles to the delivered one-liner", () => {
+	it("pdf dispatch settles to the finished one-liner", () => {
 		const pdfJob: JobRecord = ({
 			id: "jp1",
 			kind: "pdf",
@@ -342,7 +342,7 @@ describe("dispatch card rendering (the tool-call ack box)", () => {
 			</JobsContext.Provider>,
 		);
 		assert.match(html, /PDF reader/);
-		assert.match(html, /delivered/);
+		assert.match(html, /finished/);
 	});
 });
 
@@ -839,7 +839,7 @@ describe("demo/visual job runners", () => {
 
 		const done = jobStore.getJob(job.id)!;
 		assert.equal(done.status, "done");
-		assert.equal(done.activity, "delivered", "the fake deliver flips status like the wake pipeline");
+		assert.equal(done.activity, "finished", "the worker finishes independently of delivery");
 		const result = done.result as { title: string; html: string; tested: boolean; notes?: string };
 		assert.equal(result.title, "Compound interest");
 		assert.equal(result.html, GOOD_HTML);

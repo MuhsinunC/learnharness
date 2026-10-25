@@ -1,6 +1,4 @@
 import type { Agent, AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
-import type { SteerMessage } from "../../core/contracts.ts";
-import { noteSteerVisible } from "../jobs.ts";
 import { ToolCallIdUniquifier } from "./call-ids.ts";
 import type { ChatGPTRequestCycle } from "../../agent/chatgpt-request-cycle.ts";
 
@@ -255,11 +253,6 @@ export function runPiTurn(spec: PiTurnSpec): PiTurnHandle {
 		if (event.type === "message_end") {
 			const m = event.message as { role?: string; stopReason?: string } | undefined;
 			if (m?.role === "assistant" && m.stopReason === "aborted") sawAbort = true;
-			// Dock fix (owner ruling 2026-09-26): an injected steer marker's
-			// message_end = the card is visible to the learner — flip the
-			// job's bookkeeping now (the turn may keep teaching for minutes;
-			// settleSteers re-runs the flip as a no-op idempotently).
-			if (m?.role === "custom") noteSteerVisible(event.message as SteerMessage);
 		}
 		if (event.type === "agent_end") {
 			// Persist/report before the terminal closes every view to new frames.

@@ -17,7 +17,7 @@ import { createExtractionPipeline } from "../agent/subagents/extraction.ts";
 import type { ModelRole } from "../../config.ts";
 import {
 	deliverJobResult,
-	noteSteerVisible,
+	noteSteersDurable,
 	reconcileUserSteers,
 	registerLiveAgent,
 	restoreUncommittedAutomatic,
@@ -59,7 +59,7 @@ import {
 	type TurnInput,
 } from "../core/input-events.ts";
 import { steerDelivered } from "../core/contracts.ts";
-import type {CallUsage, SteerMessage} from "../core/contracts.ts";
+import type {CallUsage} from "../core/contracts.ts";
 
 /**
  * One chat turn over the server-owned native record. Framework-free (plain
@@ -265,7 +265,8 @@ export async function handleChatInput(
 		chatId,
 	);
 	const compactedRecord = stores.chatStore.getChat(chatId);
-	if (compactedRecord) record = compactedRecord;
+	if (!compactedRecord) return Response.json({ error: "Unknown chat" }, { status: 404 });
+	record = compactedRecord;
 
 	// The input's native appends (pure; the honest 400 for an answer with no
 	// pending question call). Computed BEFORE beginTurn so a refused input
@@ -335,9 +336,7 @@ export async function handleChatInput(
 	// Visibility bookkeeping is not the canonical save. Its failure must
 	// neither misreport a saved input as lost nor prevent the turn running.
 	try {
-		for (const appended of stagedAutomatic ? [] : appends) {
-			if ((appended as { role?: string }).role === "custom") noteSteerVisible(appended as SteerMessage);
-		}
+		if (!stagedAutomatic) noteSteersDurable(chatId, merged);
 	} catch (err) {
 		console.error(`[chat ${chatId}] input visibility bookkeeping failed:`, err);
 	}
@@ -389,7 +388,11 @@ export async function handleChatInput(
 		foregroundOwed: !callPurpose.background,
 		purpose: callPurpose,
 		scopeCurrent: (scope) => connectionScopeCurrent(conversation.provider, scope),
-		commitStaged: () => { stores.chatStore.saveMessages(chatId, merged); persistBaseCount = merged.length; },
+		commitStaged: () => {
+			stores.chatStore.saveMessages(chatId, merged);
+			persistBaseCount = merged.length;
+			noteSteersDurable(chatId, merged);
+		},
 		restoreAutomatic: (automaticIds, retainedIds) => restoreUncommittedAutomatic(chatId, constructed, automaticIds, retainedIds),
 	});
 	const agentOpts: AgentBuildOptions = {
@@ -487,7 +490,7 @@ export async function handleChatInput(
 		// run's first LLM call (the native replacement for continuation
 		// coalescing). Settlement still cannot beat the flow below: it needs
 		// a streamed response, which never happens inside the constructor.
-		registerLiveAgent(chatId, constructed);
+		registerLiveAgent(chatId, constructed, input.type !== "steers" && input.type !== "continue");
 		// Debug recorder run marker (owner, 2026-10-04): correlates the
 		// JSONL event stream with the record's turns; no-op unless
 		// LH_PROVIDER_EVENTS=1.
@@ -528,12 +531,13 @@ export async function handleChatInput(
 				// merely because usage/extraction/other settlement work failed.
 				const persisted = stores.chatStore.getChat(chatId)?.messages ?? [];
 				reconcileUserSteers(chatId, persisted);
-				settleSteers(chatId, persisted);
+				settleSteers(chatId, persisted, true);
 			},
 			onFinish: (turnMessages, isAborted) => {
 				// Wave B: the record write is the agent's own final state —
 				// the new messages are the slice past the merged base.
 				const stamped = persistTurn(stores.chatStore, chatId, persistBaseCount, turnMessages, isAborted);
+				noteSteersDurable(chatId, stores.chatStore.getChat(chatId)?.messages ?? stamped);
 				// usage log append (idempotent per turn id) — the stats bar
 				// refolds this on the client after the turn settles. The
 				// provenance message is the turn's FIRST new assistant message.

@@ -165,9 +165,9 @@ describe("DispatchCard — the BYOK refusal tone (owner, 2026-09-22)", () => {
 		assert.ok(!html.includes("dispatch-refused"));
 	});
 
-	it("a delivered job reads delivered, untouched by the wave", () => {
+	it("a finished worker reads finished, independently of delivery", () => {
 		const html = renderToStaticMarkup(inJobs([job({ status: "done", error: undefined })]));
-		assert.ok(html.includes("delivered"));
+		assert.ok(html.includes("finished"));
 	});
 });
 

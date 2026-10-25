@@ -524,7 +524,7 @@ describe("teacher chat flow (scripted model)", () => {
 		const job = jobStore.createJob({ kind: "research", chatId: chat.id, toolCallId: "call-mid" });
 		jobIdMid = job.id;
 		// The runner stores the result BEFORE delivery (finalizeJob reads it).
-		jobStore.updateJob(job.id, { result: { brief: "Mid-run brief.", sources: [] } });
+		jobStore.updateJob(job.id, { status: "done", result: { brief: "Mid-run brief.", sources: [] }, delivery: { kind: "result", status: "pending" } });
 		const steer = buildSubagentSteer(job, { brief: "Mid-run brief.", sources: [] });
 		const delivery = deliverJobResult(steer);
 		await new Promise((r) => setTimeout(r, 300)); // vehicle 1 hands off
@@ -536,7 +536,7 @@ describe("teacher chat flow (scripted model)", () => {
 		release2();
 		await drain(await res);
 		await delivery; // resolves at settleSteers (the run persisted the marker)
-		assert.equal(jobFlippedMidTurn, "done", "the job flipped at the marker's message_end — WHILE the turn still streamed");
+		assert.equal(jobFlippedMidTurn, "done", "worker completion is independent of the streaming teacher turn");
 
 		// Record shape: the marker sits BETWEEN completed turn units — after
 		// the toolResult it must never split, adjacent to it.
