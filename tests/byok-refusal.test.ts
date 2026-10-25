@@ -63,7 +63,7 @@ describe("providerKeyMissing — the envelope factory (provider-key interlude, 2
 
 	it("Claude Code gives boot instructions and remains a provider-key refusal", () => {
 		const envelope = providerKeyMissing("claude-code", ["strong"]);
-		assert.equal(envelope.error, "Claude Code (your subscription) is off. Start LearnHarness with LH_CLAUDE_CODE_EXECUTABLE set (see docs/claude-code-provider.md), or pick another model.");
+		assert.equal(envelope.error, "Claude isn't turned on. Open Settings → Subscriptions → Claude and log in with your Claude account.");
 		assert.equal(envelope.error, CLAUDE_CODE_OFF_REFUSAL);
 		assert.deepEqual({ code: envelope.code, provider: envelope.provider, slots: envelope.slots }, { code: "provider_key_missing", provider: "claude-code", slots: ["strong"] });
 		assert.equal(isProviderKeyRefusal(envelope.error), true);
