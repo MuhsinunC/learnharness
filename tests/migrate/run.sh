@@ -127,6 +127,18 @@ no_backup() { [ ! -e "$backups" ]; }
 expect_failure() { if migrate "$@"; then printf 'Expected migration failure\n' >&2; return 1; fi; }
 case_1() {
     setup 1
+    for bad_name in $'tab\tname' $'line\nname'; do
+        printf 'unsupported filename\n' > "$data/$bad_name"
+        expect_failure --dry-run
+        no_backup
+        grep -Fq 'Tabs and newlines in paths or link targets are unsupported.' "$case_root/output"
+        mv "$data/$bad_name" "$case_root/rejected filename"
+    done
+    ln -s $'missing\n' "$data/newline-target"
+    expect_failure --dry-run
+    no_backup
+    grep -Fq 'Tabs and newlines in paths or link targets are unsupported.' "$case_root/output"
+    mv "$data/newline-target" "$case_root/rejected symlink"
     touch "$case_root/running"
     migrate --dry-run
     unchanged_data; unchanged_app
