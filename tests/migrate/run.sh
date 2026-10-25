@@ -775,10 +775,12 @@ case_26() {
 case_27() {
     setup 27
     chmod 000 "$case_root/fork.dmg"
-    expect_failure --dmg "$case_root/fork.dmg" --sha256 invalid
-    grep -Fxq 'Invalid SHA-256 digest.' "$case_root/output"
-    if grep -Fq 'Could not copy the local DMG.' "$case_root/output"; then return 1; fi
-    no_backup; unchanged_app; unchanged_data
+    for invalid_hash in invalid '' "$digest"$'\n'"$digest"; do
+        expect_failure --dmg "$case_root/fork.dmg" --sha256 "$invalid_hash"
+        grep -Fxq 'Invalid SHA-256 digest.' "$case_root/output"
+        if grep -Fq 'Could not copy the local DMG.' "$case_root/output"; then return 1; fi
+        no_backup; unchanged_app; unchanged_data
+    done
     chmod 600 "$case_root/fork.dmg"
 }
 for number in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27; do
