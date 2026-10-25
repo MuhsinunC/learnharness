@@ -51,6 +51,7 @@ const nextConfig: NextConfig = {
 			"chatgpt-credentials.json*",
 			"github-copilot-credentials.json*",
 			"xai-credentials.json*",
+			"claude-endpoint.json", // Child-only endpoint credentials.
 			".env*",
 			// The SDK's per-platform Claude Code binary must never ship in the desktop payload.
 			// scripts/build-server.mjs (via scripts/payload-guard.mjs) refuses any remaining copy.
