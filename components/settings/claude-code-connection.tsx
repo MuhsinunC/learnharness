@@ -108,7 +108,7 @@ export function ClaudeCodeConnection() {
 		try {
 			const response = await fetch(method === "POST" ? "/api/claude-code/login" : "/api/claude-code", method === "GET" ? { cache: "no-store" } : { method, headers: { "Content-Type": "application/json" }, ...(body ? { body: JSON.stringify(body) } : {}) });
 			const reply = await response.json();
-			// A 2xx write commits unless the server says `ok: false`; older servers send no `ok`.
+			// A 2xx write commits unless the reply says `ok: false`.
 			const committed = method === "PUT" && response.ok && (reply.ok === undefined || reply.ok === true);
 			if (committed) {
 				if (!automatic) { modeGeneration.current++; clearActivation(); }
