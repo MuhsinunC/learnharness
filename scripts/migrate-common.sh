@@ -22,7 +22,7 @@ exists() { [ -e "$1" ] || [ -L "$1" ]; }
 init() {
     [ "$(uname -s)" = Darwin ] && [ "$(sysctl -n hw.optional.arm64)" = 1 ] || fail 'An Apple Silicon Mac is required.'
     tmp=$(mktemp -d "${TMPDIR:-/tmp}/lh-migrate.XXXXXX")
-    mounted=no; new_app=; aside_app=; swap_pending=no
+    mounted=no; new_app=; aside_app=; swap_pending=no; stage=
     trap cleanup EXIT
     trap 'exit 1' HUP INT TERM
     stamp=$(date -u +%Y%m%dT%H%M%SZ)
@@ -50,6 +50,8 @@ cleanup() {
         mv "$aside_app" "$app" || printf 'Restore the preserved app from %s\n' "$aside_app" >&2
     fi
     if [ -n "$new_app" ] && exists "$new_app"; then rm -rf "${new_app:?}"; fi
+    # Only the private staging wrapper, never live or aside data.
+    if [ -n "$stage" ] && exists "$stage"; then rm -rf "${stage:?}"; fi
     rm -rf "${tmp:?}"
     exit "$status"
 }

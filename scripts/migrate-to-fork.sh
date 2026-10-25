@@ -122,7 +122,7 @@ manifest=$backup/manifest.txt
         awk -F '\t' '$2=="f"{f++}$2=="d"{d++}$2=="l"{l++}END{printf "files\t%d\ndirs\t%d\nsymlinks\t%d\n",f,d,l}' "$tmp/data-entries"
         awk -F '\t' '$2=="f" && $5 ~ /^\.\/data\/chats\/[^\/]+\.json$/{n++}END{printf "chats\t%d\n",n}' "$tmp/data-entries"
         awk -F '\t' '$2=="f" && index($5,"./data/graph/")==1{n++}END{printf "graph_files\t%d\n",n}' "$tmp/data-entries"
-        if [ -f "$data/data/settings.json" ]; then printf 'settings\tyes\n'; else printf 'settings\tno\n'; fi
+        awk -F '\t' '($2=="f" || $2=="l") && $5=="./data/settings.json"{found=1}END{printf "settings\t%s\n",found?"yes":"no"}' "$tmp/data-entries"
         awk -F '\t' '$2=="f" && ($5=="./auth.json" || $5 ~ /\/[^\/]*-credentials\.json$/){print "sign_in\t" substr($5,3)}' "$tmp/data-entries"
         printf 'tarball_sha256\t%s\n' "$tar_hash"
         cat "$tmp/data-entries"
