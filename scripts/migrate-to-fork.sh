@@ -59,6 +59,8 @@ JXA
     curl -fL "$url" -o "$dmg"
 else
     [ -f "$dmg" ] || fail 'Local DMG not found.'
+    cp "$dmg" "$tmp/local.dmg" || fail 'Could not copy the local DMG. Nothing was changed.'
+    dmg=$tmp/local.dmg
     if [ -z "$expected_hash" ]; then printf '%s\n' 'Warning: local DMG has no supplied SHA-256 digest.'; fi
 fi
 if [ -n "$expected_hash" ]; then
@@ -169,7 +171,7 @@ if [ "$present" = yes ]; then
     rm -rf "${tmp:?}/archive"
 fi
 if [ "$dry" = yes ]; then
-    printf 'Dry run: would mount the DMG read-only, copy, remove quarantine, verify its signature, and swap %s.\n' "$app"
+    printf 'Dry run: would mount the DMG read-only, copy, verify its signature, remove quarantine, and swap %s.\n' "$app"
 else
     printf 'Installing the fork...\n'
     mount_dmg
@@ -186,6 +188,8 @@ else
     undo=$(printf '/bin/bash %q %q' "$backup/rollback-fork.sh" "$backup")
     ensure_still_quit
     swap_app
+    printf 'Backup: %s\n' "$backup"
+    printf 'To undo: %s\n' "$undo"
     state_msg="The fork is installed. To undo: $undo"
     [ "$(version "$app")" = "$fork_version" ] || fail "Installed version verification failed. $state_msg"
     xattr -lr "$app" > "$tmp/xattrs"
