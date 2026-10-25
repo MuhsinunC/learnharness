@@ -53,16 +53,18 @@ export function ClaudeCodeConnection() {
 	const mounted = useRef(false), sequence = useRef(0), inFlight = useRef(false);
 	const current = useRef<Status | null>(null), tokenInput = useRef<HTMLInputElement>(null);
 	const polling = useRef<ReturnType<typeof setInterval> | null>(null), loginStarted = useRef<number | null>(null);
-	const loginTimedOut = useRef(false), pollInFlight = useRef(false), backgroundError = useRef(false);
+	const loginTimedOut = useRef(false), pollInFlight = useRef(false), errorSource = useRef<"background" | "user" | null>(null);
 	const modeGeneration = useRef(0), activation = useRef<{ started: number; generation: number } | null>(null);
 	function clearActivation() { activation.current = null; storeLoginMarker(null); }
-	function showError(message: string, background = false) { backgroundError.current = background; setError(message); }
+	function showError(message: string, background = false) {
+		if (background && errorSource.current === "user") return;
+		errorSource.current = background ? "background" : "user"; setError(message);
+	}
 	function stopPolling() {
 		if (polling.current !== null) clearInterval(polling.current);
 		polling.current = null; loginStarted.current = null;
 	}
 	function accept(next: Status, token?: string, syncEndpoint = false) {
-		const firstStatus = current.current === null;
 		const normalized = { ...next, account: next.account ?? null, login: next.login ?? { state: "idle" as const, url: null, error: null }, endpoint: next.endpoint ?? { baseUrl: null, tokenSet: false } };
 		if (loginTimedOut.current && normalized.login.state === "pending") normalized.login = { state: "idle", url: null, error: null };
 		if (!current.current || syncEndpoint) setBaseUrl(normalized.endpoint.baseUrl ?? "");
@@ -80,7 +82,6 @@ export function ClaudeCodeConnection() {
 			}
 		} else if (next.found && !next.envOverride && normalized.login.state === "pending" && loginStarted.current === null && !loginTimedOut.current) {
 			loginStarted.current = activation.current?.started ?? Date.now();
-			if (firstStatus && !activation.current && next.mode === "off") activation.current = { started: loginStarted.current, generation: modeGeneration.current };
 			polling.current = setInterval(() => {
 				if (Date.now() - loginStarted.current! >= CLAUDE_LOGIN_POLL_LIMIT_MS) {
 					stopPolling(); clearActivation(); loginTimedOut.current = true;
@@ -96,14 +97,14 @@ export function ClaudeCodeConnection() {
 		const owner = ++sequence.current, fallback = method === "GET" ? READ_ERROR : CHANGE_ERROR;
 		const previous = current.current, sentToken = body?.token;
 		pollInFlight.current = background;
-		if (!background) { inFlight.current = true; setBusy(true); backgroundError.current = false; setError(null); }
+		if (!background) { inFlight.current = true; setBusy(true); errorSource.current = null; setError(null); }
 		if (method === "POST") {
 			loginTimedOut.current = false; clearActivation();
 			if (previous?.mode === "off" && !(backend === "endpoint" && previous.endpoint?.baseUrl && previous.endpoint.tokenSet)) {
 				const started = Date.now(); activation.current = { started, generation: modeGeneration.current }; storeLoginMarker(started);
 			}
 		}
-		if (method === "PUT" && !automatic) storeLoginMarker(null);
+		if (method === "PUT" && !automatic) clearActivation();
 		try {
 			const response = await fetch(method === "POST" ? "/api/claude-code/login" : "/api/claude-code", method === "GET" ? { cache: "no-store" } : { method, headers: { "Content-Type": "application/json" }, ...(body ? { body: JSON.stringify(body) } : {}) });
 			const reply = await response.json();
@@ -112,11 +113,11 @@ export function ClaudeCodeConnection() {
 				if (!automatic) { modeGeneration.current++; clearActivation(); }
 				notifySettingsSaved("keys");
 			}
+			if (method === "POST" && (!response.ok || reply.error != null || reply.login?.state === "failed")) clearActivation();
 			if (!mounted.current || owner !== sequence.current) return;
-			if (!response.ok) { if (method === "POST") clearActivation(); showError(safeError(reply.error, fallback, sentToken), background); return; }
-			if (background && backgroundError.current) { backgroundError.current = false; setError(null); }
+			if (!response.ok) { showError(safeError(reply.error, fallback, sentToken), background); return; }
+			if (background && errorSource.current === "background") { errorSource.current = null; setError(null); }
 			if (reply.error != null) {
-				if (method === "POST") clearActivation();
 				if (typeof reply.found === "boolean") accept({ ...reply, error: safeError(reply.error, fallback, sentToken) }, sentToken, method === "PUT" && body?.mode === "endpoint");
 				showError(safeError(reply.error, fallback, sentToken), background); return;
 			}

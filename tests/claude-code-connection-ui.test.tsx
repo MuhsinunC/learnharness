@@ -162,7 +162,7 @@ test("login deadline does not discard an endpoint write already in flight", asyn
 
 test("pending login polls preserve the custom endpoint URL draft", async (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
-	const f = fixture({ login: { state: "pending", url: null } }); await mount();
+	const f = fixture(); await mount(); await click(button("Log in with Claude"));
 	await type("Base URL", "https://relay.example"); await type("Token", "SENTINEL-TOKEN-7f3a");
 	await act(async () => t.mock.timers.tick(CLAUDE_LOGIN_POLL_MS));
 	assert.equal(input("Base URL").value, "https://relay.example");
@@ -372,4 +372,35 @@ test("logging in while an endpoint is selected off does not override the choice"
 	const f = fixture({ endpoint }); await mount(); await click(input("custom endpoint")); await click(button("Log in with Claude"));
 	f.set({ loggedIn: true, login: { state: "idle", url: null } });
 	await act(async () => t.mock.timers.tick(CLAUDE_LOGIN_POLL_MS)); assert.deepEqual(puts(f), []); assert(input("custom endpoint").checked);
+});
+
+test("a pending GET without click-created eligibility never activates local", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+	const f = fixture({ login: { state: "pending", url: null } }); await mount();
+	f.set({ loggedIn: true, login: { state: "idle", url: null } });
+	await act(async () => t.mock.timers.tick(CLAUDE_LOGIN_POLL_MS)); assert.deepEqual(puts(f), []);
+});
+test("even a failed user endpoint write cancels login activation", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+	const f = fixture(); await mount(); await click(button("Log in with Claude"));
+	f.fail("cannot save endpoint"); await type("Base URL", endpoint.baseUrl); await type("Token", "SENTINEL-TOKEN-7f3a"); await click(button("Save"));
+	f.set({ loggedIn: true, login: { state: "idle", url: null } });
+	await act(async () => t.mock.timers.tick(CLAUDE_LOGIN_POLL_MS));
+	assert.deepEqual(puts(f).map(c => c.body?.mode), ["endpoint"]); assert.equal(storage.size, 0);
+});
+test("poll failure and recovery preserve a validation error", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+	fixture({ login: { state: "pending", url: null } }); await mount();
+	await type("Base URL", "invalid"); await click(button("Save")); const fetchStatus = globalThis.fetch;
+	globalThis.fetch = async () => { throw new Error("offline"); };
+	await act(async () => t.mock.timers.tick(CLAUDE_LOGIN_POLL_MS)); assert(text().includes("Enter an https:// URL"));
+	globalThis.fetch = fetchStatus;
+	await act(async () => t.mock.timers.tick(CLAUDE_LOGIN_POLL_MS)); assert(text().includes("Enter an https:// URL"));
+});
+test("a login failure after unmount clears the activation marker", async () => {
+	fixture(); await mount(); let resolve!: (r: Response) => void;
+	globalThis.fetch = () => new Promise<Response>(done => { resolve = done; });
+	await click(button("Log in with Claude")); assert.equal(storage.size, 1); await unmount();
+	await act(async () => resolve({ ok: false, json: async () => ({ error: "login failed" }) } as Response));
+	assert.equal(storage.size, 0);
 });
