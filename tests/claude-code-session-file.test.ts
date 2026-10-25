@@ -250,30 +250,65 @@ test("sweep keeps old sessions without a readable cwd", (t) => {
 	for (const path of paths) assert.ok(existsSync(path), path);
 });
 
-test("sweep removes only old inactive orphan UUID companion directories", (t) => {
+test("sweep leaves old orphan UUID companion directories untouched", (t) => {
 	const options = fixture(t);
-	const now = 1_800_000_000_000;
-	const projectDir = getProjectDir(options.cwd, options.claudeDir);
-	mkdirSync(projectDir, { recursive: true });
-	const oldId = randomUUID();
-	const freshId = randomUUID();
-	const activeId = randomUUID();
-	const linkedId = randomUUID();
-	const boundaryId = randomUUID();
-	const ids = [oldId, freshId, "keep", activeId, linkedId, boundaryId];
-	for (const id of ids) {
-		const path = join(projectDir, id);
-		mkdirSync(path);
-		writeFileSync(join(path, "artifact"), "data");
-		const mtime = id === freshId ? now : id === boundaryId ? now - 3_600_000 : 0;
-		utimesSync(path, new Date(mtime), new Date(mtime));
-	}
-	symlinkSync(join(projectDir, "missing"), join(projectDir, `${linkedId}.jsonl`));
-	markSessionActive(activeId);
-	t.after(() => markSessionDone(activeId));
-	sweepStaleSessions(options.cwd, options.claudeDir, undefined, now);
-	assert.ok(!existsSync(join(projectDir, oldId)));
-	for (const id of ids.slice(1)) assert.ok(existsSync(join(projectDir, id)), id);
+	const companion = join(getProjectDir(options.cwd, options.claudeDir), randomUUID());
+	mkdirSync(companion, { recursive: true });
+	const artifact = join(companion, "artifact");
+	writeFileSync(artifact, "data");
+	utimesSync(companion, new Date(0), new Date(0));
+	sweepStaleSessions(options.cwd, options.claudeDir, undefined, 1_800_000_000_000);
+	assert.ok(existsSync(companion));
+	assert.ok(existsSync(artifact));
+});
+
+test("sweep bounds transcript reads to 64 KiB", (t) => {
+	const options = fixture(t);
+	const written = writeSessionFile({ ...options, messages: history });
+	const companion = join(getProjectDir(options.cwd, options.claudeDir), written.sessionId);
+	mkdirSync(companion);
+	writeFileSync(written.jsonlPath, `${JSON.stringify({ cwd: options.cwd })}\n${"x".repeat(1024 * 1024 + 1)}`);
+	utimesSync(written.jsonlPath, new Date(0), new Date(0));
+	const original = fs.readSync;
+	let total = 0;
+	const mocked = t.mock.method(fs, "readSync", ((...args: Parameters<typeof fs.readSync>) => {
+		const bytes = original(...args);
+		total += bytes;
+		return bytes;
+	}) as typeof fs.readSync);
+	t.after(() => {
+		mocked.mock.restore();
+		syncBuiltinESMExports();
+	});
+	syncBuiltinESMExports();
+	sweepStaleSessions(options.cwd, options.claudeDir, undefined, 1_800_000_000_000);
+	assert.ok(!existsSync(written.jsonlPath));
+	assert.ok(!existsSync(companion));
+	assert.ok(total > 0 && total <= 64 * 1024, `read ${total} bytes`);
+});
+
+test("sweep keeps sessions whose first cwd record is beyond the scan cap", (t) => {
+	const options = fixture(t);
+	const written = writeSessionFile({ ...options, messages: history });
+	writeFileSync(written.jsonlPath, `${"{}\n".repeat(24 * 1024)}${JSON.stringify({ cwd: options.cwd })}\n`);
+	utimesSync(written.jsonlPath, new Date(0), new Date(0));
+	sweepStaleSessions(options.cwd, options.claudeDir, undefined, 1_800_000_000_000);
+	assert.ok(existsSync(written.jsonlPath));
+});
+
+test("sweep parses complete UTF-8 lines at EOF but keeps a line cut off by the cap", (t) => {
+	const options = fixture(t);
+	const record = JSON.stringify({ pad: "é", cwd: options.cwd });
+	const splitUtf8 = " ".repeat(4095 - Buffer.byteLength('{"pad":"')) + record;
+	const capped = " ".repeat(64 * 1024 - Buffer.byteLength(record)) + record + "\n";
+	const complete = writeSessionFile({ ...options, messages: history });
+	const partial = writeSessionFile({ ...options, messages: history });
+	writeFileSync(complete.jsonlPath, splitUtf8);
+	writeFileSync(partial.jsonlPath, capped);
+	for (const path of [complete.jsonlPath, partial.jsonlPath]) utimesSync(path, new Date(0), new Date(0));
+	sweepStaleSessions(options.cwd, options.claudeDir, undefined, 1_800_000_000_000);
+	assert.ok(!existsSync(complete.jsonlPath));
+	assert.ok(existsSync(partial.jsonlPath));
 });
 
 test("converted redacted thinking survives import tool-pair repair and JSONL round-trip", (t) => {
