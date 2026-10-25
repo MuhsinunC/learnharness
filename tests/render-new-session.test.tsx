@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { ClaudeCodeOffNotice } from "../components/setup-cta.tsx";
 import { CLAUDE_CODE_OFF_REFUSAL } from "../src/core/settings.ts";
 import { DraftShell, startDraftSession } from "../components/new-session.tsx";
+import { clearOpeningPrompt, readOpeningPrompt } from "../components/opening-prompt.ts";
 
 /**
  * The sessionless draft view (/chat/new, owner 2026-09-13): "+ New session"
@@ -27,10 +28,10 @@ function fakeFetch(id: string) {
 }
 
 describe("startDraftSession — the create-on-send contract", () => {
-	it("creates the session titled with the first message, returns the prompt redirect", async () => {
+	it("creates the session titled with the first message and returns a short path", async () => {
 		const { f, calls } = fakeFetch("c_new");
 		const target = await startDraftSession("teach me orbital mechanics", f);
-		assert.equal(target, "/chat/c_new?prompt=teach%20me%20orbital%20mechanics");
+		assert.equal(target, "/chat/c_new");
 		assert.equal(calls.length, 1);
 		assert.equal(calls[0]!.url, "/api/chats");
 		assert.equal(calls[0]!.method, "POST");
@@ -41,6 +42,37 @@ describe("startDraftSession — the create-on-send contract", () => {
 		const { f, calls } = fakeFetch("c_3");
 		await startDraftSession("hello", f);
 		assert.equal(calls.length, 1, "a single create call — the birth stamp is server-side");
+	});
+
+	it("a long opening text stays out of the URL and is stashed for the chat page", async () => {
+		const mem = new Map<string, string>();
+		const fake = {
+			getItem: (k: string) => mem.get(k) ?? null,
+			setItem: (k: string, v: string) => {
+				mem.set(k, v);
+			},
+			removeItem: (k: string) => {
+				mem.delete(k);
+			},
+		};
+		const holder = globalThis as { sessionStorage?: Storage };
+		const prev = holder.sessionStorage;
+		Object.defineProperty(globalThis, "sessionStorage", { configurable: true, value: fake });
+		try {
+			const { f } = fakeFetch("c_long");
+			const text = `${"B2 First grammar item. ".repeat(1500)}end`;
+			const target = await startDraftSession(text, f);
+			assert.equal(target, "/chat/c_long");
+			assert.equal(target!.includes("?"), false);
+			const stashed = readOpeningPrompt("c_long");
+			assert.equal(stashed?.length, text.length);
+			assert.equal(stashed, text);
+			clearOpeningPrompt("c_long");
+			assert.equal(readOpeningPrompt("c_long"), undefined);
+		} finally {
+			if (prev === undefined) delete holder.sessionStorage;
+			else Object.defineProperty(globalThis, "sessionStorage", { configurable: true, value: prev });
+		}
 	});
 
 	it("empty or whitespace text never creates anything", async () => {
@@ -190,7 +222,7 @@ describe("the practice draft (?mode=practice, 2026-10-04)", () => {
 			return new Response(JSON.stringify({ id: "c9" }), { status: 201 });
 		}) as unknown as typeof fetch;
 		const target = await startDraftSession("the parity chain", f, "practice");
-		assert.equal(target, "/chat/c9?prompt=the%20parity%20chain");
+		assert.equal(target, "/chat/c9");
 		assert.deepEqual(body, { title: "the parity chain", kind: "practice" });
 	});
 
