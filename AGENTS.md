@@ -15,3 +15,5 @@ All design authority belongs to the human. **Never guess a design or implementat
 Concretely: first investigate and plan rigorously (asking the user design questions along the way), get the plan approved by the user, and only then implement. Implementation should be mechanical execution of an approved plan — not interpretation.
 
 Claude Code provider: see `docs/claude-code-provider.md`.
+
+Fork workflow (branches, stacked layers, upstream sync and restack): see `docs/fork-workflow.md`.
