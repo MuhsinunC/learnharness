@@ -1,5 +1,5 @@
 const key = Symbol.for("lh.claudeCode.slots");
-type Ticket = { grant(): void; dead: boolean };
+type Ticket = { grant(): void };
 const state = globalThis as typeof globalThis & { [key]?: { active: number; queue: Ticket[] } };
 export function resetClaudeCodeSlotsForTests(): void { delete state[key]; }
 
@@ -11,8 +11,8 @@ export async function acquireClaudeCodeSlot(signal?: AbortSignal): Promise<() =>
 	if (signal?.aborted) throw aborted();
 	if (pool.active < cap && !pool.queue.length) pool.active++;
 	else await new Promise<void>((resolve, reject) => {
-		const die = () => { ticket.dead = true; signal?.removeEventListener("abort", die); reject(aborted()); };
-		const ticket: Ticket = { dead: false, grant: () => { signal?.removeEventListener("abort", die); resolve(); } };
+		const die = () => { pool.queue.splice(pool.queue.indexOf(ticket), 1); signal?.removeEventListener("abort", die); reject(aborted()); };
+		const ticket: Ticket = { grant: () => { signal?.removeEventListener("abort", die); resolve(); } };
 		pool.queue.push(ticket);
 		signal?.addEventListener("abort", die, { once: true });
 	});
@@ -21,10 +21,8 @@ export async function acquireClaudeCodeSlot(signal?: AbortSignal): Promise<() =>
 		if (released) return;
 		released = true;
 		// A handed-off permit stays counted; only fresh takers increment active.
-		for (;;) {
-			const next = pool.queue.shift();
-			if (!next) { pool.active--; return; }
-			if (!next.dead) { next.grant(); return; }
-		}
+		const next = pool.queue.shift();
+		if (next) next.grant();
+		else pool.active--;
 	};
 }

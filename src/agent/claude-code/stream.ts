@@ -9,7 +9,7 @@ import { claudeCodeWorkdir, deleteSessionFile, markSessionActive, markSessionDon
 import { acquireClaudeCodeSlot } from "./slots.ts";
 
 const sweepKey = Symbol.for("lh.claudeCode.swept");
-const state = globalThis as typeof globalThis & { [sweepKey]?: boolean };
+const state = globalThis as typeof globalThis & { [sweepKey]?: Set<string> };
 export function resetClaudeCodeStreamForTests(): void { delete state[sweepKey]; }
 export const defaultLoadQuery = () => import("@anthropic-ai/claude-agent-sdk").then(m => m.query);
 type Deps = { executable: string; dataDir: string; claudeDir: string; loadQuery: () => Promise<typeof query>; logger: EventMapperLogger; parkQuietMs?: number; cleanupWaitMs?: number };
@@ -35,17 +35,24 @@ export function streamClaudeCode(model: Model<any>, transcript: TranscriptContex
 			clearTimeout(parkTimer);
 			if (closed || !child) return;
 			closed = true;
-			try { void child.interrupt().catch(warn); } catch (error) { warn(error); }
+			const interruptError = (error: unknown) => {
+				if (error instanceof Error && error.message.startsWith("Query closed")) deps.logger.debug(`claude-code: ${error.message}`);
+				else warn(error);
+			};
+			try { void child.interrupt().catch(interruptError); } catch (error) { interruptError(error); }
 			try { child.close(); } catch (error) { warn(error); }
 			server?.closeAll(reason);
 		}
+		/** Fallback frames describe a complete API response and arrive back to back before tools/call.
+		 * Parking the first call means those frames arrived; MCP calls may run sequentially, so
+		 * later calls cannot arrive while the first is parked. Streaming ends at message_stop. */
 		function checkParked(): void {
 			clearTimeout(parkTimer);
 			if (mapper.ended) return;
 			parkTimer = setTimeout(() => {
 				const ids = mapper.output.content.filter(b => b.type === "toolCall").map(b => b.id);
-				if (!mapper.ended && !mapper.hasOpenBlocks && ids.length && ids.every(id => server?.calls.includes(id))) mapper.endToolTurn("all tool calls parked");
-			}, deps.parkQuietMs ?? 500);
+				if (!mapper.ended && !mapper.hasOpenBlocks && ids.some(id => server?.calls.includes(id))) mapper.endToolTurn("tool call parked after quiet window");
+			}, deps.parkQuietMs ?? 2000);
 		}
 
 		mapper.onToolTurnEnded = () => { wake(); stopChild("turn ended"); };
@@ -60,9 +67,14 @@ export function streamClaudeCode(model: Model<any>, transcript: TranscriptContex
 			if (mapper.ended || options?.signal?.aborted) { abort(); return; }
 			if (overageLatched()) throw new Error(OVERAGE_REFUSAL);
 			for (const tool of tools) toolNameMap.set(MCP_TOOL_PREFIX + tool.name, tool.name);
-			const { anthropicMessages } = convertPiMessages(split.prior, new Map([...toolNameMap].map(([sdk, pi]) => [pi, sdk])));
+			const { anthropicMessages, dropped } = convertPiMessages(split.prior, new Map([...toolNameMap].map(([sdk, pi]) => [pi, sdk])));
+			if (dropped.thinking || dropped.abortedTurns || dropped.other.size) {
+				warn(`dropped history content: thinking=${dropped.thinking} providers=[${[...dropped.providers].join(",")}] abortedTurns=${dropped.abortedTurns}${[...dropped.other].map(([key, count]) => ` ${key}=${count}`).join("")}`);
+			}
 			cwd = claudeCodeWorkdir(deps.dataDir);
-			if (!state[sweepKey]) { sweepStaleSessions(cwd, deps.claudeDir); state[sweepKey] = true; }
+			const swept = state[sweepKey] ??= new Set<string>();
+			const pair = `${cwd}\0${deps.claudeDir}`;
+			if (!swept.has(pair)) { sweepStaleSessions(cwd, deps.claudeDir); swept.add(pair); }
 			try {
 				({ sessionId } = writeSessionFile({ messages: anthropicMessages, cwd, claudeDir: deps.claudeDir, model: model.id }));
 				markSessionActive(sessionId);
@@ -71,7 +83,10 @@ export function streamClaudeCode(model: Model<any>, transcript: TranscriptContex
 			const queryOptions = buildQueryOptions({ executable: deps.executable, cwd, cliModel: model.id,
 				effort: resolveEffort(model, options?.reasoning), appendPrompt: systemPrompt, resumeId: sessionId,
 				...(server ? { mcpServers: { [MCP_SERVER_NAME]: server.config } } : {}) });
-			const queryFn = await deps.loadQuery();
+			const loading = deps.loadQuery();
+			void loading.catch(error => { if (mapper.ended) warn(error); });
+			const queryFn = await Promise.race([loading, ended]);
+			if (!queryFn) { abort(); return; }
 			if (mapper.ended || options?.signal?.aborted) { abort(); return; }
 			if (overageLatched()) throw new Error(OVERAGE_REFUSAL);
 			const content = split.kind === "user" ? split.blocks : [{ type: "text" as const, text: CONTINUE_TEXT }];
@@ -109,6 +124,8 @@ export function streamClaudeCode(model: Model<any>, transcript: TranscriptContex
 				})]);
 				clearTimeout(timer);
 			}
+			// SDK close/return caps waitForExit at 2s; release after bounded cleanup to avoid
+			// a permanent stall rather than require proven termination. Keep the 30s watchdog.
 			if (child) {
 				let timer: ReturnType<typeof setTimeout> | undefined;
 				try {
