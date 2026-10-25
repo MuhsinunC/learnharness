@@ -1,6 +1,6 @@
 # Move to the fork
 
-Requirements: an Apple Silicon Mac. The migration itself needs nothing else installed. “Log in with Claude” needs the Claude Code command-line tool (`claude`) in `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, `~/.claude/local`, npm-global (`~/.npm-global/bin`), bun (`~/.bun/bin`), or nvm (`~/.nvm/versions/node/<version>/bin`). The Claude desktop app’s built-in copy does not count. The setting is under Settings → Providers → Subscriptions → Claude. The fork build from `MuhsinunC/learnharness` is ad-hoc signed and **not notarized**.
+Requirements: an Apple Silicon Mac. The migration itself needs nothing else installed. “Log in with Claude” needs the Claude Code command-line tool (`claude`). The app looks on PATH, at a path saved in Settings, and in `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, `~/.claude/local`, npm-global (`~/.npm-global/bin`), bun (`~/.bun/bin`), or nvm (`~/.nvm/versions/node/<version>/bin`). The Claude desktop app’s built-in copy does not count. The setting is under Settings → Providers → Subscriptions → Claude. The fork build from `MuhsinunC/learnharness` is ad-hoc signed and **not notarized**.
 
 Download `migrate-to-fork.sh`, `rollback-fork.sh`, and `migrate-common.sh` from this repository's `scripts/` directory into the same folder. In Terminal, change to that folder and run:
 

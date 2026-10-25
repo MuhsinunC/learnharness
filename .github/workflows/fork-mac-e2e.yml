@@ -143,7 +143,7 @@ jobs:
           [[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$BACKUP/LearnHarness.app/Contents/Info.plist") == 0.3.6 ]]
           app=/Applications/LearnHarness.app
           [[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist") == "$FORK_VERSION" ]]
-          xattr -lr "$app" > "$ART/app-xattrs.txt"
+          xattr -lrs "$app" > "$ART/app-xattrs.txt"
           if grep -F com.apple.quarantine "$ART/app-xattrs.txt"; then exit 1; fi
           codesign --verify --deep --strict "$app"
           codesign -dv --verbose=2 "$app" > "$ART/codesign.txt" 2>&1
