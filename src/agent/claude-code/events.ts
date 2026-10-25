@@ -40,17 +40,24 @@ type SDKUsage = { input_tokens?: number; output_tokens?: number; cache_read_inpu
 type RateLimitInfo = { status?: string; rateLimitType?: string; resetsAt?: number; utilization?: number;
 	surpassedThreshold?: number; isUsingOverage?: boolean; overageInUse?: boolean };
 
+type RequestState = {
+	id: string | undefined; blocks: any[]; streamed: Map<number, any>; ordinal: number;
+	usage: AssistantMessage["usage"]; fallbackTools: boolean; finalUsage: boolean; open: boolean; stopReason?: string;
+};
+function emptyUsage(): AssistantMessage["usage"] {
+	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+}
+
 export class EventMapper {
 	private readonly message: AssistantMessage;
 	private terminal = false;
 	private turnStarted = false;
-	private turnStreamSawContent = false;
-	private sawFinalUsage = false;
-	private fallbackMessageId: string | undefined;
+	private requests: RequestState[] = [];
+	private currentRequest: RequestState | undefined;
+	private frameBlocks = new Map<string, { request: RequestState; blocks: any[] }>();
 	private turnSawToolCall = false;
-	private turnStreamMessageId: string | undefined;
-	private turnStreamOpen = false;
-	private turnStreamBlockStart = 0;
+	private activeBlockIndices = new Map<any, number>();
 	private rateLimitRejection: RateLimitInfo | null = null;
 	private lastRateLimitWarnStep: number | null = null;
 	private lastRateLimitWarnThreshold: number | undefined;
@@ -58,8 +65,7 @@ export class EventMapper {
 	constructor(private stream: AssistantMessageEventStream, model: Model<any>,
 		private toolNameMap: ReadonlyMap<string, string>, private logger: EventMapperLogger) {
 		this.message = { role: "assistant", content: [], api: model.api, provider: model.provider, model: model.id,
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: Date.now() };
+			usage: emptyUsage(), stopReason: "stop", timestamp: Date.now() };
 	}
 	get output(): AssistantMessage { return this.message; }
 	get ended(): boolean { return this.terminal; }
@@ -81,14 +87,25 @@ export class EventMapper {
 		if (message.type === "stream_event") this.processStreamEvent(message);
 		else if (message.type === "assistant") this.processAssistantMessage(message);
 		else if (message.type === "result") this.finish(message);
-		else if (message.type === "user" && this.fallbackMessageId && this.turnSawToolCall)
-			this.endTurn(this.output.stopReason === "length" ? "length" : "toolUse");
+		else if (message.type === "user") this.endToolTurn("user frame");
+	}
+	/** lh-2h calls this once every pending tool call id seen by the mapper has a
+	 * matching parked MCP tools/call. Ends the turn so the orchestrator can close it. */
+	endToolTurn(reason: string): void {
+		if (this.terminal || !this.turnSawToolCall) return;
+		this.logger.debug(`endToolTurn: ${reason}`);
+		this.endTurn(this.output.stopReason === "length" ? "length" : "toolUse");
 	}
 	finish(result: SDKMessage): void {
 		if (this.terminal) return;
 		if (result.type === "result") {
-			if (!this.sawFinalUsage && result.usage) this.updateUsage(this.output, result.usage);
-			if (this.fallbackMessageId && result.stop_reason != null)
+			if (result.usage) {
+				const aggregate = { usage: emptyUsage() };
+				this.updateUsage(aggregate, result.usage);
+				if (!this.requests.some(r => r.finalUsage) || aggregate.usage.totalTokens > this.output.usage.totalTokens)
+					this.output.usage = aggregate.usage;
+			}
+			if (this.currentRequest && !this.currentRequest.streamed.size && result.stop_reason != null)
 				this.output.stopReason = mapStopReason(result.stop_reason);
 		}
 		let text = resultErrorText(result);
@@ -121,7 +138,7 @@ export class EventMapper {
 		this.stream.end();
 		if (this.turnSawToolCall) this.onToolTurnEnded?.();
 	}
-	private updateUsage(output: AssistantMessage, usage: SDKUsage): void {
+	private updateUsage(output: Pick<AssistantMessage, "usage">, usage: SDKUsage): void {
 		if (usage.input_tokens != null) output.usage.input = usage.input_tokens;
 		if (usage.output_tokens != null) output.usage.output = usage.output_tokens;
 		if (usage.cache_read_input_tokens != null) output.usage.cacheRead = usage.cache_read_input_tokens;
@@ -163,37 +180,94 @@ export class EventMapper {
 			}
 		}
 	}
-	private dropAbandonedStreamBlocks(why: string): void {
-		const dropped = this.blocks.splice(this.turnStreamBlockStart);
-		this.logger.debug(`dropAbandonedStreamBlocks: ${why}; dropped ${dropped.length} blocks from ${this.turnStreamMessageId}`);
-		this.turnSawToolCall = this.blocks.some(b => b.type === "toolCall");
-		this.turnStreamOpen = false;
-		this.turnStreamSawContent = false;
-		this.sawFinalUsage = false;
+	private refreshUsage(): void {
+		const usage = emptyUsage();
+		for (const request of this.requests) {
+			for (const key of ["input", "output", "cacheRead", "cacheWrite", "reasoning", "cacheWrite1h"] as const)
+				if (request.usage[key] != null) usage[key] = (usage[key] ?? 0) + request.usage[key];
+		}
+		usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+		this.output.usage = usage;
+	}
+	private beginRequest(id: string | undefined): RequestState {
+		const request: RequestState = { id, blocks: [], streamed: new Map(), ordinal: 0,
+			usage: emptyUsage(), fallbackTools: false, finalUsage: false, open: false };
+		this.requests.push(request);
+		this.currentRequest = request;
 		this.output.stopReason = "stop";
+		return request;
+	}
+	private dropAbandonedStreamBlocks(why: string): void {
+		const request = this.currentRequest;
+		if (!request) return;
+		this.output.content = this.blocks.filter(b => !request.blocks.includes(b));
+		this.requests = this.requests.filter(r => r !== request);
+		for (const block of request.blocks) this.activeBlockIndices.delete(block);
+		this.logger.debug(`dropAbandonedStreamBlocks: ${why}; dropped ${request.blocks.length} blocks from ${request.id}`);
+		this.currentRequest = undefined;
+		this.turnSawToolCall = this.blocks.some(b => b.type === "toolCall");
+		this.output.stopReason = "stop";
+		this.refreshUsage();
+	}
+	private supersedeFrames(uuids: readonly string[]): void {
+		for (const uuid of uuids) {
+			const frame = this.frameBlocks.get(uuid);
+			if (!frame) continue;
+			this.output.content = this.blocks.filter(b => !frame.blocks.includes(b));
+			frame.request.blocks = frame.request.blocks.filter(b => !frame.blocks.includes(b));
+			for (const [index, block] of frame.request.streamed)
+				if (frame.blocks.includes(block)) frame.request.streamed.delete(index);
+			if (!frame.request.blocks.length) {
+				this.requests = this.requests.filter(r => r !== frame.request);
+				if (this.currentRequest === frame.request) this.currentRequest = undefined;
+			}
+			this.frameBlocks.delete(uuid);
+			this.logger.debug(`supersedes: evicted ${uuid}`);
+		}
+		// Superseding earlier content can shift a block whose stream has not stopped yet.
+		for (const [block, previous] of this.activeBlockIndices) {
+			const contentIndex = this.blocks.indexOf(block);
+			if (contentIndex < 0) { this.activeBlockIndices.delete(block); continue; }
+			if (contentIndex === previous) continue;
+			this.activeBlockIndices.set(block, contentIndex);
+			if (block.type === "text") this.stream.push({ type: "text_start", contentIndex, partial: this.output });
+			else if (block.type === "thinking") this.stream.push({ type: "thinking_start", contentIndex, partial: this.output });
+			else this.stream.push({ type: "toolcall_start", contentIndex, partial: this.output });
+			if (block.type === "text" && block.text) this.stream.push({ type: "text_delta", contentIndex, delta: block.text, partial: this.output });
+			else if (block.type === "thinking" && block.thinking) this.stream.push({ type: "thinking_delta", contentIndex, delta: block.thinking, partial: this.output });
+			else if (block.partialJson) this.stream.push({ type: "toolcall_delta", contentIndex, delta: block.partialJson, partial: this.output });
+		}
+		this.turnSawToolCall = this.blocks.some(b => b.type === "toolCall");
+		this.refreshUsage();
 	}
 	private processStreamEvent(message: SDKMessage): void {
 		const event = (message as SDKMessage & { event: any }).event;
 
 		if (event?.type === "message_start") {
-			if (this.turnStreamOpen) this.dropAbandonedStreamBlocks(`restreamed as ${event.message?.id}`);
-			this.turnStreamSawContent = false;
-			this.sawFinalUsage = false;
-			this.turnStreamMessageId = event.message?.id;
-			this.turnStreamOpen = true;
-			this.turnStreamBlockStart = this.blocks.length;
-			if (event.message?.usage) this.updateUsage(this.output, event.message.usage);
+			// A completed request with an explicit stop reason is a continuation;
+			// without that signal it is an abandoned attempt. Later supersedes can evict it too.
+			if (this.currentRequest && (this.currentRequest.open || !this.currentRequest.stopReason || this.currentRequest.id === event.message?.id))
+				this.dropAbandonedStreamBlocks(`restreamed as ${event.message?.id}`);
+			const request = this.beginRequest(event.message?.id);
+			request.open = true;
+			if (event.message?.usage) this.updateUsage(request, event.message.usage);
+			this.refreshUsage();
 			return;
 		}
+		const request = this.currentRequest ?? this.beginRequest(undefined);
 
 		if (event?.type === "content_block_start") {
-			this.turnStreamSawContent = this.turnStreamMessageId !== undefined;
 			this.ensureTurnStarted();
 			if (event.content_block?.type === "text") {
-				this.blocks.push({ type: "text", text: "", index: event.index });
+				this.blocks.push({ type: "text", text: event.content_block.text ?? "" });
 				this.stream.push({ type: "text_start", contentIndex: this.blocks.length - 1, partial: this.output });
+				if (event.content_block.text) this.stream.push({ type: "text_delta", contentIndex: this.blocks.length - 1, delta: event.content_block.text, partial: this.output });
 			} else if (event.content_block?.type === "thinking") {
-				this.blocks.push({ type: "thinking", thinking: "", thinkingSignature: "", index: event.index });
+				this.blocks.push({ type: "thinking", thinking: event.content_block.thinking ?? "", thinkingSignature: event.content_block.signature ?? "" });
+				this.stream.push({ type: "thinking_start", contentIndex: this.blocks.length - 1, partial: this.output });
+				if (event.content_block.thinking) this.stream.push({ type: "thinking_delta", contentIndex: this.blocks.length - 1, delta: event.content_block.thinking, partial: this.output });
+			} else if (event.content_block?.type === "redacted_thinking") {
+				this.blocks.push({ type: "thinking", thinking: "[Reasoning redacted]", thinkingSignature: event.content_block.data, redacted: true });
 				this.stream.push({ type: "thinking_start", contentIndex: this.blocks.length - 1, partial: this.output });
 			} else if (event.content_block?.type === "tool_use") {
 				const piName = piToolNameFor(event.content_block.name, this.toolNameMap);
@@ -202,18 +276,22 @@ export class EventMapper {
 					type: "toolCall", id: event.content_block.id,
 					name: piName,
 					arguments: (event.content_block.input as Record<string, unknown>) ?? {},
-					partialJson: "", index: event.index,
+					partialJson: "",
 				});
 				this.stream.push({ type: "toolcall_start", contentIndex: this.blocks.length - 1, partial: this.output });
 			} else {
 				this.logger.debug(`processStreamEvent: unhandled content_block_start type ${event.content_block?.type}`);
+				return;
 			}
+			request.streamed.set(event.index, this.blocks.at(-1));
+			this.activeBlockIndices.set(this.blocks.at(-1), this.blocks.length - 1);
+			request.blocks.push(this.blocks.at(-1));
 			return;
 		}
 
 		if (event?.type === "content_block_delta") {
-			const index = this.blocks.findIndex((b: any) => b.index === event.index);
-			const block = this.blocks[index];
+			const block = request.streamed.get(event.index);
+			const index = this.blocks.indexOf(block);
 			if (!block) return;
 			if (event.delta?.type === "text_delta" && block.type === "text") {
 				block.text += event.delta.text;
@@ -223,7 +301,7 @@ export class EventMapper {
 				this.stream.push({ type: "thinking_delta", contentIndex: index, delta: event.delta.thinking, partial: this.output });
 			} else if (event.delta?.type === "input_json_delta" && block.type === "toolCall") {
 				block.partialJson += event.delta.partial_json;
-				block.arguments = parseStreamingJson(block.partialJson);
+				if (block.partialJson) block.arguments = parseStreamingJson(block.partialJson);
 				this.stream.push({ type: "toolcall_delta", contentIndex: index, delta: event.delta.partial_json, partial: this.output });
 			} else if (event.delta?.type === "signature_delta" && block.type === "thinking") {
 				block.thinkingSignature = (block.thinkingSignature ?? "") + event.delta.signature;
@@ -234,10 +312,10 @@ export class EventMapper {
 		}
 
 		if (event?.type === "content_block_stop") {
-			const index = this.blocks.findIndex((b: any) => b.index === event.index);
-			const block = this.blocks[index];
+			const block = request.streamed.get(event.index);
+			const index = this.blocks.indexOf(block);
 			if (!block) return;
-			delete block.index;
+			this.activeBlockIndices.delete(block);
 			if (block.type === "text") {
 				this.stream.push({ type: "text_end", contentIndex: index, content: block.text, partial: this.output });
 			} else if (block.type === "thinking") {
@@ -246,7 +324,7 @@ export class EventMapper {
 				this.turnSawToolCall = true;
 				if (block.partialJson) {
 					Object.assign(block, parseToolCallArguments(block.partialJson));
-				} else if (!block.arguments || typeof block.arguments !== "object" || Array.isArray(block.arguments)) {
+				} else if (!block.arguments || (Object.getPrototypeOf(block.arguments) !== Object.prototype && Object.getPrototypeOf(block.arguments) !== null)) {
 					block.arguments = {};
 				}
 				delete block.partialJson;
@@ -256,18 +334,22 @@ export class EventMapper {
 		}
 
 		if (event?.type === "message_delta") {
-			this.output.stopReason = mapStopReason(event.delta?.stop_reason);
+			if (event.delta?.stop_reason != null) {
+				request.stopReason = event.delta.stop_reason;
+				this.output.stopReason = mapStopReason(request.stopReason);
+			}
 			if (event.usage) {
-				this.updateUsage(this.output, event.usage);
-				this.sawFinalUsage = true;
+				this.updateUsage(request, event.usage);
+				request.finalUsage = true;
+				this.refreshUsage();
 			}
 			return;
 		}
 
-		if (event?.type === "message_stop") this.turnStreamOpen = false;
+		if (event?.type === "message_stop") request.open = false;
 
 		if (event?.type === "message_stop" && this.turnSawToolCall) {
-			this.endTurn(this.output.stopReason === "length" ? "length" : "toolUse");
+			this.endToolTurn("message_stop");
 			return;
 		}
 
@@ -279,15 +361,26 @@ export class EventMapper {
 		const assistantMsg = (message as any).message;
 		if (!assistantMsg?.content) return;
 		const id = assistantMsg.id;
-		if (this.fallbackMessageId && id !== this.fallbackMessageId && this.turnSawToolCall) {
-			this.endTurn(this.output.stopReason === "length" ? "length" : "toolUse");
+		const supersedes = (message as { supersedes?: string[] }).supersedes;
+		if (supersedes?.length) this.supersedeFrames(supersedes);
+		if (this.currentRequest?.id !== id && this.currentRequest?.fallbackTools) {
+			this.endToolTurn("different assistant id");
 			return;
 		}
-		if (this.turnStreamSawContent && id === this.turnStreamMessageId) return;
-		if (this.turnStreamOpen) this.dropAbandonedStreamBlocks(`non-streaming fallback ${id}`);
-		this.fallbackMessageId = id;
+		if (this.currentRequest?.id !== id) {
+			if (this.currentRequest && (this.currentRequest.open || !this.currentRequest.stopReason))
+				this.dropAbandonedStreamBlocks(`non-streaming fallback ${id}`);
+			this.beginRequest(id);
+		}
+		const request = this.currentRequest!;
+		const contributed: any[] = [];
 		this.logger.debug(`processAssistantMessage fallback: ${assistantMsg.content.length} blocks, types=${assistantMsg.content.map((b: any) => b.type).join(",")}`);
 		for (const block of assistantMsg.content) {
+			const ordinal = request.ordinal++;
+			const streamed = block.type === "tool_use"
+				? [...request.streamed.values()].find(b => b.type === "toolCall" && b.id === block.id)
+				: request.streamed.get(ordinal);
+			if (streamed) { contributed.push(streamed); continue; }
 			if (block.type === "text" && block.text) {
 				this.ensureTurnStarted();
 				this.blocks.push({ type: "text", text: block.text });
@@ -295,17 +388,20 @@ export class EventMapper {
 				this.stream.push({ type: "text_start", contentIndex: idx, partial: this.output });
 				this.stream.push({ type: "text_delta", contentIndex: idx, delta: block.text, partial: this.output });
 				this.stream.push({ type: "text_end", contentIndex: idx, content: block.text, partial: this.output });
-			} else if (block.type === "thinking") {
+			} else if (block.type === "thinking" || block.type === "redacted_thinking") {
 				this.ensureTurnStarted();
-				this.blocks.push({ type: "thinking", thinking: block.thinking ?? "", thinkingSignature: block.signature ?? "" });
+				this.blocks.push(block.type === "redacted_thinking"
+					? { type: "thinking", thinking: "[Reasoning redacted]", thinkingSignature: block.data, redacted: true }
+					: { type: "thinking", thinking: block.thinking ?? "", thinkingSignature: block.signature ?? "" });
 				const idx = this.blocks.length - 1;
 				this.stream.push({ type: "thinking_start", contentIndex: idx, partial: this.output });
 				if (block.thinking) this.stream.push({ type: "thinking_delta", contentIndex: idx, delta: block.thinking, partial: this.output });
-				this.stream.push({ type: "thinking_end", contentIndex: idx, content: block.thinking ?? "", partial: this.output });
+				this.stream.push({ type: "thinking_end", contentIndex: idx, content: this.blocks[idx].thinking, partial: this.output });
 			} else if (block.type === "tool_use") {
 				const piName = piToolNameFor(block.name, this.toolNameMap);
 				this.ensureTurnStarted();
 				this.turnSawToolCall = true;
+				request.fallbackTools = true;
 				this.blocks.push({
 					type: "toolCall", id: block.id,
 					name: piName,
@@ -317,12 +413,18 @@ export class EventMapper {
 				this.stream.push({ type: "toolcall_end", contentIndex: idx, toolCall: toolBlock, partial: this.output });
 			} else {
 				this.logger.debug(`processAssistantMessage: unhandled block type ${block.type}`);
+				continue;
 			}
+			contributed.push(this.blocks.at(-1));
+			request.blocks.push(this.blocks.at(-1));
 		}
-		if (assistantMsg.usage && !this.sawFinalUsage) this.updateUsage(this.output, assistantMsg.usage);
-		if (assistantMsg.stop_reason != null) this.output.stopReason = mapStopReason(assistantMsg.stop_reason);
-
-		if (this.turnSawToolCall && assistantMsg.stop_reason != null)
-			this.endTurn(this.output.stopReason === "length" ? "length" : "toolUse");
+		if ("uuid" in message && message.uuid) this.frameBlocks.set(message.uuid, { request, blocks: contributed });
+		if (assistantMsg.usage && !request.finalUsage) this.updateUsage(request, assistantMsg.usage);
+		this.refreshUsage();
+		if (assistantMsg.stop_reason != null) {
+			request.stopReason = assistantMsg.stop_reason;
+			this.output.stopReason = mapStopReason(assistantMsg.stop_reason);
+			this.endToolTurn("assistant stop_reason");
+		}
 	}
 }

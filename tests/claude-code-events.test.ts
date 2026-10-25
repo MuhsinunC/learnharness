@@ -155,18 +155,18 @@ test("different-id fallback replaces a stalled stream", () => {
  assert.equal(h.mapper.output.stopReason, "stop");
 });
 
-test("same-id assistant messages add nothing during and after stream delivery", () => {
+test("same-id assistant frames dedupe their streamed block ordinals", () => {
  const h = harness();
  h.send(start(), block(0, { type: "text" }), delta(0, { type: "text_delta", text: "stream" }));
  const count = h.events.length;
- h.send(assistant("one", [{ type: "text", text: "duplicate" }]));
+ h.send(assistant("one", [{ type: "text", text: "stream" }]));
  assert.equal(h.events.length, count);
- h.send(stop(0), event("message_stop"));
+ h.send(stop(0), block(1, { type: "thinking", thinking: "thought", signature: "sig" }), stop(1), event("message_stop"));
  const stoppedCount = h.events.length;
- h.send(assistant("one", [{ type: "text", text: "duplicate" }]));
+ h.send(assistant("one", [{ type: "thinking", thinking: "thought", signature: "sig" }]));
  assert.equal(h.events.length, stoppedCount);
  h.send(success);
- assert.deepEqual(h.mapper.output.content, [{ type: "text", text: "stream" }]);
+ assert.deepEqual(h.mapper.output.content, [{ type: "text", text: "stream" }, { type: "thinking", thinking: "thought", thinkingSignature: "sig" }]);
 });
 
 test("rejected rate limit prefixes an error result without prior content", () => {
@@ -366,11 +366,11 @@ test("F6: result usage replaces provisional fallback usage", () => {
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
 });
 
-test("F6: result usage never overwrites final streamed usage", () => {
+test("F6 / R2-F4: larger result aggregate replaces final streamed usage", () => {
  const h = harness(); h.send(start("one", { input_tokens: 7 }), block(0, { type: "text" }), stop(0),
   event("message_delta", { usage: { input_tokens: 13, output_tokens: 17 } }), event("message_stop"),
   result({ usage: { input_tokens: 999, output_tokens: 999 } }));
- assert.equal(h.mapper.output.usage.input, 13); assert.equal(h.mapper.output.usage.output, 17);
+ assert.equal(h.mapper.output.usage.input, 999); assert.equal(h.mapper.output.usage.output, 999);
 });
 
 test("F7: text fixture reports nested thinking tokens as reasoning", () => {
@@ -399,4 +399,110 @@ test("F10: partial tool fields are available during input_json_delta", () => {
  const partial = e.partial.content[e.contentIndex]; assert.ok(partial?.type === "toolCall");
  assert.equal(partial.arguments.command, "ls");
  h.send(delta(0, { type: "input_json_delta", partial_json: '"}' }), stop(0), event("message_stop"));
+});
+
+const frame = (id: string, uuid: string, content: object[], supersedes?: string[]) => sdk({
+ type: "assistant", uuid, supersedes, message: { id, content, stop_reason: null },
+});
+const endRequest = (input: number, output: number, stop_reason = "end_turn") => [
+ event("message_delta", { delta: { stop_reason }, usage: { input_tokens: input, output_tokens: output } }), event("message_stop"),
+];
+
+test("R2-F1: parked parallel fallback tools can end explicitly and idempotently", () => {
+ const h = harness(); let hooks = 0; h.mapper.onToolTurnEnded = () => { hooks++; assert.equal(h.actions.at(-1), "end"); };
+ h.send(toolFrame("one", "first"), toolFrame("one", "second"));
+ assert.equal(h.mapper.ended, false);
+ h.mapper.endToolTurn("all calls parked");
+ assertDone(h, "toolUse");
+ assert.deepEqual(h.mapper.output.content.filter(b => b.type === "toolCall").map(b => b.id), ["first", "second"]);
+ const count = h.events.length;
+ h.mapper.endToolTurn("again"); assert.equal(h.events.length, count); assert.equal(hooks, 1);
+ assert.ok(h.debugs.some(m => m.includes("all calls parked")));
+ const empty = harness(); empty.mapper.endToolTurn("nothing pending"); assert.equal(empty.events.length, 0); empty.send(success);
+});
+
+test("R2-F2: dedupe streamed blocks while preserving same-id fallback-only tools", () => {
+ const h = harness(); h.send(start("X"), block(0, { type: "text" }), delta(0, { type: "text_delta", text: "hello" }), stop(0),
+  frame("X", "text-frame", [{ type: "text", text: "hello" }]),
+  frame("X", "tool-frame", [{ type: "tool_use", id: "fallback-tool", name: "Bash", input: { a: 1 } }]), success);
+ assert.deepEqual(h.mapper.output.content, [{ type: "text", text: "hello" }, { type: "toolCall", id: "fallback-tool", name: "Bash", arguments: { a: 1 } }]);
+ assert.equal(h.events.filter(e => e.type === "text_start").length, 1);
+ assert.equal(h.events.filter(e => e.type === "toolcall_end").length, 1); assertDone(h, "toolUse");
+});
+
+test("R2-F3: supersedes evicts fallback frame contributions and ignores unknown uuids", () => {
+ const h = harness(); h.send(frame("A", "u1", [{ type: "text", text: "refused" }]),
+  frame("B", "u2", [{ type: "text", text: "answer" }], ["u1", "unknown-tool-result"]), success);
+ assert.deepEqual(h.mapper.output.content, [{ type: "text", text: "answer" }]);
+ assert.ok(h.debugs.some(m => m.includes("supersed")));
+});
+
+for (const explicitStop of [false, true]) test(`R2-F3: completed streamed refusal is replaced (explicit stop ${explicitStop})`, () => {
+ const h = harness(); h.send(start("A", { input_tokens: 10, output_tokens: 5 }), block(0, { type: "text" }), delta(0, { type: "text_delta", text: "refused" }), stop(0),
+  frame("A", "u1", [{ type: "text", text: "refused" }]));
+ if (explicitStop) h.send(event("message_delta", { delta: { stop_reason: "end_turn" }, usage: { input_tokens: 10, output_tokens: 5 } }));
+ h.send(event("message_stop"), start("B", { input_tokens: 20, output_tokens: 7 }), block(0, { type: "text" }),
+  delta(0, { type: "text_delta", text: "answer" }), stop(0), frame("B", "u2", [{ type: "text", text: "answer" }], ["u1"]), ...endRequest(20, 7), success);
+ assert.deepEqual(h.mapper.output.content, [{ type: "text", text: "answer" }]);
+ assert.equal(h.mapper.output.usage.input, 20); assert.equal(h.mapper.output.usage.output, 7);
+});
+
+for (const aggregate of [false, true]) test(`R2-F4: sequential requests aggregate usage (larger result ${aggregate})`, () => {
+ const h = harness(); h.send(start("A"), block(0, { type: "text" }), delta(0, { type: "text_delta", text: "first" }), stop(0), ...endRequest(10, 5),
+  start("B"), block(0, { type: "text" }), delta(0, { type: "text_delta", text: "second" }), stop(0), ...endRequest(20, 7),
+  result(aggregate ? { usage: { input_tokens: 40, output_tokens: 16 } } : {}));
+ assert.equal(h.mapper.output.usage.input, aggregate ? 40 : 30); assert.equal(h.mapper.output.usage.output, aggregate ? 16 : 12);
+ assert.deepEqual(h.mapper.output.content, [{ type: "text", text: "first" }, { type: "text", text: "second" }]);
+});
+
+test("R2-F5: initial text thinking and signature are preserved with deltas", () => {
+ const h = harness(); h.send(start(), block(0, { type: "text", text: "Hi" }), delta(0, { type: "text_delta", text: " there" }), stop(0),
+  block(1, { type: "thinking", thinking: "initial thought", signature: "sig" }), stop(1), event("message_stop"), success);
+ assert.deepEqual(h.mapper.output.content, [{ type: "text", text: "Hi there" }, { type: "thinking", thinking: "initial thought", thinkingSignature: "sig" }]);
+ assert.ok(h.events.some(e => e.type === "text_delta" && e.delta === "Hi"));
+ assert.ok(h.events.some(e => e.type === "thinking_delta" && e.delta === "initial thought"));
+});
+
+for (const streaming of [true, false]) test(`R2-F6: redacted thinking maps on ${streaming ? "stream" : "fallback"} path`, () => {
+ const h = harness(); const redacted = { type: "redacted_thinking", data: "opaque" };
+ if (streaming) h.send(start(), block(0, redacted), stop(0), event("message_stop"));
+ else h.send(assistant("one", [redacted]));
+ h.send(success);
+ assert.deepEqual(h.mapper.output.content, [{ type: "thinking", thinking: "[Reasoning redacted]", thinkingSignature: "opaque", redacted: true }]);
+ assert.equal(h.events.filter(e => e.type === "thinking_start").length, 1);
+ assert.equal(h.events.filter(e => e.type === "thinking_end").length, 1);
+});
+
+test("R2-F7: usage-only delta preserves length for tool calls", () => {
+ const h = harness(); h.send(start(), block(0, { type: "tool_use", id: "t", name: "Bash" }), stop(0),
+  event("message_delta", { delta: { stop_reason: "max_tokens" } }), event("message_delta", { usage: { output_tokens: 20 } }), event("message_stop"));
+ assertDone(h, "length");
+});
+
+test("R2-F8: empty JSON delta preserves nonempty start input", () => {
+ const h = harness(); h.send(start(), block(0, { type: "tool_use", id: "t", name: "Bash", input: { a: 2 } }),
+  delta(0, { type: "input_json_delta", partial_json: "" }));
+ const partial = h.mapper.output.content[0]; assert.ok(partial?.type === "toolCall"); assert.deepEqual(partial.arguments, { a: 2 });
+ h.send(stop(0), event("message_stop"));
+ const tool = h.mapper.output.content[0]; assert.ok(tool?.type === "toolCall"); assert.deepEqual(tool.arguments, { a: 2 });
+});
+
+for (const fallback of [false, true]) test(`R2-F9: abandoned usage is discarded on ${fallback ? "fallback" : "restream"} replacement`, () => {
+ const h = harness(); h.send(start("A", { input_tokens: 10, cache_creation_input_tokens: 30, cache_creation: { ephemeral_1h_input_tokens: 30 }, thinking_tokens: 8 }),
+  block(0, { type: "text" }));
+ if (fallback) h.send(assistant("B", [{ type: "text", text: "replacement" }], { input_tokens: 2, output_tokens: 3 }));
+ else h.send(start("B", { input_tokens: 2, output_tokens: 3 }), block(0, { type: "text" }), stop(0), event("message_stop"));
+ h.send(success);
+ assert.equal(h.mapper.output.usage.input, 2); assert.equal(h.mapper.output.usage.cacheWrite, 0);
+ assert.equal(h.mapper.output.usage.cacheWrite1h, undefined); assert.equal(h.mapper.output.usage.reasoning, undefined);
+});
+
+test("R2-F3: supersedes keeps active replacement block indices valid", () => {
+ const h = harness(); h.send(start("A"), block(0, { type: "text", text: "refusal" }), stop(0),
+  frame("A", "u1", [{ type: "text", text: "refusal" }]), ...endRequest(10, 5), start("B"),
+  block(0, { type: "thinking", thinking: "replacement", signature: "sig" }),
+  frame("B", "u2", [{ type: "thinking", thinking: "replacement", signature: "sig" }], ["u1"]),
+  delta(0, { type: "thinking_delta", thinking: " thought" }), stop(0), ...endRequest(20, 7), success);
+ assert.deepEqual(h.mapper.output.content, [{ type: "thinking", thinking: "replacement thought", thinkingSignature: "sig" }]);
+ assert.ok(h.events.some(e => e.type === "thinking_delta" && e.contentIndex === 0 && e.delta === "replacement"));
 });
