@@ -208,7 +208,8 @@ async function readSpawnStatus(validation?: Validation) {
 	const resolved = await resolveExecutable(validation);
 	const auth = resolved.version && resolved.executable ? await readClaudeAuthStatus(resolved.executable)
 		: { loggedIn: false, account: null, error: null };
-	const configured = claudeCodeRegistrationExecutable() ?? claudeCodeEnvOverride().path ?? readClaudeCodeSettings().executable;
+	const configured = claudeCodeRegistrationExecutable() ?? claudeCodeEnvOverride().path
+		?? readClaudeCodeSettings().executable ?? resolved.executable;
 	const discovered = resolved.executable !== configured ? resolved.executable : null;
 	return {
 		...resolved, executable: configured, discovered,
@@ -265,7 +266,8 @@ function refuseCrossOrigin(request: Request): Response | null {
 	return mismatch || request.headers.get("sec-fetch-site") === "cross-site"
 		? json({ error: "cross-origin request refused" }, 403) : null;
 }
-/** Status keeps the configured/registered executable separate from discovered fallback and hint.
+/** Status uses the registered or configured path, else the first discovered candidate.
+ * A different configured path stays separate from discovered fallback and hint.
  * Version and auth fields describe discovered when present, otherwise executable. */
 export async function getClaudeCodeConnection(request: Request): Promise<Response> {
 	const refusal = refuseCrossOrigin(request);
