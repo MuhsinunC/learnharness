@@ -30,6 +30,7 @@ const { attachChatGPTChild, trustedSender, chatGPTControl } = require("./chatgpt
 const { createSubscriptions, loadSubscriptionSDK } = require("./subscriptions.cjs");
 const { attachSubscriptionChild, subscriptionControl } = require("./subscription-ipc.cjs");
 const { desktopAPIHeaders } = require("./desktop-api.cjs");
+const { isForkBuild } = require("./updater-gate.cjs");
 const { randomBytes } = require("node:crypto");
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
@@ -448,6 +449,10 @@ function broadcastUpdateStatus(status) {
 }
 
 function checkForUpdates({ manual = false } = {}) {
+	if (manual && isForkBuild(app.getVersion())) {
+		dialog.showMessageBox({ type: "info", message: "Updates are disabled in this build." });
+		return;
+	}
 	if (!autoUpdater) return;
 	autoUpdater
 		.checkForUpdates()
@@ -477,6 +482,10 @@ function installUpdateNow() {
 function setupAutoUpdater() {
 	if (!app.isPackaged) {
 		log("auto-update: dev build — updater disabled");
+		return;
+	}
+	if (isForkBuild(app.getVersion())) {
+		log("auto-update: fork build — updater disabled");
 		return;
 	}
 	try {

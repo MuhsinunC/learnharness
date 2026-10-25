@@ -4,6 +4,8 @@ This fork keeps its own changes as a stack of small pull requests on top of the 
 ([amosblomqvist/learnharness](https://github.com/amosblomqvist/learnharness)), so upstream releases can be pulled in
 and our changes replayed on top without merge commits.
 
+For an installable macOS fork, see [Fork desktop build](fork-desktop-build.md).
+
 ## Branches
 
 The names are declared in `.github/stack-branches.json`.
