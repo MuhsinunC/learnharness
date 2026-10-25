@@ -192,7 +192,6 @@ test("POST 2 resumes quiz plus answer in one query with CONTINUE_TEXT and persis
 	assert.equal(result.message.content[0].tool_use_id, "call-1");
 	assert.deepEqual(JSON.parse(result.message.content[0].content), { kind: "quiz", answers: [{ index: 2, label: "Mercury" }], correct: true });
 	const persistedAnswer = saved.messages.at(-2)!;
-	assert.equal(persistedAnswer.role, "toolResult");
 	assert.ok(persistedAnswer.role === "toolResult");
 	assert.deepEqual(persistedAnswer.details, JSON.parse(JSON.stringify(answer)));
 	assert.deepEqual(saved.messages.at(-1)!.content, [{ type: "text", text: "Right — Mercury it is." }]);
