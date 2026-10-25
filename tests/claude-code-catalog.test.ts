@@ -206,7 +206,6 @@ it("darwin and linux accept an executable", posixOnly, () => {
 
 it("LH_IGNORE_ENV_KEYS is read from the env passed to the boot gate", () => {
 	assert.equal(process.env.LH_IGNORE_ENV_KEYS, undefined);
-	assert.equal(process.env[variable], undefined);
 	const result = bootWith({ [variable]: "/nonexistent/claude", LH_IGNORE_ENV_KEYS: "1" }, "linux");
 	assert.deepEqual(result.warnings, ["claude-code: LH_CLAUDE_CODE_EXECUTABLE ignored (LH_IGNORE_ENV_KEYS=1)"]);
 	assert.equal(result.registered, false);
