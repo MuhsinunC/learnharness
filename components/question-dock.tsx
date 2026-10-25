@@ -28,6 +28,7 @@ import {
 	type DockSelection,
 	type ExplainToolInput,
 	type QuestionAnswerData,
+	type QuestionFormDraft,
 	type QuestionData,
 	type QuestionMode,
 	type QuizToolInput,
@@ -71,6 +72,9 @@ export interface QuestionDockProps {
 	reveal?: boolean;
 	onExpand: () => void;
 	onSubmit: (output: QuestionAnswerData) => void;
+	/** Restore only this call's unconfirmed submission after recovery. */
+	initialDraft?: QuestionFormDraft;
+	onSaveDraft?: (draft: QuestionFormDraft) => void;
 	/** Escape in a question field stops dictation (STT wave) — threaded
 	 *  from the page that owns the dictation hook. */
 	onEscape?: () => void;
@@ -100,6 +104,8 @@ export function QuestionDock({
 	reveal = false,
 	onExpand,
 	onSubmit,
+	initialDraft,
+	onSaveDraft,
 	onEscape,
 	phase = "probe",
 	dictationClaim = true,
@@ -155,6 +161,8 @@ export function QuestionDock({
 					phase={phase}
 					active={expanded}
 					onSubmit={onSubmit}
+					initialDraft={initialDraft}
+					onSaveDraft={onSaveDraft}
 					onEscape={onEscape}
 					dictationClaim={dictationClaim}
 					compactionRunning={compactionRunning}
@@ -250,6 +258,8 @@ function QuestionDockForm({
 	phase = "probe",
 	active,
 	onSubmit,
+	initialDraft,
+	onSaveDraft,
 	onEscape,
 	dictationClaim = true,
 	compactionRunning = false,
@@ -311,22 +321,22 @@ function QuestionDockForm({
 	// single-select displaces, multi-select coexists — picking the ask
 	// "Other…" row in a multi-select must never clear already-picked
 	// options, and picking an option must never clear a typed custom answer.
-	const [sel, setSel] = useState<DockSelection>(emptyDockSelection());
+	const [sel, setSel] = useState<DockSelection>(() => initialDraft?.selection ?? emptyDockSelection());
 	// The learner's transfer channel — thinking, never "a note".
-	const [thinking, setThinking] = useState("");
-	const [other, setOther] = useState("");
-	const [text, setText] = useState("");
+	const [thinking, setThinking] = useState(initialDraft?.thinking ?? "");
+	const [other, setOther] = useState(initialDraft?.other ?? "");
+	const [text, setText] = useState(initialDraft?.text ?? "");
 	/* Refs MIRROR the two dictation-target fields ("nothing gets lost"
 	 * round, owner 2026-10-01): the run's flush lands via setState, which
 	 * a closure waiting through `await finishDictation()` cannot observe
 	 * in time — submit reads these, kept current at every write site. */
-	const thinkingTextRef = useRef("");
-	const answerTextRef = useRef("");
+	const thinkingTextRef = useRef(initialDraft?.thinking ?? "");
+	const answerTextRef = useRef(initialDraft?.text ?? "");
 	// Confidence (owner, 2026-10-01): an index into CONFIDENCE_STOPS,
 	// resting at 50 — a real coin flip by definition, untouched or
 	// deliberate (the same number, the same meaning). The dock unmounts
 	// between questions, so each question starts fresh at 50.
-	const [confIdx, setConfIdx] = useState<number>(DEFAULT_CONFIDENCE_INDEX);
+	const [confIdx, setConfIdx] = useState<number>(initialDraft?.confidenceIndex ?? DEFAULT_CONFIDENCE_INDEX);
 	const selectMode: SelectMode = qd.mode === "multi-select" ? "multi-select" : "single-select";
 
 	// The PRIMARY dictation input (owner, STT round 1): while a question
@@ -390,6 +400,15 @@ function QuestionDockForm({
 			// "untouched"); buildAnswer drops it on "I don't know".
 			confidence: kind === "quiz" ? CONFIDENCE_STOPS[confIdx] : undefined,
 		};
+		// Snapshot before optimistic submission unmounts the form. Ref values
+		// include the dictation finals that just landed, unlike stale closures.
+		onSaveDraft?.({
+			selection: { ...sel, selected: new Set(sel.selected) },
+			thinking: thinkingTextRef.current,
+			other,
+			text: answerTextRef.current,
+			confidenceIndex: confIdx,
+		});
 		onSubmit(buildAnswer(qd, req, toolName));
 	};
 

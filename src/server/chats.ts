@@ -5,6 +5,7 @@ import { titleFromPrompt } from "../core/contracts.ts";
 import { graphRevision } from "./graph.ts";
 import { stores } from "./stores.ts";
 import { isTurnRunning } from "./turn-liveness.ts";
+import { clearTurnFailure } from "./turn-runs.ts";
 
 /**
  * Server-side chat entries for the transport layer (app/api/chats*,
@@ -108,7 +109,7 @@ export async function deleteChatSession(chatId: string, mode: ChatDeleteMode): P
 	// ledgers → jobs → the chat record.
 	const stats = deleteChatTraces(stores.graphStore, chatId, mode);
 	const jobsRemoved = stores.jobStore.deleteJobsForChat(chatId);
-	stores.chatStore.deleteChat(chatId);
+	if (stores.chatStore.deleteChat(chatId)) clearTurnFailure(chatId);
 	return { ok: true, mode, stats, jobsRemoved, graphRevision: graphRevision() };
 }
 
