@@ -193,12 +193,18 @@ app_running() {
 report_running() { sed 's/^/Running LearnHarness copy: /' "$tmp/running" >&2 || true; }
 # Destructive swaps call this right before they move anything.
 ensure_still_quit() {
+    reopened_msg='LearnHarness was reopened during the migration. Nothing more was changed. Quit it and run again.'
+    if [ "$state_msg" != 'Nothing was changed.' ]; then reopened_msg="$reopened_msg $state_msg"; fi
     if app_running; then
         report_running
-        fail 'LearnHarness was reopened during the migration. Nothing more was changed. Quit it and run again.'
+        fail "$reopened_msg"
     fi
     if ship_running; then
         fail "A LearnHarness update is still installing; try again in a minute. $state_msg"
+    fi
+    if app_running; then
+        report_running
+        fail "$reopened_msg"
     fi
 }
 # The installed app's window process; its Node-mode backend runs server.js with the same executable.
@@ -210,11 +216,20 @@ gui_running() {
 }
 ship_running() {
     label=$bundle_id.ShipIt
-    loaded=no
+    launchctl_status=0
     if [ -n "${LH_MIGRATE_LAUNCHCTL_CMD:-}" ]; then
-        if /bin/bash -c "$LH_MIGRATE_LAUNCHCTL_CMD" hook "$label" > "$tmp/launchctl" 2>/dev/null; then loaded=yes; fi
+        /bin/bash -c "$LH_MIGRATE_LAUNCHCTL_CMD" hook "$label" > "$tmp/launchctl" 2> "$tmp/launchctl-error" || launchctl_status=$?
     else
-        if launchctl list "$label" > "$tmp/launchctl" 2>/dev/null; then loaded=yes; fi
+        launchctl list "$label" > "$tmp/launchctl" 2> "$tmp/launchctl-error" || launchctl_status=$?
+    fi
+    loaded=no
+    launchctl_error=$(sed -n '1p' "$tmp/launchctl-error")
+    if [ "$launchctl_status" -eq 0 ] && [ ! -s "$tmp/launchctl-error" ]; then
+        loaded=yes
+    elif [ "$launchctl_status" -eq 113 ] && [[ "$launchctl_error" == "Could not find service \"$label\""* ]]; then
+        loaded=no
+    else
+        fail "Could not query launchd for $label (exit $launchctl_status: $launchctl_error). $state_msg"
     fi
     if [ "$loaded" = yes ]; then
         if /usr/bin/grep -Eq '^[[:space:]]*"PID"[[:space:]]*=[[:space:]]*[0-9]+;' "$tmp/launchctl"; then return 0; fi
@@ -234,8 +249,8 @@ ship_running() {
                 return 0;;
         esac
     fi
-    processes command > "$tmp/ps" || fail "Could not read the process listing. $state_msg"
-    if awk -v label="$label" '{sub(/^[[:space:]]*[0-9]+[[:space:]]+/,"");if(index($0,label)>0)found=1}END{exit !found}' "$tmp/ps"; then return 0; fi
+    processes comm > "$tmp/ship-comm" || fail "Could not read the process listing. $state_msg"
+    if awk '{sub(/^[[:space:]]*[0-9]+[[:space:]]+/,"");if($0 ~ /\/ShipIt$/)found=1}END{exit !found}' "$tmp/ship-comm"; then return 0; fi
     if exists "$HOME/Library/Caches/$label/ShipItState.plist" && [ "$ship_record_noted" = no ]; then
         printf 'Note: an old update record was found; continuing.\n'
         ship_record_noted=yes

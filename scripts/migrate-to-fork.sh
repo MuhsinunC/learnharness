@@ -18,6 +18,9 @@ while [ "$#" -gt 0 ]; do
         *) fail "Unknown option: $1";;
     esac
 done
+if [ -n "$expected_hash" ]; then
+    printf '%s\n' "$expected_hash" | /usr/bin/grep -Eq '^[a-fA-F0-9]{64}$' || fail 'Invalid SHA-256 digest.'
+fi
 [ -n "$dmg" ] || [ -z "$expected_hash" ] || fail '--sha256 requires --dmg.'
 init
 if [ -z "$dmg" ]; then
@@ -64,7 +67,6 @@ else
     if [ -z "$expected_hash" ]; then printf '%s\n' 'Warning: local DMG has no supplied SHA-256 digest.'; fi
 fi
 if [ -n "$expected_hash" ]; then
-    printf '%s\n' "$expected_hash" | /usr/bin/grep -Eq '^[a-fA-F0-9]{64}$' || fail 'Invalid SHA-256 digest.'
     expected_hash=$(printf '%s' "$expected_hash" | tr 'ABCDEF' 'abcdef')
     [ "$(hash_file "$dmg")" = "$expected_hash" ] || fail 'DMG SHA-256 digest mismatch. Nothing was changed.'
 fi
@@ -192,7 +194,7 @@ else
     printf 'To undo: %s\n' "$undo"
     state_msg="The fork is installed. To undo: $undo"
     [ "$(version "$app")" = "$fork_version" ] || fail "Installed version verification failed. $state_msg"
-    xattr -lr "$app" > "$tmp/xattrs"
+    xattr -lrs "$app" > "$tmp/xattrs"
     ! /usr/bin/grep -Fq 'com.apple.quarantine' "$tmp/xattrs" || fail "Quarantine remains on installed app. $state_msg"
     codesign --verify "$app"
 fi
