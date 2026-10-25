@@ -259,14 +259,30 @@ jobs:
       - name: Verify seeded data survived the app run
         run: |
           set -euo pipefail
-          # No seeded-file exceptions: the two golden chats, seven golden graph
-          # files and golden settings are read without rewriting or stamping.
+          # Every seeded file must stay byte-identical except data/graph/positions.json:
+          # components/graph-view.tsx and components/graph-canvas.ts re-persist it
+          # after the launch-time physics settle. Validate its structure instead.
           # Startup purges only unseeded edges/events ledgers; no jobs are seeded.
           # Dummy sign-in files and the nested space-named file must also survive.
           # Logs, Chromium profile and caches may be added and are listed by name.
           # Runs after the quit so the live Chromium profile is not walked mid-write.
-          bash tests/fork-mac-e2e/data-manifest.sh subset \
-            "$HOME/Library/Application Support/LearnHarness" "$ART/data-manifest.jsonl" > "$ART/new-data-entries.jsonl"
+          if ! bash tests/fork-mac-e2e/data-manifest.sh subset \
+            "$HOME/Library/Application Support/LearnHarness" "$ART/data-manifest.jsonl" \
+            data/graph/positions.json > "$ART/new-data-entries.jsonl" 2> "$ART/allowed-changes.txt"; then
+            cat "$ART/allowed-changes.txt" >&2
+            exit 1
+          fi
+          cat "$ART/allowed-changes.txt" >&2
+          python3 - "$HOME/Library/Application Support/LearnHarness/data/graph/positions.json" \
+            "$GITHUB_WORKSPACE/tests/fixtures/golden-data/graph/nodes.jsonl" <<'PY'
+          import json, sys
+          from pathlib import Path
+          positions = json.loads(Path(sys.argv[1]).read_text())['positions']
+          assert isinstance(positions, dict)
+          expected = {json.loads(line)['id'] for line in Path(sys.argv[2]).read_text().splitlines() if line.strip()}
+          assert expected <= positions.keys()
+          print(f'positions: {len(positions)}; fixture propositions: {len(expected)}')
+          PY
       - name: Record quarantined Gatekeeper behavior
         continue-on-error: true
         run: |

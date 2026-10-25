@@ -8,13 +8,16 @@ import stat
 import sys
 from pathlib import Path
 
-mode, root, manifest = sys.argv[1:]
+mode, root, manifest, *allowed = sys.argv[1:]
+assert mode == 'subset' or not allowed, 'Extra arguments require subset mode'
 root = Path(root)
 expected = {}
 if mode != 'write':
     assert mode in ('subset', 'exact'), mode
     with open(manifest) as src:
         expected = {row[0]: row[1:] for row in map(json.loads, src)}
+for name in allowed:
+    assert name in expected and expected[name][0] == 'f', f'Not a seeded regular file: {name}'
 # Enumerate additions by name only: live Chromium cache files can disappear or
 # change between enumeration and hashing. Only seeded entries are compared.
 paths = {str(p.relative_to(root)) for p in root.rglob('*')} | {'.'}
@@ -31,7 +34,12 @@ if mode == 'write':
             out.write(json.dumps([name, *value]) + '\n')
 else:
     for name, value in expected.items():
-        assert entries.get(name) == value, f'Changed seeded entry: {name}'
+        if name in allowed:
+            assert entries[name][:2] == value[:2], f'Changed seeded entry kind or mode: {name}'
+            if entries[name][2] != value[2]:
+                print(f'allowed change: {name}', file=sys.stderr)
+        else:
+            assert entries.get(name) == value, f'Changed seeded entry: {name}'
     additions = sorted(paths - expected.keys())
     if mode == 'exact':
         assert not additions, f'Unexpected entries: {additions}'
