@@ -50,6 +50,7 @@ async function mount({ keyed = false, catalogFails = false } = {}) {
 	globalThis.fetch = async (input, init) => {
 		assert.equal(init?.method ?? "GET", "GET", "interaction tests must not write data");
 		const path = new URL(String(input), "http://localhost").pathname;
+		if (path === "/api/claude-code") return Response.json({ mode: "off", envOverride: false, found: false, loggedIn: false, executable: null, error: null });
 		if (path === "/api/keys") return Response.json({ providers: [provider], keys: [] });
 		assert.equal(path, "/api/models");
 		if (catalogFails) throw new Error("fixture catalog failure");
