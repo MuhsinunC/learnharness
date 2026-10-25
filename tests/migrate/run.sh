@@ -48,6 +48,9 @@ setup() {
     printf '{}\n' > "$data/data/graph/positions.json"
     printf '{}\n' > "$data/data/settings.json"
     printf 'fixture bytes\n' > "$data/nested dir/file with space"
+    printf 'backslash bytes\n' > "$data/nested dir/back\\slash"
+    printf 'edge spaces\n' > "$data/nested dir/ leading and trailing "
+    printf 'prefix ordering\n' > "$data/nested dir/file with space"$'\001'
     ln -s missing-host-lock "$data/SingletonLock"
     fixture_app "$apps/LearnHarness.app" 0.3.3
     fixture_app "$case_root/source/LearnHarness.app" 0.3.4-fork.2
@@ -98,7 +101,7 @@ snapshot() {
         printf '%s\t%s\t' "$item" "$(stat -f '%Lp' "$item")"
         if [ -L "$item" ]; then printf 'l\t%s\n' "$(readlink "$item")"
         elif [ -d "$item" ]; then printf 'd\n'
-        else printf 'f\t%s\n' "$(shasum -a 256 "$item" | awk '{print $1}')"; fi
+        else printf 'f\t%s\n' "$(shasum -a 256 < "$item" | awk '{print $1}')"; fi
     done)
 }
 invoke() {
@@ -133,7 +136,7 @@ case_1() {
     for file in data.tar.gz manifest.txt rollback-fork.sh migrate-common.sh; do [ "$(stat -f '%Lp' "$backup/$file")" = 600 ]; done
     grep -qx $'chats\t2' "$backup/manifest.txt"
     grep -qx $'graph_files\t2' "$backup/manifest.txt"
-    grep -qx $'files\t8' "$backup/manifest.txt"
+    grep -qx $'files\t11' "$backup/manifest.txt"
     grep -qx $'dirs\t5' "$backup/manifest.txt"
     grep -qx $'symlinks\t1' "$backup/manifest.txt"
     grep -qx $'settings\tyes' "$backup/manifest.txt"
@@ -225,11 +228,18 @@ case_5() {
 }
 case_6() {
     setup 6
+    touch "$case_root/running"
     mkdir -p "$case_root/checkout/.git"
     backups=$case_root/checkout/deep/backups
     expect_failure --dry-run
     no_backup; unchanged_data; unchanged_app
-    grep -q 'inside a git checkout' "$case_root/output"
+    grep -q 'inside a git checkout.*Nothing was changed.' "$case_root/output"
+    [ ! -e "$case_root/quit-called" ]
+    backups=$case_root/backup-link
+    ln -s "$case_root/private backups" "$backups"
+    expect_failure --dry-run
+    grep -q 'must not be a symlink.*Nothing was changed.' "$case_root/output"
+    [ ! -e "$case_root/quit-called" ]
 }
 case_7() {
     if [ -z "$shellcheck_bin" ]; then printf 'SKIP 7: shellcheck is not installed\n'; return; fi
