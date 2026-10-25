@@ -34,6 +34,11 @@ export function hasProviderKey(
 	return classifyKeys(statuses, providers).providerRows.some((s) => s.present);
 }
 
+/** Pure: a registered keyless provider can run without an API key. */
+export function hasKeylessProvider(catalog: ModelCatalogResponse | undefined): boolean {
+	return catalog?.providers.some((p) => p.keyless && p.keyPresent) ?? false;
+}
+
 /** The zero-keys truth for the calling page: TRUE only after a
  *  successful read says no provider key exists (pending and failed
  *  reads render nothing — the pill must never flash on a gap, and a
@@ -41,6 +46,7 @@ export function hasProviderKey(
  *  leans on). Re-reads on the keys signal. */
 export function useZeroKeys(): boolean {
 	const [zeroKeys, setZeroKeys] = useState(false);
+	const { catalog, refresh } = useModelCatalog();
 	const read = useCallback(() => {
 		fetch("/api/keys")
 			.then((r) => r.json())
@@ -53,9 +59,12 @@ export function useZeroKeys(): boolean {
 		read();
 	}, [read]);
 	useSettingsSaved((section) => {
-		if (section === "keys") read();
+		if (section === "keys") {
+			read();
+			refresh();
+		}
 	});
-	return zeroKeys;
+	return zeroKeys && !hasKeylessProvider(catalog);
 }
 
 /** The pill itself — the models CTA's chrome and placement, the keys
