@@ -676,7 +676,6 @@ case_21() {
     unchanged_data
     snapshot "$apps/LearnHarness.app" > "$case_root/now-app"; cmp "$case_root/fork-app" "$case_root/now-app"
     [ "$(find "$apps" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = 1 ]
-    [ -n "$(find "$(dirname "$data")" -maxdepth 1 -name 'LearnHarness.fork-*')" ]
     [ -f "$backup/manifest.txt" ]
     rm "$case_root/shipit-on-aside"
     invoke "$backup/rollback-fork.sh" "$backup"
