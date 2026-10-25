@@ -16,10 +16,10 @@ type Status = {
 	executable: string | null; found: boolean; candidates?: string[] | null; version?: string | null;
 	loggedIn: boolean; account?: { email?: string | null; subscriptionType: string | null } | null;
 	login?: Login | null; endpoint?: { baseUrl: string | null; tokenSet: boolean } | null; error?: string | null;
-	// Newer servers: `ok` says whether a write committed; `probeError` is a diagnostic, not a failure.
-	ok?: boolean; probeError?: string | null; discovered?: string | null;
+	// PUT and DELETE success carry `ok: true`, `error: null`, and an optional `probeError` diagnostic; failures are non-2xx with `error`.
+	ok?: boolean; probeError?: string | null; discovered?: string | null; hint?: string | null;
 };
-type Change = { mode: Status["mode"]; baseUrl?: string; token?: string };
+type Change = { mode: Status["mode"]; baseUrl?: string; token?: string; executable?: string };
 function safeError(value: unknown, fallback: string, token?: string) {
 	return typeof value === "string" && (!token || !value.includes(token)) ? value : fallback;
 }
@@ -122,10 +122,6 @@ export function ClaudeCodeConnection() {
 				return;
 			}
 			if (background && errorSource.current === "background") { errorSource.current = null; setError(null); }
-			if (committed && reply.error != null) {
-				// The write landed; the server's error describes a follow-up probe, so show it muted.
-				accept({ ...reply, probeError: reply.probeError ?? reply.error }, sentToken, body?.mode === "endpoint"); return;
-			}
 			if (reply.error != null || (method === "PUT" && !committed)) {
 				if (typeof reply.found === "boolean") accept({ ...reply, error: safeError(reply.error, fallback, sentToken) }, sentToken, method === "PUT" && body?.mode === "endpoint");
 				showError(safeError(reply.error, fallback, sentToken), background); return;
@@ -133,7 +129,10 @@ export function ClaudeCodeConnection() {
 			if (method === "POST") {
 				if (current.current) accept({ ...current.current, login: reply.login });
 				if (reply.login?.state === "idle") queueMicrotask(() => { if (mounted.current) void request("GET"); });
-			} else accept(reply, sentToken, method === "PUT" && body?.mode === "endpoint");
+			} else {
+				accept(reply, sentToken, method === "PUT" && body?.mode === "endpoint");
+				if (committed && body?.executable) queueMicrotask(() => { if (mounted.current) void request("GET"); });
+			}
 		} catch {
 			if (method === "POST") clearActivation();
 			if (mounted.current && owner === sequence.current) showError(fallback, background);
@@ -172,6 +171,7 @@ export function ClaudeCodeConnection() {
 	const endpointConfigured = !!status?.endpoint?.baseUrl && !!status.endpoint.tokenSet;
 	const selectedBackend = endpointConfigured ? backend : "local";
 	const canEnable = selectedBackend === "endpoint" ? endpointConfigured : !!status?.loggedIn;
+	const repair = status?.discovered != null && (status.hint != null || !status.found);
 	const help = "text-xs leading-relaxed text-muted-foreground";
 	return <div data-testid="claude-code-connection" className="flex flex-col gap-2">
 		<span className="font-ui text-xs text-foreground">Claude</span>
@@ -182,9 +182,14 @@ export function ClaudeCodeConnection() {
 			<p className={help}>Configured by the LH_CLAUDE_CODE_EXECUTABLE environment variable.</p>
 			{status.loggedIn && <p className={help}>{signedIn}</p>}
 			{status.executable && <p className="text-[11px] text-muted-foreground">{status.executable}</p>}
-		</> : !status.found ? <>
-			<p className={help}>Claude Code isn&apos;t installed on this computer.</p>
-			<p className={help}>Install Claude Code from claude.com/claude-code, then come back here.</p>
+		</> : repair || !status.found ? <>
+			{repair ? <>
+				<p className={help}>{status.hint ?? "The saved Claude Code path is missing."}</p>
+				<Button type="button" className="self-start cursor-pointer disabled:cursor-not-allowed" size="xs" disabled={busy} onClick={() => void request("PUT", { mode: status.mode === "off" ? "local" : status.mode, executable: status.discovered! })}>{`Use ${status.discovered}`}</Button>
+			</> : <>
+				<p className={help}>{status.executable === null ? "Claude Code isn't installed on this computer." : `Claude Code wasn't found at ${status.executable}.`}</p>
+				<p className={help}>Install Claude Code from claude.com/claude-code, then come back here.</p>
+			</>}
 			{status.mode !== "off" && <div className="flex items-center gap-3 text-xs text-foreground"><Toggle label="Use Claude in LearnHarness" checked disabled={busy} onChange={() => void request("PUT", { mode: "off" })} /><span>Use Claude in LearnHarness</span></div>}
 			<Button type="button" className="self-start cursor-pointer disabled:cursor-not-allowed" size="xs" variant="outline" disabled={busy} onClick={() => void request("GET")}>Refresh</Button>
 		</> : <>

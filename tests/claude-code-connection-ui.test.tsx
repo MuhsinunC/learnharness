@@ -18,7 +18,7 @@ const storage = new Map<string, string>();
 Object.assign(globalThis, { sessionStorage: { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => { storage.set(key, value); }, removeItem: (key: string) => { storage.delete(key); } } });
 const originalFetch = globalThis.fetch;
 let root: Root | undefined, host: HTMLDivElement | undefined;
-const initial = { mode: "off", envOverride: false, active: false, executable: "/Users/example/.local/bin/claude", found: true, loggedIn: false, account: null, login: { state: "idle", url: null as string | null, error: null as string | null }, endpoint: { baseUrl: null as string | null, tokenSet: false }, error: null };
+const initial = { mode: "off", envOverride: false, active: false, executable: "/Users/example/.local/bin/claude" as string | null, candidates: [] as string[], version: "2.1.310 (Claude Code)" as string | null, discovered: null as string | null, hint: null as string | null, found: true, loggedIn: false, account: null, login: { state: "idle", url: null as string | null, error: null as string | null }, endpoint: { baseUrl: null as string | null, tokenSet: false }, error: null };
 type Call = { method: string; path: string; body?: Record<string, unknown> };
 function fixture(overrides = {}) {
 	let status = { ...initial, ...overrides }, failure: { code: number; error: string } | null = null;
@@ -31,8 +31,8 @@ function fixture(overrides = {}) {
 		if (call.method === "GET") get?.();
 		if (call.method === "PUT" && failure) return { ok: false, status: failure.code, json: async () => ({ error: failure!.error }) } as Response;
 		if (call.method === "POST") status = { ...status, login: { state: "pending", url: "https://claude.com/login", error: null } };
-		if (call.method === "PUT") status = { ...status, mode: call.body.mode, endpoint: call.body.baseUrl ? { baseUrl: call.body.baseUrl, tokenSet: true } : status.endpoint };
-		return { ok: true, json: async () => structuredClone(status) } as Response;
+		if (call.method === "PUT") status = { ...status, mode: call.body.mode, ...(call.body.executable ? { executable: call.body.executable, discovered: null, hint: null, found: true } : {}), endpoint: call.body.baseUrl ? { baseUrl: call.body.baseUrl, tokenSet: true } : status.endpoint };
+		return { ok: true, json: async () => structuredClone(call.method === "PUT" ? { ...status, ok: true, error: null } : status) } as Response;
 	}) as typeof fetch;
 	return { calls, set: (next: object) => { status = { ...status, ...next }; }, fail: (error: string, code = 500) => { failure = { code, error }; }, onGet: (handler: () => void) => { get = handler; } };
 }
@@ -52,16 +52,16 @@ const puts = (f: ReturnType<typeof fixture>) => f.calls.filter((c) => c.method =
 afterEach(async () => { await act(async () => root?.unmount()); host?.remove(); root = undefined; host = undefined; globalThis.fetch = originalFetch; storage.clear(); });
 
 test("not found has only installation instructions and refresh", async () => {
-	fixture({ found: false }); await mount(); assert(text().includes("Claude Code isn't installed on this computer.")); assert(text().includes("Install Claude Code from claude.com/claude-code, then come back here.")); assert(button("Refresh")); assert(!button("Log in with Claude")); assert(!host!.querySelector("input, details"));
+	fixture({ found: false, executable: null, discovered: null, error: "Claude Code not found" }); await mount(); assert(text().includes("Claude Code isn't installed on this computer.")); assert(text().includes("Install Claude Code from claude.com/claude-code, then come back here.")); assert(button("Refresh")); assert(!button("Log in with Claude")); assert(!host!.querySelector("input, details"));
 });
 test("logged out offers login and closed advanced section, tolerating missing fields", async () => {
-	fixture({ endpoint: null, login: null, account: null, candidates: null, version: null }); await mount(); assert(button("Log in with Claude")); assert(!host!.querySelector("details")!.hasAttribute("open"));
+	fixture({ endpoint: null, login: null, account: null, candidates: null, version: null, loggedIn: false, error: null }); await mount(); assert(!host!.querySelector('[role="alert"]')); assert(button("Log in with Claude")); assert(!host!.querySelector("details")!.hasAttribute("open"));
 });
 for (const url of ["https://claude.com/login", "http://claude.com/login", "javascript:alert(1)", "invalid"]) test(`pending login only links https: ${url}`, async () => {
 	fixture({ login: { state: "pending", url } }); await mount(); assert(text().includes("Finish signing in in your browser…")); assert.equal(host!.querySelector("a")?.getAttribute("href") ?? null, url.startsWith("https:") ? url : null);
 });
 test("logged in shows account, switch and binary", async () => {
-	fixture({ loggedIn: true, mode: "local", account: { email: "user@example.com", subscriptionType: "pro" } }); await mount(); assert(text().includes("Signed in as user@example.com (pro)")); assert(text().includes(initial.executable)); assert.equal(host!.querySelector('[role="switch"]')!.getAttribute("aria-checked"), "true");
+	fixture({ loggedIn: true, mode: "local", account: { email: "user@example.com", subscriptionType: "pro" } }); await mount(); assert(text().includes("Signed in as user@example.com (pro)")); assert(text().includes(initial.executable!)); assert.equal(host!.querySelector('[role="switch"]')!.getAttribute("aria-checked"), "true");
 });
 test("environment override is read only", async () => {
 	fixture({ envOverride: true, loggedIn: true }); await mount(); assert(text().includes("Configured by the LH_CLAUDE_CODE_EXECUTABLE environment variable.")); assert(text().includes("Signed in")); assert.equal(host!.querySelectorAll('button, input, [role="switch"], details').length, 0);
@@ -132,7 +132,7 @@ test("mode refresh waits for successful reply and controls lock during writes", 
 	try {
 		await click(host!.querySelector('[role="switch"]')!); assert.deepEqual(events, []);
 		assert([...host!.querySelectorAll<HTMLButtonElement | HTMLInputElement>("button, input")].every((item) => item.disabled));
-		await act(async () => resolve({ ok: true, json: async () => ({ ...initial, loggedIn: true }) } as Response)); assert.deepEqual(events, ["keys"]);
+		await act(async () => resolve({ ok: true, json: async () => ({ ...initial, ok: true, error: null, loggedIn: true }) } as Response)); assert.deepEqual(events, ["keys"]);
 	} finally { off(); }
 });
 for (const kind of ["network", "parse", "api"]) test(`failed PUT clears token and leaves endpoint status unchanged: ${kind}`, async () => {
@@ -155,7 +155,7 @@ test("login deadline does not discard an endpoint write already in flight", asyn
 	try {
 		await click(button("Save")); await act(async () => t.mock.timers.tick(CLAUDE_LOGIN_POLL_MS));
 		assert(button("Save").disabled);
-		await act(async () => resolve({ ok: true, json: async () => ({ ...initial, mode: "endpoint", endpoint: { baseUrl: "https://relay.example", tokenSet: true }, login: { state: "pending", url: null } }) } as Response));
+		await act(async () => resolve({ ok: true, json: async () => ({ ...initial, ok: true, error: null, mode: "endpoint", endpoint: { baseUrl: "https://relay.example", tokenSet: true }, login: { state: "pending", url: null } }) } as Response));
 		assert.deepEqual(events, ["keys"]); assert(button("Stop using endpoint")); assert(button("Log in with Claude")); assert.equal(input("Token").value, "");
 	} finally { off(); }
 });
@@ -187,7 +187,7 @@ test("endpoint saves preempt background polling and ignore its late reply", asyn
 		const method = options?.method ?? "GET";
 		calls.push({ path: String(path), method, ...(options?.body ? { body: JSON.parse(String(options.body)) } : {}) });
 		if (method === "GET") return new Promise<Response>((done) => { resolve = done; });
-		return { ok: true, json: async () => ({ ...initial, mode: "endpoint", endpoint: { baseUrl: "https://relay.example", tokenSet: true } }) } as Response;
+		return { ok: true, json: async () => ({ ...initial, ok: true, error: null, mode: "endpoint", endpoint: { baseUrl: "https://relay.example", tokenSet: true } }) } as Response;
 	}) as typeof fetch;
 	await act(async () => t.mock.timers.tick(CLAUDE_LOGIN_POLL_MS));
 	assert(!input("Base URL").disabled); assert(!input("Token").disabled); assert(!button("Save").disabled);
@@ -197,15 +197,6 @@ test("endpoint saves preempt background polling and ignore its late reply", asyn
 	await act(async () => resolve({ ok: true, json: async () => ({ ...initial, loggedIn: true, mode: "off" }) } as Response));
 	assert(button("Stop using endpoint")); assert.equal(host!.querySelector('[role="switch"]')!.getAttribute("aria-checked"), "true");
 	assert.equal(calls.filter((call) => call.method === "PUT").length, 1);
-});
-test("status-bearing PUT errors redact the submitted token", async () => {
-	fixture(); await mount(); await type("Base URL", "https://relay.example"); await type("Token", "SENTINEL-TOKEN-7f3a");
-	globalThis.fetch = async () => ({ ok: true, json: async () => ({ ...initial, mode: "endpoint", endpoint: { baseUrl: "https://relay.example", tokenSet: true }, error: "bad relay SENTINEL-TOKEN-7f3a" }) }) as Response;
-	const events: string[] = [], off = onSettingsSaved((section) => events.push(section));
-	try {
-		await click(button("Save")); assert(button("Stop using endpoint")); assert.equal(input("Token").value, "");
-		assert(!document.body.innerHTML.includes("SENTINEL-TOKEN-7f3a")); assert(!host!.querySelector('[role="alert"]')); assert.deepEqual(events, ["keys"]);
-	} finally { off(); }
 });
 test("Base URL changes through React onChange without controlled-input warnings", async (t) => {
 	const errors: unknown[][] = []; t.mock.method(console, "error", (...args: unknown[]) => errors.push(args));
@@ -300,23 +291,13 @@ test("background recovery clears only background errors", async (t) => {
 	await type("Base URL", "not a url"); await click(button("Save"));
 	await act(async () => t.mock.timers.tick(CLAUDE_LOGIN_POLL_MS)); assert(text().includes("Enter an https:// URL"));
 });
-for (const changed of [false, true]) test(`a 2xx write without ok commits and shows its error muted: changed=${changed}`, async () => {
-	fixture({ loggedIn: true, mode: "local" }); await mount();
-	globalThis.fetch = async () => ({ ok: true, json: async () => ({ ...initial, loggedIn: true, mode: changed ? "off" : "local", error: "auth status timed out" }) }) as Response;
-	const events: string[] = [], off = onSettingsSaved(s => events.push(s));
-	try {
-		await click(host!.querySelector('[role="switch"]')!);
-		assert.equal(host!.querySelector('[role="switch"]')!.getAttribute("aria-checked"), changed ? "false" : "true");
-		assert(text().includes("auth status timed out")); assert(!host!.querySelector('[role="alert"]')); assert.deepEqual(events, ["keys"]);
-	} finally { off(); }
-});
 test("a completed write notifies even after unmount", async () => {
 	fixture({ loggedIn: true, mode: "local" }); await mount(); let resolve!: (r: Response) => void;
 	globalThis.fetch = () => new Promise<Response>(done => { resolve = done; });
 	const events: string[] = [], off = onSettingsSaved(s => events.push(s));
 	try {
 		await click(host!.querySelector('[role="switch"]')!); await unmount();
-		await act(async () => resolve({ ok: true, json: async () => ({ ...initial, loggedIn: true }) } as Response));
+		await act(async () => resolve({ ok: true, json: async () => ({ ...initial, ok: true, error: null, loggedIn: true }) } as Response));
 		assert.deepEqual(events, ["keys"]);
 	} finally { off(); }
 });
@@ -348,8 +329,8 @@ test("failed backend changes keep the current selection", async () => {
 	const f = fixture({ loggedIn: true, mode: "local", endpoint }); await mount(); f.fail("cannot save");
 	await click(input("custom endpoint")); assert(input("my Claude login").checked); assert(!input("custom endpoint").checked);
 });
-test("a missing executable does not prevent disabling an active mode", async () => {
-	const f = fixture({ found: false, mode: "local" }); await mount();
+for (const missing of [{ executable: null }, { executable: "/Users/example/old/claude" }, { executable: "/Users/example/old/claude", discovered: "/Users/example/.local/bin/claude", hint: "Saved Claude Code path is missing; choose the discovered one" }]) test(`a missing executable does not prevent disabling an active mode: ${JSON.stringify(missing)}`, async () => {
+	const f = fixture({ found: false, mode: "local", ...missing }); await mount();
 	await click(host!.querySelector('[role="switch"]')!); assert.deepEqual(puts(f)[0]!.body, { mode: "off" });
 });
 
@@ -398,13 +379,13 @@ test("a login failure after unmount clears the activation marker", async () => {
 	await act(async () => resolve({ ok: false, json: async () => ({ error: "login failed" }) } as Response));
 	assert.equal(storage.size, 0);
 });
-test("a committed write with ok and a probe diagnostic notifies and shows a muted note", async () => {
+for (const changed of [false, true]) test(`a committed write with ok and a probe diagnostic notifies and shows a muted note: changed=${changed}`, async () => {
 	fixture({ loggedIn: true, mode: "local", discovered: "/Users/example/.local/bin/claude" }); await mount();
 	const events: string[] = [], off = onSettingsSaved((s) => events.push(s));
-	globalThis.fetch = (async () => ({ ok: true, json: async () => ({ ...initial, loggedIn: true, mode: "off", ok: true, probeError: "auth status timed out", error: null }) })) as unknown as typeof fetch;
+	globalThis.fetch = (async () => ({ ok: true, json: async () => ({ ...initial, loggedIn: true, mode: changed ? "off" : "local", ok: true, probeError: "auth status timed out", error: null }) })) as unknown as typeof fetch;
 	try {
 		await click(host!.querySelector('[role="switch"]')!);
-		assert.deepEqual(events, ["keys"]); assert.equal(host!.querySelector('[role="switch"]')!.getAttribute("aria-checked"), "false");
+		assert.deepEqual(events, ["keys"]); assert.equal(host!.querySelector('[role="switch"]')!.getAttribute("aria-checked"), changed ? "false" : "true");
 		assert(text().includes("auth status timed out")); assert(!host!.querySelector('[role="alert"]'));
 	} finally { off(); }
 });
@@ -416,8 +397,12 @@ test("an explicit ok false reply fires no signal", async () => {
 });
 test("a probe diagnostic that echoes the submitted token is not rendered", async () => {
 	fixture(); await mount(); await type("Base URL", "https://relay.example"); await type("Token", "SENTINEL-TOKEN-7f3a");
-	globalThis.fetch = (async () => ({ ok: true, json: async () => ({ ...initial, mode: "endpoint", endpoint: { baseUrl: "https://relay.example", tokenSet: true }, ok: true, probeError: "probe saw SENTINEL-TOKEN-7f3a" }) })) as unknown as typeof fetch;
-	await click(button("Save")); assert(!document.body.innerHTML.includes("SENTINEL-TOKEN-7f3a")); assert(!text().includes("probe saw"));
+	globalThis.fetch = (async () => ({ ok: true, json: async () => ({ ...initial, mode: "endpoint", endpoint: { baseUrl: "https://relay.example", tokenSet: true }, ok: true, error: null, probeError: "probe saw SENTINEL-TOKEN-7f3a" }) })) as unknown as typeof fetch;
+	const events: string[] = [], off = onSettingsSaved((s) => events.push(s));
+	try {
+		await click(button("Save")); assert(!document.body.innerHTML.includes("SENTINEL-TOKEN-7f3a")); assert(!text().includes("probe saw"));
+		assert(!host!.querySelector('[role="alert"]')); assert.deepEqual(events, ["keys"]); assert.equal(input("Token").value, ""); assert(button("Stop using endpoint")); assert.equal(host!.querySelector('[role="switch"]')!.getAttribute("aria-checked"), "true");
+	} finally { off(); }
 });
 test("a non-2xx write fires no signal even when it echoes the old status", async () => {
 	fixture({ loggedIn: true, mode: "local" }); await mount();
@@ -434,4 +419,47 @@ test("a failed login POST shows the login error", async () => {
 	globalThis.fetch = (async () => ({ ok: false, status: 502, json: async () => ({ login: { state: "failed", error: "claude auth login exited with code 1" } }) })) as unknown as typeof fetch;
 	await click(button("Log in with Claude"));
 	assert.equal(host!.querySelector('[role="alert"]')?.textContent, "claude auth login exited with code 1"); assert(!text().includes("could not be changed")); assert(button("Log in with Claude"));
+});
+
+const repair = { found: false, executable: "/Users/example/old/claude", discovered: "/Users/example/.local/bin/claude", hint: "Saved Claude Code path is missing; choose the discovered one" };
+for (const found of [false, true]) test(`repair takes precedence over installed and signed-in views: found=${found}`, async () => {
+	fixture({ ...repair, found, loggedIn: found }); await mount();
+	assert(text().includes(repair.hint)); assert.equal(button(`Use ${repair.discovered}`).getAttribute("data-variant"), "default");
+	assert(!text().includes("isn't installed")); assert(!text().includes("Signed in")); assert(!button("Log in with Claude")); assert(!host!.querySelector("input, details"));
+});
+test("repair without a hint explains the missing saved path", async () => {
+	fixture({ ...repair, hint: null }); await mount(); assert(text().includes("The saved Claude Code path is missing.")); assert(button(`Use ${repair.discovered}`)); assert(!text().includes("isn't installed"));
+});
+for (const mode of ["off", "local", "endpoint"]) test(`use discovered executable saves and refreshes once: ${mode}`, async () => {
+	const f = fixture({ ...repair, mode, ...(mode === "endpoint" ? { endpoint } : {}) }); await mount();
+	const events: string[] = [], off = onSettingsSaved((s) => events.push(s));
+	try {
+		await click(button(`Use ${repair.discovered}`)); assert.deepEqual(puts(f).map(c => c.body), [{ mode: mode === "off" ? "local" : mode, executable: repair.discovered }]);
+		assert.deepEqual(f.calls.map(c => c.method), ["GET", "PUT", "GET"]); assert(!button(`Use ${repair.discovered}`)); assert.deepEqual(events, ["keys"]);
+	} finally { off(); }
+});
+test("failed use keeps the repair button and error without refreshing", async () => {
+	const f = fixture(repair); await mount(); f.fail("executable failed validation", 400); await click(button(`Use ${repair.discovered}`));
+	assert.equal(host!.querySelector('[role="alert"]')?.textContent, "executable failed validation"); assert.deepEqual(f.calls.map(c => c.method), ["GET", "PUT"]); assert(button(`Use ${repair.discovered}`));
+});
+test("missing saved executable without discovery names the path", async () => {
+	fixture({ ...repair, discovered: null, hint: null, error: "Claude Code not found" }); await mount();
+	assert(text().includes("Claude Code wasn't found at /Users/example/old/claude.")); assert(!text().includes("isn't installed")); assert(button("Refresh")); assert(!button(`Use ${repair.discovered}`));
+});
+test("environment override stays read only with discovery and a hint", async () => {
+	fixture({ ...repair, envOverride: true }); await mount(); assert.equal(host!.querySelectorAll('button, input, [role="switch"], details').length, 0);
+});
+
+for (const kind of ["network", "parse", "ok false"]) test(`failed use does not refresh: ${kind}`, async () => {
+	const f = fixture(repair); await mount(); const fetchStatus = globalThis.fetch;
+	globalThis.fetch = (async (path, options) => {
+		if (options?.method !== "PUT") return fetchStatus(path, options);
+		f.calls.push({ path: String(path), method: "PUT", body: JSON.parse(String(options.body)) });
+		if (kind === "network") throw new Error("offline");
+		return { ok: true, json: async () => { if (kind === "parse") throw new Error("invalid JSON"); return { error: "executable failed validation", ok: false }; } } as Response;
+	}) as typeof fetch;
+	const events: string[] = [], off = onSettingsSaved((s) => events.push(s));
+	try {
+		await click(button(`Use ${repair.discovered}`)); assert(host!.querySelector('[role="alert"]')); assert.deepEqual(f.calls.map(c => c.method), ["GET", "PUT"]); assert(button(`Use ${repair.discovered}`)); assert.deepEqual(events, []);
+	} finally { off(); }
 });
