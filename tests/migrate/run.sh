@@ -116,10 +116,18 @@ case "$name" in
         if [ -f "$LH_TEST_ROOT/shipit" ]; then printf '"PID" = 123;\n'; exit 0; fi
         # An update restart relaunches the app while ShipIt finishes.
         if [ -f "$LH_TEST_ROOT/shipit-once" ]; then rm "$LH_TEST_ROOT/shipit-once"; touch "$LH_TEST_ROOT/relaunched"; printf '"PID" = 123;\n'; exit 0; fi
-        if [ -f "$LH_TEST_ROOT/shipit-loaded" ] ||
-            { [ -f "$LH_TEST_ROOT/shipit-on-new" ] && ls -d "$LH_MIGRATE_APPS_DIR"/.LearnHarness.app.lh-new-* >/dev/null 2>&1; } ||
+        if [ -f "$LH_TEST_ROOT/shipit-loaded" ]; then printf '{\n"LastExitStatus" = 256;\n}\n'; exit 0; fi
+        if [ -f "$LH_TEST_ROOT/shipit-done" ]; then
+            printf '{\n\t"Label" = "%s";\n\t"LastExitStatus" = 0;\n};\n' "$1"
+            exit 0
+        fi
+        if [ -f "$LH_TEST_ROOT/shipit-garbled" ]; then
+            printf '{\n"PreviousPID" = 123;\n"PreviousLastExitStatus" = 0;\n}\n'
+            exit 0
+        fi
+        if { [ -f "$LH_TEST_ROOT/shipit-on-new" ] && ls -d "$LH_MIGRATE_APPS_DIR"/.LearnHarness.app.lh-new-* >/dev/null 2>&1; } ||
             { [ -f "$LH_TEST_ROOT/shipit-on-aside" ] && ls -d "$LH_MIGRATE_DATA_DIR".fork-* >/dev/null 2>&1; }; then
-            printf '{\n"LastExitStatus" = 256;\n}\n'
+            printf '{\n"PID" = 123;\n"LastExitStatus" = 0;\n}\n'
             exit 0
         fi
         exit 113;;
@@ -631,16 +639,21 @@ case_20() {
     setup 20
     cache=$fake_home/Library/Caches/com.learnharness.LearnHarness.ShipIt
     mkdir -p "$cache"
-    touch "$cache/ShipItState.plist"
-    expect_failure
-    grep -Fxq 'A LearnHarness update is still installing; try again in a minute. Nothing was changed.' "$case_root/output"
-    no_backup; unchanged_data; unchanged_app
-    # A dangling state-file symlink also represents an unfinished update.
+    printf 'old record\n' > "$cache/ShipItState.plist"
+    migrate
+    [ "$(tail -1 "$case_root/output")" = Done. ]
+    [ "$(grep -Fxc 'Note: an old update record was found; continuing.' "$case_root/output")" = 1 ]
+    [ "$(cat "$cache/ShipItState.plist")" = 'old record' ]
+    unchanged_data
+    # A dangling state-file symlink is also left in place.
     rm "$cache/ShipItState.plist"
     ln -s missing-state "$cache/ShipItState.plist"
-    expect_failure
-    grep -Fxq 'A LearnHarness update is still installing; try again in a minute. Nothing was changed.' "$case_root/output"
-    no_backup; unchanged_data; unchanged_app
+    migrate
+    [ "$(tail -1 "$case_root/output")" = Done. ]
+    [ "$(grep -Fxc 'Note: an old update record was found; continuing.' "$case_root/output")" = 1 ]
+    [ -L "$cache/ShipItState.plist" ]
+    [ "$(readlink "$cache/ShipItState.plist")" = missing-state ]
+    unchanged_data
 }
 case_21() {
     # A staged official update stops each destructive swap; the backup stays.
@@ -681,7 +694,32 @@ case_21() {
     invoke "$backup/rollback-fork.sh" "$backup"
     unchanged_data; unchanged_app
 }
-for number in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21; do
+case_22() {
+    setup 22
+    touch "$case_root/shipit-done"
+    migrate
+    [ "$(tail -1 "$case_root/output")" = Done. ]
+    if grep -Fq 'Note: an old update record was found; continuing.' "$case_root/output"; then return 1; fi
+    unchanged_data
+    cache=$fake_home/Library/Caches/com.learnharness.LearnHarness.ShipIt
+    mkdir -p "$cache"
+    printf 'old record\n' > "$cache/ShipItState.plist"
+    migrate
+    [ "$(tail -1 "$case_root/output")" = Done. ]
+    [ "$(grep -Fxc 'Note: an old update record was found; continuing.' "$case_root/output")" = 1 ]
+    [ "$(cat "$cache/ShipItState.plist")" = 'old record' ]
+    unchanged_data
+}
+case_23() {
+    setup 23
+    touch "$case_root/shipit-garbled"
+    expect_failure
+    grep -Fxq 'A LearnHarness update is still installing; try again in a minute. Nothing was changed.' "$case_root/output"
+    grep -Fxq 'Could not read the launchd status of com.learnharness.LearnHarness.ShipIt; treating it as an update still installing.' "$case_root/output"
+    [ "$(grep -Fc 'com.learnharness.LearnHarness.ShipIt' "$case_root/output")" = 1 ]
+    no_backup; unchanged_data; unchanged_app
+}
+for number in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23; do
     # Do not use `if case_N`: it disables errexit inside the entire case.
     set +e
     (set -e; "case_$number") > "$run_logs/case-$number.log" 2>&1
