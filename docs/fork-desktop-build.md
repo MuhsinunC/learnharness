@@ -23,7 +23,7 @@ The app keeps the same bundle identifier (`com.learnharness.LearnHarness`) and p
 
 ## Install or return to upstream
 
-1. Quit the official app first so a staged official update cannot apply on quit.
+1. Quit the official app first. The official app installs a downloaded update when it quits, so quitting it after the fork is in place could put the official build back.
 2. Choose a fork whose base version is at or above the installed official version. Older code reading data migrated by a newer version is a downgrade risk.
 3. Mount the DMG, drag LearnHarness to Applications, and replace the existing app.
 4. A downloaded, non-notarized app is blocked by Gatekeeper on first launch. Use System Settings > Privacy & Security > **Open Anyway**; recent macOS does not offer the right-click bypass.
