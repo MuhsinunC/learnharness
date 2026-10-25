@@ -44,16 +44,17 @@ const route = await import(${JSON.stringify(join(root, "app/api/claude-code/rout
 const loginRoute = await import(${JSON.stringify(join(root, "app/api/claude-code/login/route.ts"))});
 const endpointRoute = await import(${JSON.stringify(join(root, "app/api/claude-code/endpoint/route.ts"))});
 const settingsModule = await import(${JSON.stringify(join(root, "src/server/claude-code-settings.ts"))});
+const trustedHeaders = {host:'127.0.0.1:3000',origin:'http://127.0.0.1:3000'};
 const c = {
   ...connection, putClaudeCodeConnection: route.PUT, postClaudeCodeLogin: loginRoute.POST,
-  getClaudeCodeStatus: async () => (await route.GET(new Request('http://localhost'))).json()
+  getClaudeCodeStatus: async () => (await route.GET(new Request('http://localhost',{headers:trustedHeaders}))).json()
 };
 const catalog = await import(${JSON.stringify(join(root, "src/server/model-catalog.ts"))});
 const keys = await import(${JSON.stringify(join(root, "src/server/keys.ts"))});
 const request = body => new Request('http://localhost/api/claude-code', {
-  method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
+  method:'PUT', headers:{...trustedHeaders,'Content-Type':'application/json'}, body:JSON.stringify(body)
 });
-const loginRequest = () => new Request('http://localhost/api/claude-code/login', {method:'POST', headers:{'Content-Type':'application/json'}});
+const loginRequest = () => new Request('http://localhost/api/claude-code/login', {method:'POST', headers:{...trustedHeaders,'Content-Type':'application/json'}});
 try { ${code} } finally { c.resetClaudeLoginForTests(); }
 `], { env, encoding: "utf8", timeout: 30_000 });
 	} finally { rmSync(home, { recursive: true, force: true }); }
@@ -87,16 +88,16 @@ assert.deepEqual(providerKeyMissing('claude-code',['cheap']), {
 });
 assert.equal((await c.putClaudeCodeConnection(request({mode:'endpoint'}))).status,400);
 for (const body of [null, [], {}, {mode:'unknown'}, {mode:'off',executable:''}]) assert.equal((await c.putClaudeCodeConnection(request(body))).status,400);
-assert.equal((await c.putClaudeCodeConnection(new Request('http://localhost',{method:'PUT'}))).status,415);
+assert.equal((await c.putClaudeCodeConnection(new Request('http://localhost',{method:'PUT',headers:trustedHeaders}))).status,415);
 `));
 it("real env override wins and refuses all PUT bodies", () => scenario(`
 const status = await c.getClaudeCodeStatus();
 assert.equal(status.envOverride,true); assert.equal(status.mode,'local'); assert.equal(status.executable,executable);
-assert.equal((await c.putClaudeCodeConnection(new Request('http://localhost',{method:'PUT'}))).status,409);
+assert.equal((await c.putClaudeCodeConnection(new Request('http://localhost',{method:'PUT',headers:trustedHeaders}))).status,409);
 assert.equal(fs.existsSync(home+'/claude-code.json'),false);
 const endpoint = await import(${JSON.stringify(join(root, "src/server/claude-code-endpoint.ts"))});
 endpoint.writeEndpointConfig({baseUrl:'https://relay.example',token:'sentinel'});
-assert.equal((await endpointRoute.DELETE(new Request('http://localhost',{method:'DELETE'}))).status,200);
+assert.equal((await endpointRoute.DELETE(new Request('http://localhost',{method:'DELETE',headers:trustedHeaders}))).status,200);
 assert.equal(fs.existsSync(home+'/claude-code.json'),false);
 assert.equal(fs.existsSync(endpoint.endpointFile()),false);
 `, undefined, true));
@@ -113,7 +114,7 @@ assert.equal((await c.putClaudeCodeConnection(request({mode:'local',executable:'
 assert.equal(fs.readFileSync(home+'/claude-code.json','utf8'),before); assert.equal(keys.providerKeyPresent('claude-code'),true);
 `));
 it("login streams URL, replaces only its own child and preserves the allowlist", () => scenario(`
-assert.equal((await c.postClaudeCodeLogin(new Request('http://localhost',{method:'POST'}))).status,415);
+assert.equal((await c.postClaudeCodeLogin(new Request('http://localhost',{method:'POST',headers:trustedHeaders}))).status,415);
 assert.equal(fs.existsSync(home+'/pids'),false);
 const first = await c.postClaudeCodeLogin(loginRequest()); assert.equal(first.status,200);
 const expected = {state:'pending',url:'https://claude.com/cai/oauth/authorize?code=true&state=abc',error:null};
@@ -218,13 +219,13 @@ endpoint.writeEndpointConfig({baseUrl:'https://changed.example',token:'refreshed
 assert.equal((await stream()).ANTHROPIC_AUTH_TOKEN,'refreshed');
 assert.equal((await stream()).ANTHROPIC_BASE_URL,'https://changed.example');
 assert.ok(!JSON.stringify(await c.getClaudeCodeStatus()).includes(sentinel));
-const deleted = await endpointRoute.DELETE(new Request('http://localhost',{method:'DELETE'}));
+const deleted = await endpointRoute.DELETE(new Request('http://localhost',{method:'DELETE',headers:trustedHeaders}));
 assert.equal(deleted.status,200);
 const text = await deleted.text(); assert.ok(!text.includes(sentinel));
-assert.equal(JSON.parse(text).mode,'local'); assert.equal(fs.existsSync(endpoint.endpointFile()),false);
+assert.equal(JSON.parse(text).mode,'off'); assert.equal(JSON.parse(text).active,false); assert.equal(JSON.parse(fs.readFileSync(home+'/claude-code.json','utf8')).executable,executable); assert.equal(fs.existsSync(endpoint.endpointFile()),false);
 await put({mode:'endpoint',baseUrl:'https://relay.example',token:sentinel});
 fs.writeFileSync(home+'/logged-out','');
-const off = await endpointRoute.DELETE(new Request('http://localhost',{method:'DELETE'}));
+const off = await endpointRoute.DELETE(new Request('http://localhost',{method:'DELETE',headers:trustedHeaders}));
 assert.equal((await off.json()).mode,'off'); assert.equal(keys.providerKeyPresent('claude-code'),false);
 `));
 it("endpoint validation fails without modifying connection settings", () => scenario(`
@@ -254,8 +255,15 @@ it("all routes reject cross-origin requests before spawning or writing", () => s
 const handlers = [route.GET,route.PUT,loginRoute.POST,endpointRoute.DELETE];
 for(const handler of handlers) {
   for(const headers of [
-    {origin:'https://other.example',host:'localhost'}, {origin:'null',host:'localhost'},
-    {origin:'not a URL',host:'localhost'}, {'sec-fetch-site':'cross-site'}
+    {origin:'http://attacker.example:3000',host:'attacker.example:3000'},
+    {host:'attacker.example:3000'}, {}, {host:'localhost'}, {host:'127.1:3000'},
+    {host:'127.0.0.1:99999'}, {host:'127.0.0.1:0'},
+    {...trustedHeaders,origin:'null'}, {...trustedHeaders,origin:'not a URL'},
+    {...trustedHeaders,origin:'http://attacker.example:3000'},
+    {...trustedHeaders,origin:'http://127.0.0.1:3001'},
+    {...trustedHeaders,origin:'ftp://127.0.0.1:3000'},
+    {...trustedHeaders,'sec-fetch-site':'cross-site'},
+    ...(handler === route.GET ? [] : [{host:'127.0.0.1:3000'}])
   ]) {
     const response = await handler(new Request('http://localhost',{headers}));
     assert.equal(response.status,403);
@@ -264,10 +272,17 @@ for(const handler of handlers) {
 }
 assert.equal(fs.existsSync(home+'/argv'),false);
 assert.equal(fs.existsSync(home+'/claude-code.json'),false);
-assert.equal((await route.GET(new Request('http://localhost',{headers:{origin:'https://localhost',host:'localhost'}}))).status,200);
+assert.equal(fs.existsSync(home+'/claude-endpoint.json'),false);
+assert.equal((await route.GET(new Request('http://localhost',{headers:{host:'127.0.0.1:3000'}}))).status,200);
+for (const host of ['127.0.0.1:3000','localhost:3000','[::1]:3000','127.0.0.1:43123']) {
+  for (const handler of handlers) {
+    const response = await handler(new Request('http://localhost',{headers:{host,origin:'http://'+host}}));
+    assert.notEqual(response.status,403);
+  }
+}
 `));
 it("status shares in-flight probes and caches for five seconds with mutation invalidation", () => scenario(`
-const get = () => route.GET(new Request('http://localhost'));
+const get = () => route.GET(new Request('http://localhost',{headers:trustedHeaders}));
 let now = Date.now(); Date.now = () => now;
 await Promise.all([get(),get()]); await get();
 const probes = () => fs.readFileSync(home+'/argv','utf8').trim().split('\\n');
@@ -397,7 +412,7 @@ fs.chmodSync(slow,0o755);
 const put = route.PUT(request({mode:'local',executable:slow}));
 while(!fs.existsSync(home+'/locked')) await new Promise(resolve => setTimeout(resolve,5));
 let deleteDone=false, loginDone=false;
-const remove = other.deleteClaudeCodeEndpoint(new Request('http://localhost',{method:'DELETE'})).then(r=>{deleteDone=true;return r;});
+const remove = other.deleteClaudeCodeEndpoint(new Request('http://localhost',{method:'DELETE',headers:trustedHeaders})).then(r=>{deleteDone=true;return r;});
 const login = other.postClaudeCodeLogin(loginRequest()).then(r=>{loginDone=true;return r;});
 await new Promise(resolve => setImmediate(resolve));
 assert.equal(deleteDone,false); assert.equal(loginDone,false); assert.equal(fs.existsSync(endpoint.endpointFile()),true);
@@ -487,7 +502,7 @@ for(const kind of ['version','auth']) {
     "trap '' TERM; exec sleep 30\\n");
   c.invalidateClaudeStatusCacheForTests();
   for(let attempt=0;attempt<2;attempt++) {
-    const response=await route.GET(new Request('http://localhost'));
+    const response=await route.GET(new Request('http://localhost',{headers:trustedHeaders}));
     assert.equal(response.status,200); assert.ok((await response.json()).error);
     const pids=fs.readFileSync(home+'/probe-pids','utf8').trim().split('\\n').map(Number);
     const pid=pids.at(-1);
@@ -499,14 +514,14 @@ for(const kind of ['version','auth']) {
 `));
 it("PUT body limits and parsing happen before the mutation lock", () => scenario(`
 let controller;
-const blocked = new Request('http://localhost',{method:'PUT',headers:{'Content-Type':'application/json'},duplex:'half',
+const blocked = new Request('http://localhost',{method:'PUT',headers:{...trustedHeaders,'Content-Type':'application/json'},duplex:'half',
   body:new ReadableStream({start(c){controller=c;}})});
 const waiting=route.PUT(blocked);
 const second=await route.PUT(request({mode:'off'})); assert.equal(second.status,200);
 controller.enqueue(new TextEncoder().encode('{"mode":"off"}')); controller.close(); assert.equal((await waiting).status,200);
-assert.equal((await route.PUT(new Request('http://localhost',{method:'PUT',headers:{'Content-Type':'application/json'},
+assert.equal((await route.PUT(new Request('http://localhost',{method:'PUT',headers:{...trustedHeaders,'Content-Type':'application/json'},
   body:' '.repeat(65537)}))).status,413);
-assert.equal((await route.PUT(new Request('http://localhost',{method:'PUT',headers:{'Content-Type':'application/json'},body:'{'}))).status,400);
+assert.equal((await route.PUT(new Request('http://localhost',{method:'PUT',headers:{...trustedHeaders,'Content-Type':'application/json'},body:'{'}))).status,400);
 `));
 it("committed PUT and DELETE separate success from probe diagnostics", () => scenario(`
 await route.PUT(request({mode:'local'}));
@@ -515,7 +530,7 @@ let response=await route.PUT(request({mode:'local'}));
 let status=await response.json();
 assert.equal(response.status,200); assert.equal(status.ok,true); assert.equal(status.error,null);
 assert.equal(status.probeError,'unable to read login status');
-status=await (await endpointRoute.DELETE(new Request('http://localhost',{method:'DELETE'}))).json();
+status=await (await endpointRoute.DELETE(new Request('http://localhost',{method:'DELETE',headers:trustedHeaders}))).json();
 assert.equal(status.ok,true); assert.equal(status.error,null); assert.ok(status.probeError);
 status=await c.getClaudeCodeStatus(); assert.equal(status.error,'unable to read login status'); assert.equal(status.ok,undefined);
 `));
@@ -533,8 +548,8 @@ assert.equal(fixed.executable,candidate); assert.equal(fixed.discovered,null); a
 await route.PUT(request({mode:'endpoint',baseUrl:'https://relay.example',token:'test-token'}));
 const next=replacement+'/next'; fs.mkdirSync(next); const nextCandidate=next+'/claude';
 fs.copyFileSync(candidate,nextCandidate); fs.unlinkSync(candidate); process.env.PATH=next+':/bin:/usr/bin';
-const removed=await (await endpointRoute.DELETE(new Request('http://localhost',{method:'DELETE'}))).json();
-assert.equal(removed.ok,true); assert.equal(removed.executable,nextCandidate); assert.equal(removed.discovered,null);
+const removed=await (await endpointRoute.DELETE(new Request('http://localhost',{method:'DELETE',headers:trustedHeaders}))).json();
+assert.equal(removed.ok,true); assert.equal(removed.mode,'off'); assert.equal(JSON.parse(fs.readFileSync(home+'/claude-code.json','utf8')).executable,candidate); assert.equal(removed.executable,candidate); assert.equal(removed.discovered,nextCandidate);
 
 `));
 it("fresh discovery reports the runnable binary as executable without a replacement hint", () => scenario(`
@@ -546,4 +561,21 @@ assert.equal(status.discovered,null); assert.equal(status.hint,null);
 assert.equal(status.version,'2.1.310 (Claude Code)'); assert.equal(status.loggedIn,true);
 assert.deepEqual(status.account,{email:'user@example.com',subscriptionType:'pro'});
 assert.equal(status.error,null); assert.equal(fs.existsSync(home+'/claude-code.json'),false);
+`));
+
+
+it("endpoint origin changes require a token before any settings write", () => scenario(`
+const endpoint = await import(${JSON.stringify(join(root, "src/server/claude-code-endpoint.ts"))});
+await route.PUT(request({mode:'endpoint',baseUrl:'https://relay.example/a',token:'test-token'}));
+const settingsBytes = fs.readFileSync(home+'/claude-code.json');
+const endpointBytes = fs.readFileSync(endpoint.endpointFile());
+const response = await route.PUT(request({mode:'endpoint',baseUrl:'http://localhost:9000'}));
+assert.equal(response.status,400);
+assert.deepEqual(await response.json(),{error:'claude-code endpoint: a new endpoint address needs its token; enter the token again'});
+assert.ok(fs.readFileSync(home+'/claude-code.json').equals(settingsBytes));
+assert.ok(fs.readFileSync(endpoint.endpointFile()).equals(endpointBytes));
+assert.equal((await c.getClaudeCodeStatus()).mode,'endpoint');
+assert.equal((await route.PUT(request({mode:'endpoint',baseUrl:'https://relay.example/b'}))).status,200);
+assert.ok(endpoint.readEndpointConfig().token === 'test-token');
+assert.equal(endpoint.readEndpointConfig().baseUrl,'https://relay.example/b');
 `));
