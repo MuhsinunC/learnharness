@@ -153,3 +153,16 @@ test("login deadline does not discard an endpoint write already in flight", asyn
 		assert.deepEqual(events, ["keys"]); assert(button("Stop using endpoint")); assert(button("Log in with Claude")); assert.equal(input("Token").value, "");
 	} finally { off(); }
 });
+
+test("pending login polls preserve the custom endpoint URL draft", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+	const f = fixture({ login: { state: "pending", url: null } }); await mount();
+	await type("Base URL", "https://relay.example"); await type("Token", "SENTINEL-TOKEN-7f3a");
+	await act(async () => t.mock.timers.tick(CLAUDE_LOGIN_POLL_MS));
+	assert.equal(input("Base URL").value, "https://relay.example");
+	f.set({ loggedIn: true }); await act(async () => t.mock.timers.tick(CLAUDE_LOGIN_POLL_MS));
+	assert.equal(input("Base URL").value, "https://relay.example");
+	assert.deepEqual(puts(f)[0]!.body, { mode: "local" });
+	await type("Token", "SENTINEL-TOKEN-7f3a");
+	await click(button("Save")); assert.deepEqual(puts(f)[1]!.body, { mode: "endpoint", baseUrl: "https://relay.example", token: "SENTINEL-TOKEN-7f3a" });
+});

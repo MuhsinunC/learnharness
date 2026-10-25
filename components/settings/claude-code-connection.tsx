@@ -35,10 +35,11 @@ export function ClaudeCodeConnection() {
 		if (polling.current !== null) clearInterval(polling.current);
 		polling.current = null; loginStarted.current = null;
 	}
-	function accept(next: Status, token?: string) {
+	function accept(next: Status, token?: string, syncEndpoint = false) {
 		const normalized = { ...next, account: next.account ?? null, login: next.login ?? { state: "idle" as const, url: null, error: null }, endpoint: next.endpoint ?? { baseUrl: null, tokenSet: false } };
 		if (loginTimedOut.current && normalized.login.state === "pending") normalized.login = { state: "idle", url: null, error: null };
-		current.current = normalized; setStatus(normalized); setBaseUrl(normalized.endpoint.baseUrl ?? "");
+		if (!current.current || syncEndpoint) setBaseUrl(normalized.endpoint.baseUrl ?? "");
+		current.current = normalized; setStatus(normalized);
 		if (normalized.login.state === "failed") {
 			stopPolling(); setError(safeError(normalized.login.error, LOGIN_ERROR, token));
 		} else if (next.loggedIn) {
@@ -73,7 +74,7 @@ export function ClaudeCodeConnection() {
 			if (!response.ok || reply.error != null) { setError(safeError(reply.error, fallback, body?.token)); return; }
 			if (method === "POST") {
 				if (current.current) accept({ ...current.current, login: reply.login });
-			} else accept(reply, body?.token);
+			} else accept(reply, body?.token, method === "PUT" && body?.mode === "endpoint");
 			if (method === "PUT") notifySettingsSaved("keys");
 		} catch { if (mounted.current && owner === sequence.current) setError(fallback); }
 		finally {
