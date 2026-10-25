@@ -90,20 +90,38 @@ case "$name" in
     'launch stub') printf launched >> "$LH_TEST_ROOT/launched";;
     'ps stub')
         if [ -f "$LH_TEST_ROOT/ps-fail" ]; then exit 1; fi
-        if [ -f "$LH_TEST_ROOT/stubborn" ] || [ -f "$LH_TEST_ROOT/launched" ]; then printf '123 %s\n' "$exe";
-        elif [ -f "$LH_TEST_ROOT/running" ] && [ "$quits" -eq 0 ]; then printf '123 %s\n' "$exe"; fi
+        # Like ps -o comm (executable only) or -o command (with arguments): emit PID EXE [ARGS].
+        emit() { if [ "$1" = comm ]; then printf '%s %s\n' "$2" "$3"; else printf '%s %s%s\n' "$2" "$3" "${4:+ $4}"; fi; }
+        mode=$1
+        if [ -f "$LH_TEST_ROOT/stubborn" ] || [ -f "$LH_TEST_ROOT/launched" ]; then emit "$mode" 123 "$exe";
+        elif [ -f "$LH_TEST_ROOT/running" ] && [ "$quits" -eq 0 ]; then emit "$mode" 123 "$exe"; fi
+        # Reopened mid-run: once the new app is staged, or once rollback moved the data aside.
+        if { [ -f "$LH_TEST_ROOT/reopen-on-new" ] && ls -d "$LH_MIGRATE_APPS_DIR"/.LearnHarness.app.lh-new-* >/dev/null 2>&1; } ||
+            { [ -f "$LH_TEST_ROOT/reopen-on-aside" ] && ls -d "$LH_MIGRATE_DATA_DIR".fork-* >/dev/null 2>&1; }; then emit "$mode" 127 "$exe"; fi
         # A copy outside the selected install path, e.g. a mounted DMG.
-        if [ -f "$LH_TEST_ROOT/elsewhere" ] && [ "$quits" -eq 0 ]; then printf '124 /Volumes/LearnHarness/LearnHarness.app/Contents/MacOS/LearnHarness\n'; fi
+        if [ -f "$LH_TEST_ROOT/elsewhere" ] && [ "$quits" -eq 0 ]; then emit "$mode" 124 /Volumes/LearnHarness/LearnHarness.app/Contents/MacOS/LearnHarness; fi
         # The Node-mode backend: same executable, plus server.js.
         if { [ -f "$LH_TEST_ROOT/backend" ] && [ "$quits" -eq 0 ]; } || [ -f "$LH_TEST_ROOT/backend-only" ]; then
-            printf '125 %s %s\n' "$exe" "$LH_MIGRATE_APPS_DIR/LearnHarness.app/Contents/Resources/server/standalone/server.js"
+            emit "$mode" 125 "$exe" "$LH_MIGRATE_APPS_DIR/LearnHarness.app/Contents/Resources/server/standalone/server.js"
         fi
-        if [ -f "$LH_TEST_ROOT/relaunched" ] && [ "$quits" -lt 2 ]; then printf '126 %s\n' "$exe"; fi;;
+        if [ -f "$LH_TEST_ROOT/relaunched" ] && [ "$quits" -lt 2 ]; then emit "$mode" 126 "$exe"; fi
+        # Found only through LaunchServices: its executable does not end in MacOS/LearnHarness.
+        if [ -f "$LH_TEST_ROOT/bundle-running" ] && [ "$quits" -eq 0 ]; then emit "$mode" 128 /Volumes/Other/LearnHarness.app/Contents/MacOS/LearnHarness-launcher; fi
+        # Shells whose arguments name app paths; this script's own --dmg arguments.
+        if [ -f "$LH_TEST_ROOT/phantom" ]; then
+            emit "$mode" 130 /bin/bash "-c exec $exe --dmg /Volumes/LearnHarness/LearnHarness.app/Contents/MacOS/LearnHarness"
+            emit "$mode" 131 /bin/bash "migrate-to-fork.sh --dmg $LH_TEST_ROOT/tmp/mnt/LearnHarness.app/Contents/MacOS/LearnHarness"
+        fi;;
     'launchctl stub')
         if [ -f "$LH_TEST_ROOT/shipit" ]; then printf '"PID" = 123;\n'; fi
         # An update restart relaunches the app while ShipIt finishes.
         if [ -f "$LH_TEST_ROOT/shipit-once" ]; then rm "$LH_TEST_ROOT/shipit-once"; touch "$LH_TEST_ROOT/relaunched"; printf '"PID" = 123;\n'; fi;;
-    'lsappinfo stub') if [ -f "$LH_TEST_ROOT/bundle-running" ] && [ "$quits" -eq 0 ]; then printf 'ASN:0x0-0x1-"LearnHarness":\n'; fi;;
+    'lsappinfo stub')
+        if [ -f "$LH_TEST_ROOT/bundle-running" ] && [ "$quits" -eq 0 ]; then printf 'ASN:0x0-0x1-"LearnHarness":\n    pid = 128 !cgsConnection\n'; fi
+        # Entries with no pid, pid 0, a dead pid, and a live pid that is not a LearnHarness executable.
+        if [ -f "$LH_TEST_ROOT/phantom" ]; then
+            printf 'ASN:0x0-0x2-"LearnHarness":\nASN:0x0-0x3-"LearnHarness":\n    pid = 0\nASN:0x0-0x4-"LearnHarness":\n    pid = 99999\nASN:0x0-0x5-"LearnHarness":\n    "pid"=130\n'
+        fi;;
 esac
 STUB
     done
@@ -193,7 +211,7 @@ case_1() {
     snapshot "$case_root/extracted/LearnHarness" > "$case_root/archive-data"
     cmp "$case_root/original-data" "$case_root/archive-data"
     [ -f "$case_root/quit-called" ]
-    grep -Fxq 'LH_NO_GUI=1: not launching the app' "$case_root/output"
+    [ "$(grep -Fxc 'LH_NO_GUI=1: not launching the app' "$case_root/output")" = 1 ]
     [ ! -e "$case_root/launched" ]
 }
 case_2() {
@@ -219,7 +237,7 @@ case_3() {
     expect_failure
     no_backup; unchanged_data; unchanged_app
     grep -Fq 'Your installed LearnHarness (0.3.10) is newer than the fork build (0.3.4-fork.2). Nothing was changed. Ask for a fork update.' "$case_root/output"
-    grep -Fxq 'LH_NO_GUI=1: not launching the app' "$case_root/output"
+    [ "$(grep -Fxc 'LH_NO_GUI=1: not launching the app' "$case_root/output")" = 1 ]
     [ ! -e "$case_root/launched" ]
 }
 case_4() {
@@ -253,6 +271,7 @@ case_5() {
     cp "$case_root/good manifest" "$backup/manifest.txt"
     touch "$case_root/stubborn"
     if invoke "$backup/rollback-fork.sh" "$backup"; then return 1; fi
+    grep -Fxq "Running LearnHarness copy: pid 123: $apps/LearnHarness.app/Contents/MacOS/LearnHarness" "$case_root/output"
     snapshot "$data" > "$case_root/timeout-data"
     cmp "$case_root/fork-data" "$case_root/timeout-data"
     snapshot "$apps/LearnHarness.app" > "$case_root/timeout-app"
@@ -369,6 +388,7 @@ case_12() {
     migrate --dry-run
     [ "$(cat "$case_root/quit-called")" = quit ]
     rm "$case_root/quit-called" "$case_root/elsewhere"
+    # Found only by bundle id, with a live pid running a LearnHarness executable.
     touch "$case_root/bundle-running"
     migrate --dry-run
     [ "$(cat "$case_root/quit-called")" = quit ]
@@ -431,6 +451,30 @@ case_14() {
     backup=$(backup_path)
     if { ls -led "$backups" "$backup"; ls -leRA "$backups"; } | grep -Eq '^ [0-9]+: '; then return 1; fi
     rm "$case_root/quit-called"
+    # An existing root keeps its mode and ACL; the run folder is still private and ACL-free.
+    backups="$case_root/existing root"
+    mkdir "$backups"
+    chmod 755 "$backups"
+    chmod +a 'everyone allow list,search,readattr,file_inherit,directory_inherit' "$backups"
+    ls -led "$backups" > "$case_root/root-ls"; grep -E '^ [0-9]+: ' "$case_root/root-ls" > "$case_root/root-acl-before"
+    [ -s "$case_root/root-acl-before" ]
+    migrate --dry-run
+    backup=$(backup_path)
+    [ "$(stat -f '%Lp' "$backups")" = 755 ]
+    ls -led "$backups" > "$case_root/root-ls"; grep -E '^ [0-9]+: ' "$case_root/root-ls" > "$case_root/root-acl-after"
+    cmp "$case_root/root-acl-before" "$case_root/root-acl-after"
+    [ "$(stat -f '%Lp' "$backup")" = 700 ]
+    if { ls -led "$backup"; ls -leRA "$backup"; } | grep -Eq '^ [0-9]+: '; then return 1; fi
+    # The default root is also the lock root: when this run creates it, it is private.
+    backups="$fake_home/LearnHarness-backups"
+    rm -rf "$backups"
+    chmod +a 'everyone allow list,search,readattr,file_inherit,directory_inherit' "$fake_home"
+    migrate --dry-run
+    chmod -N "$fake_home"
+    backup=$(backup_path)
+    [ "$(stat -f '%Lp' "$backups")" = 700 ]
+    if { ls -led "$backups" "$backup"; ls -leRA "$backup"; } | grep -Eq '^ [0-9]+: '; then return 1; fi
+    rm "$case_root/quit-called"
     backups="$case_root/odd \$HOME \`touch pwned\` \"double\" 'single'"
     migrate --dry-run
     backup=$(backup_path)
@@ -479,8 +523,89 @@ case_15() {
     grep -Fxq 'Warning: could not read the process listing to confirm the app started.' "$case_root/output"
     if unit 'init; quit_app'; then return 1; fi
     grep -Fq 'Could not read the process listing. Nothing was changed.' "$case_root/output"
+    rm "$case_root/ps-fail"
+    # Cleanup detaches our DMG and releases the lock, even when a temp file cannot be removed.
+    lock_dir=$fake_home/LearnHarness-backups/.lock
+    if unit 'init; dmg=$2; mount_dmg; exit 3' "$case_root/fork.dmg"; then return 1; fi
+    [ ! -e "$lock_dir" ]
+    if hdiutil info | grep -Fq "$case_tmp"; then return 1; fi
+    [ -z "$(find "$case_tmp" -mindepth 1 -maxdepth 1)" ]
+    if unit 'init; mounted=yes; mkdir "$tmp/stuck"; touch "$tmp/stuck/file"; chmod 500 "$tmp/stuck"; exit 3'; then return 1; fi
+    [ ! -e "$lock_dir" ]
+    chmod -R u+w "$case_tmp"
 }
-for number in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+case_16() {
+    # Bundle-id entries without a live LearnHarness pid, and app paths in arguments, are not running copies.
+    setup 16
+    touch "$case_root/phantom"
+    migrate
+    [ "$(tail -1 "$case_root/output")" = Done. ]
+    [ ! -e "$case_root/quit-called" ]
+    if grep -Fq 'Running LearnHarness copy' "$case_root/output"; then return 1; fi
+    [ "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$apps/LearnHarness.app/Contents/Info.plist")" = 0.3.4-fork.2 ]
+}
+case_17() {
+    # A copy reopened mid-run stops each destructive swap; the backup stays.
+    setup 17
+    reopened='LearnHarness was reopened during the migration. Nothing more was changed. Quit it and run again.'
+    touch "$case_root/reopen-on-new"
+    expect_failure
+    grep -Fxq "$reopened" "$case_root/output"
+    grep -Fxq "Running LearnHarness copy: pid 127: $apps/LearnHarness.app/Contents/MacOS/LearnHarness" "$case_root/output"
+    unchanged_data; unchanged_app
+    backup=$(backup_path)
+    [ -f "$backup/manifest.txt" ] && [ -f "$backup/data.tar.gz" ] && [ -d "$backup/LearnHarness.app" ]
+    [ "$(find "$apps" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = 1 ]
+    rm "$case_root/reopen-on-new"
+    migrate
+    backup=$(backup_path)
+    snapshot "$data" > "$case_root/fork-data"
+    snapshot "$apps/LearnHarness.app" > "$case_root/fork-app"
+    # Rollback, before the data swap.
+    touch "$case_root/reopen-on-new"
+    if invoke "$backup/rollback-fork.sh" "$backup"; then return 1; fi
+    grep -Fxq "$reopened" "$case_root/output"
+    snapshot "$data" > "$case_root/now-data"; cmp "$case_root/fork-data" "$case_root/now-data"
+    snapshot "$apps/LearnHarness.app" > "$case_root/now-app"; cmp "$case_root/fork-app" "$case_root/now-app"
+    [ -z "$(find "$(dirname "$data")" -maxdepth 1 \( -name '.lh-restore.*' -o -name 'LearnHarness.fork-*' \))" ]
+    [ "$(find "$apps" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = 1 ]
+    rm "$case_root/reopen-on-new"
+    # Rollback, before the app swap (the data is already restored).
+    touch "$case_root/reopen-on-aside"
+    if invoke "$backup/rollback-fork.sh" "$backup"; then return 1; fi
+    grep -Fxq "$reopened" "$case_root/output"
+    unchanged_data
+    snapshot "$apps/LearnHarness.app" > "$case_root/now-app"; cmp "$case_root/fork-app" "$case_root/now-app"
+    [ "$(find "$apps" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = 1 ]
+    [ -n "$(find "$(dirname "$data")" -maxdepth 1 -name 'LearnHarness.fork-*')" ]
+    [ -f "$backup/manifest.txt" ]
+}
+case_18() {
+    # Trailing slashes in the data and apps paths; a failed dry run reopens the app it quit.
+    setup 18
+    data="$data/"; apps="$apps/"
+    migrate
+    data=${data%/}; apps=${apps%/}
+    backup=$(backup_path)
+    grep -Fxq "$(printf 'data_path\t%s' "$data")" "$backup/manifest.txt"
+    grep -Fxq "$(printf 'old_app_path\t%s' "$apps/LearnHarness.app")" "$backup/manifest.txt"
+    data="$data/"; apps="$apps/"
+    invoke "$backup/rollback-fork.sh" "$backup"
+    data=${data%/}; apps=${apps%/}
+    unchanged_data; unchanged_app
+    [ -z "$(find "$data" -maxdepth 1 -name '.fork-*')" ]
+    [ -n "$(find "$(dirname "$data")" -maxdepth 1 -name 'LearnHarness.fork-*')" ]
+    # A recorded data path with trailing slashes is normalized the same way.
+    unit '[ "$(trim_slashes "/a b/c//")" = "/a b/c" ] && [ "$(trim_slashes /)" = / ] && [ "$(trim_slashes //)" = / ]'
+    touch "$case_root/running"
+    mkfifo "$data/fifo"
+    expect_failure --dry-run
+    grep -Fq 'Unsupported or unreadable entry in backup.' "$case_root/output"
+    [ -f "$case_root/quit-called" ]
+    grep -Fxq 'LH_NO_GUI=1: not launching the app' "$case_root/output"
+    rm "$data/fifo"
+}
+for number in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18; do
     # Do not use `if case_N`: it disables errexit inside the entire case.
     set +e
     (set -e; "case_$number") > "$run_logs/case-$number.log" 2>&1

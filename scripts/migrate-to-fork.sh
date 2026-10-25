@@ -94,6 +94,7 @@ if xcode-select -p >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
     if [ "$(git -C "$existing" rev-parse --is-inside-work-tree 2>/dev/null || true)" = true ]; then fail 'Backup root is inside a git checkout. Nothing was changed.'; fi
 fi
 quit_app
+if [ "$dry" = yes ] && [ "$was_running" = yes ]; then relaunch_on_exit=yes; fi
 old_version=none; old_path=none
 if [ -d "$app" ]; then
     old_path=$app; old_version=$(version "$app")
@@ -101,6 +102,7 @@ if [ -d "$app" ]; then
     case "$old_version" in *-fork*) fork_version_ok "$old_version" || fail 'Invalid installed version.';; esac
     if newer_version "$old_version" "$fork_version"; then
         printf 'Your installed LearnHarness (%s) is newer than the fork build (%s). Nothing was changed. Ask for a fork update.\n' "$old_version" "$fork_version"
+        relaunch_on_exit=no
         if [ "$was_running" = yes ]; then launch_app; fi
         exit 1
     fi
@@ -110,14 +112,21 @@ printf 'Backing up data...\n'
 present=no; tar_hash=none
 snapshot "$data" > "$tmp/data-entries"
 if [ -d "$data" ]; then present=yes; fi
+# Only a root this run creates is made private; an existing root keeps its mode and ACLs.
+root_created=no
+if [ ! -d "$backup_root" ]; then root_created=yes
+elif [ "$lock_root_created" = yes ] && [ "$(canonical "$backup_root")" = "$(canonical "$lock_root")" ]; then root_created=yes; fi
 (
     umask 077
     mkdir -p "$backup_root"
-    # Strip ACLs before writing so nothing inherits access to sign-in files.
-    chmod -N "$backup_root" 2>/dev/null || true
-    chmod 700 "$backup_root"
+    if [ "$root_created" = yes ]; then
+        chmod -N "$backup_root" 2>/dev/null || true
+        chmod 700 "$backup_root"
+    fi
     mkdir "$backup"
+    # Strip ACLs before writing so nothing inherits access to sign-in files.
     chmod -N "$backup" 2>/dev/null || true
+    chmod 700 "$backup"
     if [ "$present" = yes ]; then
         tar -czpf "$backup/data.tar.gz" -C "$(dirname "$data")" "$(basename "$data")"
         chmod 600 "$backup/data.tar.gz"
@@ -147,8 +156,10 @@ manifest=$backup/manifest.txt
 )
 # Volumes without ACL support reject -N; the listing check below is the real gate.
 chmod -R -N "$backup" 2>/dev/null || true
-{ ls -led "$backup_root" "$backup"; ls -leRA "$backup"; } > "$tmp/acl"
-! /usr/bin/grep -Eq '^ [0-9]+: ' "$tmp/acl" || fail 'Could not remove access-control entries from the backup. Nothing was changed except the new backup folder.'
+acl_dirs=("$backup")
+if [ "$root_created" = yes ]; then acl_dirs=("$backup_root" "$backup"); fi
+{ ls -led "${acl_dirs[@]}"; ls -leRA "$backup"; } > "$tmp/acl"
+! /usr/bin/grep -Eq '^ [0-9]+: ' "$tmp/acl" && [ "$(stat -f %Lp "$backup")" = 700 ] || fail 'Could not remove access-control entries from the backup. Nothing was changed except the new backup folder.'
 printf 'Verifying data...\n'
 verify_data "$data"
 if [ "$present" = yes ]; then
@@ -173,6 +184,7 @@ else
         cmp -s "$tmp/old-app" "$tmp/backup-app" || fail 'Backup app verification failed.'
     fi
     undo=$(printf '/bin/bash %q %q' "$backup/rollback-fork.sh" "$backup")
+    ensure_still_quit
     swap_app
     state_msg="The fork is installed. To undo: $undo"
     [ "$(version "$app")" = "$fork_version" ] || fail "Installed version verification failed. $state_msg"
@@ -186,5 +198,6 @@ summary
 printf 'Backup: %s\n' "$backup"
 # Shell-escaped, and printed before launching so it survives any launch problem.
 printf 'To undo: /bin/bash %q %q\n' "$backup/rollback-fork.sh" "$backup"
+relaunch_on_exit=no
 if [ "$dry" = no ] || [ "$was_running" = yes ]; then launch_app; fi
 printf 'Done.\n'

@@ -36,6 +36,16 @@ plain() {
 '*) fail 'Tabs and newlines in paths or link targets are unsupported.';; esac
 }
 exists() { [ -e "$1" ] || [ -L "$1" ]; }
+# $1 without trailing slashes ("/" stays "/").
+trim_slashes() {
+    trimmed=$1
+    while [ "${#trimmed}" -gt 1 ] && [ "${trimmed%/}" != "$trimmed" ]; do trimmed=${trimmed%/}; done
+    printf '%s\n' "$trimmed"
+}
+# True when $1 is a mount point (its device differs from its parent's).
+is_mount() {
+    [ -d "$1" ] && [ ! -L "$1" ] && [ "$(stat -f %d "$1" 2>/dev/null)" != "$(stat -f %d "$(dirname "$1")" 2>/dev/null)" ]
+}
 # Physical path of $1, resolving the longest existing ancestor (APFS is case-insensitive).
 canonical() {
     head=$1; rest=
@@ -48,6 +58,7 @@ acquire_lock() {
     lock_root=$HOME/LearnHarness-backups
     lock=$lock_root/.lock
     [ ! -L "$lock_root" ] || fail "$lock_root must not be a symlink. Nothing was changed."
+    if [ ! -d "$lock_root" ]; then lock_root_created=yes; fi
     (umask 077; mkdir -p "$lock_root")
     if mkdir "$lock" 2>/dev/null; then
         lock_held=yes
@@ -81,13 +92,15 @@ init() {
     [ "$(uname -s)" = Darwin ] && [ "$(sysctl -n hw.optional.arm64)" = 1 ] || fail 'An Apple Silicon Mac is required.'
     tmp=$(mktemp -d "${TMPDIR:-/tmp}/lh-migrate.XXXXXX")
     mounted=no; new_app=; aside_app=; swap_pending=no; stage=; lock_held=no
-    aside_data=none; data_swap_pending=no
+    aside_data=none; data_swap_pending=no; lock_root_created=no; relaunch_on_exit=no
+    # fd 8 keeps the real stdout for cleanup, which can run inside a redirected function.
+    exec 8>&1
     trap cleanup EXIT
     trap 'exit 1' HUP INT TERM
     acquire_lock
     stamp=$(date -u +%Y%m%dT%H%M%SZ)
-    data=${LH_MIGRATE_DATA_DIR:-"$HOME/Library/Application Support/LearnHarness"}
-    apps=${LH_MIGRATE_APPS_DIR:-/Applications}
+    data=$(trim_slashes "${LH_MIGRATE_DATA_DIR:-"$HOME/Library/Application Support/LearnHarness"}")
+    apps=$(trim_slashes "${LH_MIGRATE_APPS_DIR:-/Applications}")
     if [ -z "${LH_MIGRATE_APPS_DIR:-}" ] && [ ! -d "$apps/LearnHarness.app" ] && [ -d "$HOME/Applications/LearnHarness.app" ]; then apps=$HOME/Applications; fi
     app=$apps/LearnHarness.app
     plain "$data"; plain "$app"
@@ -102,10 +115,17 @@ init() {
         case "$seconds" in ''|*[!0-9]*) fail 'Timeouts must be non-negative integer seconds.';; esac
     done
 }
+# Never fails part-way: the lock is always released, last.
 cleanup() {
     status=$?
     trap - EXIT
-    if [ "$mounted" = yes ]; then hdiutil detach "$tmp/mnt" >/dev/null 2>&1 || true; fi
+    trap '' HUP INT TERM
+    set +e
+    # Only our own mount point: retry once, then force.
+    if [ "$mounted" = yes ] && is_mount "$tmp/mnt"; then
+        hdiutil detach "$tmp/mnt" >/dev/null 2>&1 || { sleep 1; hdiutil detach "$tmp/mnt" >/dev/null 2>&1; } ||
+            hdiutil detach -force "$tmp/mnt" >/dev/null 2>&1 || printf 'Could not detach %s\n' "$tmp/mnt" >&2
+    fi
     if [ "$swap_pending" = yes ] && [ -n "$aside_app" ] && exists "$aside_app" && ! exists "$app"; then
         mv "$aside_app" "$app" || printf 'Restore the preserved app from %s\n' "$aside_app" >&2
     fi
@@ -116,37 +136,65 @@ cleanup() {
             printf 'Your previous data is preserved at %s\n' "$aside_data" >&2
         fi
     fi
-    if [ -n "$new_app" ] && exists "$new_app"; then rm -rf "${new_app:?}"; fi
+    # A dry run that quit the app reopens it on every exit path.
+    if [ "$relaunch_on_exit" = yes ] && [ "$status" -ne 0 ]; then relaunch_on_exit=no; launch_app >&8 || true; fi
+    if [ -n "$new_app" ] && exists "$new_app"; then rm -rf "${new_app:?}" || true; fi
     # Only the private staging wrapper, never live or aside data.
-    if [ -n "$stage" ] && exists "$stage"; then rm -rf "${stage:?}"; fi
-    rm -rf "${tmp:?}"
-    if [ "$lock_held" = yes ]; then rm -rf "${lock:?}"; fi
+    if [ -n "$stage" ] && exists "$stage"; then rm -rf "${stage:?}" || true; fi
+    if is_mount "$tmp/mnt"; then printf 'Left %s mounted; detach it yourself.\n' "$tmp/mnt" >&2
+    else rm -rf "${tmp:?}" || true; fi
+    if [ "$lock_held" = yes ]; then rm -rf "${lock:?}" || true; fi
     exit "$status"
 }
 # Test-only hooks: bash -c COMMAND hook ARG. Quit/launch get the app path as $1;
 # LH_NO_GUI=1 skips the launch hook, open, and window-process wait.
-# ps gets no arguments and prints "pid command"; launchctl gets the ShipIt label;
-# lsappinfo gets the bundle id and prints a line for each running app instance.
+# ps gets the field (comm or command) and prints "pid comm" or "pid command";
+# launchctl gets the ShipIt label; lsappinfo gets the bundle id and prints each
+# instance's ASN line followed by its "pid = N" line.
 # Test-only timeout overrides: QUIT_TIMEOUT=30, SHIPIT_TIMEOUT=60,
 # SHIPIT_SETTLE=5, LAUNCH_TIMEOUT=30 (all prefixed LH_MIGRATE_).
 processes() {
-    if [ -n "${LH_MIGRATE_PS_CMD:-}" ]; then /bin/bash -c "$LH_MIGRATE_PS_CMD" hook; else ps -axo pid=,command=; fi
+    if [ -n "${LH_MIGRATE_PS_CMD:-}" ]; then /bin/bash -c "$LH_MIGRATE_PS_CMD" hook "$1"; else ps -axo "pid=,$1="; fi
 }
 # Any LearnHarness (GUI or Node-mode backend) from any location: they all share the data folder.
+# Only live processes count, by executable path (never arguments): one ending in
+# /LearnHarness.app/Contents/MacOS/LearnHarness, or a LaunchServices instance of the
+# bundle id whose pid > 0 runs a LearnHarness.app/Contents/MacOS/ executable.
+# Matches go to $tmp/running for report_running.
 app_running() {
-    processes > "$tmp/ps" || fail "Could not read the process listing. $state_msg"
-    LH_PROCESS_PREFIX="$app/Contents/" awk '
-        {sub(/^[[:space:]]*[0-9]+[[:space:]]+/,"")}
-        index($0,ENVIRON["LH_PROCESS_PREFIX"])==1 {found=1}
-        {
-            s=$0; key="/LearnHarness.app/Contents/MacOS/LearnHarness"
-            while((i=index(s,key))>0) {rest=substr(s,i+length(key)); if(rest=="" || substr(rest,1,1)==" ")found=1; s=rest}
-        }
-        END{exit !found}' "$tmp/ps" && return 0
+    processes comm > "$tmp/comm" || fail "Could not read the process listing. $state_msg"
     if [ -n "${LH_MIGRATE_LSAPPINFO_CMD:-}" ]; then
-        /bin/bash -c "$LH_MIGRATE_LSAPPINFO_CMD" hook "$bundle_id" > "$tmp/lsappinfo" || true
-    else lsappinfo find "bundleid=$bundle_id" > "$tmp/lsappinfo" 2>/dev/null || true; fi
-    [ -s "$tmp/lsappinfo" ]
+        /bin/bash -c "$LH_MIGRATE_LSAPPINFO_CMD" hook "$bundle_id" > "$tmp/lsappinfo" 2>/dev/null || true
+    else
+        { lsappinfo find "bundleid=$bundle_id" 2>/dev/null || true; } | while IFS= read -r asn; do
+            case "$asn" in ASN:*) printf '%s\n' "$asn"; lsappinfo info -only pid "$asn" 2>/dev/null || true;; esac
+        done > "$tmp/lsappinfo"
+    fi
+    awk '
+        FILENAME==ARGV[1] {
+            line=$0; sub(/^[[:space:]]+/,"",line)
+            if(!match(line,/^[0-9]+[[:space:]]+/))next
+            pid=substr(line,1,RLENGTH)+0; exe=substr(line,RLENGTH+1)
+            if(pid<=0)next
+            comm[pid]=exe; key="/LearnHarness.app/Contents/MacOS/LearnHarness"
+            if(substr(exe,1,1)=="/" && length(exe)>=length(key) && substr(exe,length(exe)-length(key)+1)==key && !seen[pid]++)print "pid " pid ": " exe
+            next
+        }
+        /^ASN:/ {asn=$0; next}
+        match($0,/pid"?[[:space:]]*=[[:space:]]*[0-9]+/) {
+            p=substr($0,RSTART,RLENGTH); sub(/^[^=]*=[[:space:]]*/,"",p); p+=0
+            if(p>0 && (p in comm) && index(comm[p],"LearnHarness.app/Contents/MacOS/")>0 && !seen[p]++)print "pid " p ": " comm[p] " (lsappinfo " asn ")"
+        }
+    ' "$tmp/comm" "$tmp/lsappinfo" > "$tmp/running"
+    [ -s "$tmp/running" ]
+}
+report_running() { sed 's/^/Running LearnHarness copy: /' "$tmp/running" >&2 || true; }
+# Destructive swaps call this right before they move anything.
+ensure_still_quit() {
+    if app_running; then
+        report_running
+        fail 'LearnHarness was reopened during the migration. Nothing more was changed. Quit it and run again.'
+    fi
 }
 # The installed app's window process; its Node-mode backend runs server.js with the same executable.
 gui_running() {
@@ -161,7 +209,7 @@ ship_running() {
         /bin/bash -c "$LH_MIGRATE_LAUNCHCTL_CMD" hook "$label" > "$tmp/launchctl" || true
     else launchctl list "$label" > "$tmp/launchctl" 2>/dev/null || true; fi
     if /usr/bin/grep -Eq '"PID"[[:space:]]*=' "$tmp/launchctl"; then return 0; fi
-    processes > "$tmp/ps" || fail "Could not read the process listing. $state_msg"
+    processes command > "$tmp/ps" || fail "Could not read the process listing. $state_msg"
     awk -v label="$label" '{sub(/^[[:space:]]*[0-9]+[[:space:]]+/,"");if(index($0,label)>0)found=1}END{exit !found}' "$tmp/ps"
 }
 request_quit() {
@@ -183,7 +231,7 @@ quit_app() {
         fi
         start=$SECONDS
         while app_running; do
-            [ "$((SECONDS-start))" -lt "$quit_timeout" ] || fail "LearnHarness is still running. Quit every copy of it and try again. $state_msg"
+            [ "$((SECONDS-start))" -lt "$quit_timeout" ] || { report_running; fail "LearnHarness is still running. Quit every copy of it and try again. $state_msg"; }
             sleep 1
         done
         printf 'Waiting for updates to finish...\n'
@@ -201,7 +249,7 @@ quit_app() {
         # An update restart can relaunch the app while ShipIt runs.
         app_running || return 0
         rounds=$((rounds+1))
-        [ "$rounds" -lt 3 ] || fail "LearnHarness keeps relaunching. Quit it and try again. $state_msg"
+        [ "$rounds" -lt 3 ] || { report_running; fail "LearnHarness keeps relaunching. Quit it and try again. $state_msg"; }
         printf '%s\n' 'LearnHarness relaunched after an update; asking it to quit again.'
     done
 }
@@ -219,7 +267,7 @@ launch_app() {
 wait_for_window() {
     start=$SECONDS
     while :; do
-        if ! processes > "$tmp/ps"; then
+        if ! processes command > "$tmp/ps"; then
             printf '%s\n' 'Warning: could not read the process listing to confirm the app started.'
             return 0
         fi
