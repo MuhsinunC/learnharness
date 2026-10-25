@@ -162,6 +162,17 @@ export function parseProviderKeyRefusal(message: string | undefined): boolean {
 	}
 }
 
+/** Choose the remedy without sending a subscription provider to key setup. */
+export function providerRefusalAction(message: string | undefined): "setup" | "notice" | null {
+	if (!message || !parseProviderKeyRefusal(message)) return null;
+	return JSON.parse(message).provider === "claude-code" ? "notice" : "setup";
+}
+
+/** Show restart instructions rather than the transport envelope. */
+export function refusalBannerText(message: string): string {
+	return providerRefusalAction(message) === "notice" ? JSON.parse(message).error : message;
+}
+
 /** useLayoutEffect that is silent during SSR (client components still render on the server in Next). */
 const useIsoLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
@@ -590,15 +601,10 @@ export function Chat({
 	useEffect(() => {
 		if (!error) return;
 		const missing = parseModelsRefusal(error.message);
-		// The key-refusal twin (zero-keys wave): a pinned model whose
-		// provider key is gone gets the SAME treatment — revert-draft and
-		// open setup (the dialog derives to its first-key stage on its own).
-		const keyRefused = parseProviderKeyRefusal(error.message);
-		if (!missing && !keyRefused) return; // a real error keeps the honest banner
-		// ORDER MATTERS: clearError() flips this effect's own dep (`error`)
-		// and would cancel the in-flight work below — so the banner dismiss,
-		// the draft restore, and the dialog open all land TOGETHER after the
-		// record refetch (the honest truth minus the refused send).
+		const action = providerRefusalAction(error.message);
+		if (!missing && !action) return; // a real error keeps the honest banner
+		// Refetch and restore the draft before dismissing setup refusals.
+		// Subscription refusals keep their banner and restart instructions.
 		let cancelled = false;
 		void (async () => {
 			const res = await fetch(`/api/chats/${encodeURIComponent(chatId)}`);
@@ -611,8 +617,10 @@ export function Chat({
 				applyText(draftRef.current);
 				draftRef.current = null;
 			}
-			clearError();
-			setSetupOpen(true);
+			if (action !== "notice") {
+				clearError();
+				setSetupOpen(true);
+			}
 		})();
 		return () => {
 			cancelled = true;
@@ -1573,7 +1581,7 @@ export function Chat({
 							)}
 							{error && (
 								<div className="rounded-lg border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm">
-									Something went wrong: {error.message}
+									Something went wrong: {refusalBannerText(error.message)}
 								</div>
 							)}
 						</div>

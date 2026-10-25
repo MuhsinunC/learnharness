@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { ActivitySection, formatElapsed, toBlobs, type ActivityFeed, type FeedExtraction } from "../components/activity-dock.tsx";
+import { CLAUDE_CODE_OFF_REFUSAL } from "../src/core/settings.ts";
 import { formatTokens, formatUsd } from "../components/usage-format.ts";
 
 // The section's pure layer: folds, formatting, and blob order — then the SSR
@@ -248,4 +249,9 @@ describe("activity section render", () => {
 		// glm-5.3-flash drifted in pi-ai 0.87.1)
 		assert.match(html, /activity-total-cost[^>]*>\$0\.0040</);
 	});
+});
+
+it("the dock describes a disabled subscription provider without asking for a key", () => {
+	const blob = toBlobs({ jobs: [job({ status: "error", error: CLAUDE_CODE_OFF_REFUSAL })], extractions: [] })[0]!;
+	assert.equal(blob.activity, "Claude Code is off");
 });

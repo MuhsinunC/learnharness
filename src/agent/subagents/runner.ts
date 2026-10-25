@@ -210,42 +210,51 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 		// pipeline resumes the lesson and the teacher reads the refusal
 		// instead of waiting forever on a job it already dispatched.
 		const refuse = async (reason: string): Promise<void> => {
-			if (stillRunning(jobId)) jobStore.updateJob(jobId, { error: reason });
-			const resolved = resolveInput(job, input) as
-				| ResearchToolInput
-				| DemoToolInput
-				| VisualToolInput
-				| PdfToolInput
-				| undefined;
-			const pdf = resolved as PdfToolInput | undefined;
-			const failure: ResearchResult | DemoResult | VisualResult | PdfResult =
-				job.kind === "research"
-					? { brief: `Research failed: ${reason}`, sources: [] }
-					: job.kind === "demo"
-						? {
-								title: typeof (resolved as DemoToolInput | undefined)?.title === "string" && (resolved as DemoToolInput).title.trim() ? (resolved as DemoToolInput).title : "Interactive demo",
-								html: "",
-								tested: true,
-								notes: `FAILED: ${reason}`,
-							}
-						: job.kind === "visual"
-							? { svg: "", notes: `FAILED: ${reason}` }
-							: {
-									path: typeof pdf?.path === "string" ? pdf.path : "",
-									question: typeof pdf?.question === "string" ? pdf.question : "",
-									brief: `PDF failed: ${reason}`,
-									pagesRead: [],
-									pagesConsulted: [],
-								};
-			await finishJob(jobId, failure);
+			registerJobAbort(jobId, new AbortController());
+			try {
+				if (stillRunning(jobId)) jobStore.updateJob(jobId, { error: reason });
+				const resolved = resolveInput(job, input) as
+					| ResearchToolInput
+					| DemoToolInput
+					| VisualToolInput
+					| PdfToolInput
+					| undefined;
+				const pdf = resolved as PdfToolInput | undefined;
+				const failure: ResearchResult | DemoResult | VisualResult | PdfResult =
+					job.kind === "research"
+						? { brief: `Research failed: ${reason}`, sources: [] }
+						: job.kind === "demo"
+							? {
+									title: typeof (resolved as DemoToolInput | undefined)?.title === "string" && (resolved as DemoToolInput).title.trim() ? (resolved as DemoToolInput).title : "Interactive demo",
+									html: "",
+									tested: true,
+									notes: `FAILED: ${reason}`,
+								}
+							: job.kind === "visual"
+								? { svg: "", notes: `FAILED: ${reason}` }
+								: {
+										path: typeof pdf?.path === "string" ? pdf.path : "",
+										question: typeof pdf?.question === "string" ? pdf.question : "",
+										brief: `PDF failed: ${reason}`,
+										pagesRead: [],
+										pagesConsulted: [],
+									};
+				await finishJob(jobId, failure);
+			} finally {
+				unregisterJobAbort(jobId);
+			}
 		};
 		let engine: PiEngine | undefined;
 		try {
 			engine = pickEngine(job.kind);
 		} catch (err) {
-			if (!(err instanceof ProviderKeyMissingError)) throw err;
-			console.info(`[job ${jobId}] refused — ${JSON.stringify(err.envelope)}`);
-			await refuse(err.envelope.error);
+			if (err instanceof ProviderKeyMissingError) {
+				console.info(`[job ${jobId}] refused — ${JSON.stringify(err.envelope)}`);
+				await refuse(err.envelope.error);
+			} else {
+				console.error(`[job ${jobId}] engine resolution failed:`, err);
+				await refuse(err instanceof Error ? err.message : String(err));
+			}
 			return;
 		}
 		if (!engine) {
@@ -323,7 +332,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 		} catch (err) {
 			const reason = err instanceof Error ? err.message : String(err);
 			console.error(`[job ${jobId}] steer delivery failed:`, err);
-			jobStore.updateJob(jobId, { status: "error", error: reason, activity: "delivery failed" });
+			jobStore.updateJob(jobId, { status: "error", error: jobStore.getJob(jobId)?.error ?? reason, activity: "delivery failed" });
 		}
 	}
 
