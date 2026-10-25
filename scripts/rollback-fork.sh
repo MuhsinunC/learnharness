@@ -16,7 +16,7 @@ $1=="entry" {
  counts[$2]++; if($5==".")root=$2;
  if($2=="f" && $5 ~ /^\.\/data\/chats\/[^\/]+\.json$/)chats++;
  if($2=="f" && index($5,"./data/graph/")==1)graph++;
- if($2=="f" && $5=="./data/settings.json")settings=1;
+ if(($2=="f" || $2=="l") && $5=="./data/settings.json")settings=1;
  next
 }
 $1=="sign_in" {if(NF!=2)bad=1;next}
@@ -50,6 +50,7 @@ if [ "$present" = yes ]; then
     [ "$(hash_file "$backup/data.tar.gz")" = "$(field tarball_sha256)" ] || fail 'Backup tarball digest mismatch.'
 else [ "$(field tarball_sha256)" = none ] || fail 'Invalid absent-data manifest.'; fi
 init
+quit_app
 # Pre-stage and verify before moving the current data, keeping it safe on errors.
 stage=
 if [ "$present" = yes ]; then
@@ -62,7 +63,6 @@ if [ "$present" = yes ]; then
     verify_data "$stage/$archive_name"
 fi
 if [ "$old_path" != none ]; then prepare_app "$backup/LearnHarness.app"; fi
-quit_app
 aside_data=none
 if exists "$data"; then
     aside_data=$(unique_path "$data.fork-$stamp")
@@ -71,6 +71,7 @@ fi
 if [ "$present" = yes ]; then
     mv "$stage/$archive_name" "$data"
     rmdir "$stage"
+    stage=
 fi
 if [ "$old_path" != none ]; then
     swap_app

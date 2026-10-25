@@ -79,7 +79,7 @@ case "$name" in
         if [ -f "$LH_TEST_ROOT/launched" ]; then mv "$LH_TEST_ROOT/launched" "$LH_TEST_ROOT/previous-launch"; fi;;
     'launch stub') printf launched >> "$LH_TEST_ROOT/launched";;
     'ps stub')
-        if [ -f "$LH_TEST_ROOT/launched" ]; then printf '123 %s/Contents/MacOS/LearnHarness\n' "$LH_MIGRATE_APPS_DIR/LearnHarness.app";
+        if [ -f "$LH_TEST_ROOT/stubborn" ] || [ -f "$LH_TEST_ROOT/launched" ]; then printf '123 %s/Contents/MacOS/LearnHarness\n' "$LH_MIGRATE_APPS_DIR/LearnHarness.app";
         elif [ -f "$LH_TEST_ROOT/running" ] && [ ! -f "$LH_TEST_ROOT/quit-called" ]; then printf '123 %s/Contents/MacOS/LearnHarness\n' "$LH_MIGRATE_APPS_DIR/LearnHarness.app"; fi;;
     'launchctl stub') if [ -f "$LH_TEST_ROOT/shipit" ]; then printf '"PID" = 123;\n'; fi;;
 esac
@@ -177,10 +177,33 @@ case_4() {
 }
 case_5() {
     setup 5
+    mv "$data/data/settings.json" "$data/nested dir/settings target.json"
+    ln -s '../nested dir/settings target.json' "$data/data/settings.json"
+    snapshot "$data" > "$case_root/original-data"
     migrate
     backup=$(backup_path)
     printf 'new fork data\n' >> "$data/data/chats/one.json"
     snapshot "$data" > "$case_root/fork-data"
+    snapshot "$apps/LearnHarness.app" > "$case_root/fork-app"
+    # A well-formed but incorrect entry hash must fail in staging, before any move.
+    cp "$backup/manifest.txt" "$case_root/good manifest"
+    auth_hash=$(shasum -a 256 < "$data/auth.json" | awk '{print $1}')
+    sed "s/$auth_hash/0000000000000000000000000000000000000000000000000000000000000000/" "$case_root/good manifest" > "$backup/manifest.txt"
+    if invoke "$backup/rollback-fork.sh" "$backup"; then return 1; fi
+    grep -Fq 'Data manifest verification failed' "$case_root/output"
+    snapshot "$data" > "$case_root/failed-restore-data"
+    cmp "$case_root/fork-data" "$case_root/failed-restore-data"
+    [ -z "$(find "$(dirname "$data")" -maxdepth 1 -name '.lh-restore.*')" ]
+    cp "$case_root/good manifest" "$backup/manifest.txt"
+    touch "$case_root/stubborn"
+    if invoke "$backup/rollback-fork.sh" "$backup"; then return 1; fi
+    snapshot "$data" > "$case_root/timeout-data"
+    cmp "$case_root/fork-data" "$case_root/timeout-data"
+    snapshot "$apps/LearnHarness.app" > "$case_root/timeout-app"
+    cmp "$case_root/fork-app" "$case_root/timeout-app"
+    [ "$(find "$apps" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = 1 ]
+    [ -z "$(find "$(dirname "$data")" -maxdepth 1 -name '.lh-restore.*')" ]
+    mv "$case_root/stubborn" "$case_root/was-stubborn"
     invoke "$backup/rollback-fork.sh" "$backup"
     unchanged_data; unchanged_app
     aside=$(find "$(dirname "$data")" -maxdepth 1 -name 'LearnHarness.fork-*' -type d)
