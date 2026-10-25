@@ -55,16 +55,24 @@ export type { ThinkingLevel };
 
 let collection: ReturnType<typeof createModels> | undefined;
 
-let claudeCodeRegistration: { executable: string; deps?: ClaudeCodeProviderDeps } | undefined;
+const registrationKey = Symbol.for("lh.claudeCodeRegistration");
+const registrations = globalThis as typeof globalThis & { [registrationKey]?: { generation: number; desired?: { executable: string; deps?: ClaudeCodeProviderDeps } } };
+const registration = registrations[registrationKey] ??= { generation: 0 };
+let appliedGeneration = -1;
 
 export function enableClaudeCodeProvider(executable: string, deps?: ClaudeCodeProviderDeps): void {
-	claudeCodeRegistration = { executable, deps };
-	if (collection) collection.setProvider(claudeCodeProvider(executable, collection.getModels("anthropic"), deps));
+	registration.desired = { executable, deps };
+	registration.generation++;
+}
+
+export function disableClaudeCodeProvider(): void {
+	registration.desired = undefined;
+	registration.generation++;
+	collection?.deleteProvider("claude-code");
 }
 
 export function resetClaudeCodeProviderForTests(): void {
-	claudeCodeRegistration = undefined;
-	collection?.deleteProvider("claude-code");
+	disableClaudeCodeProvider();
 }
 
 /** The process-wide pi-ai Models collection — EVERY builtin provider's
@@ -79,10 +87,12 @@ export function piModels() {
 	if (!collection) {
 		collection = createModels({ identity: APP_IDENTITY });
 		for (const provider of builtinProviders()) collection.setProvider(provider);
-		if (claudeCodeRegistration) {
-			const { executable, deps } = claudeCodeRegistration;
-			collection.setProvider(claudeCodeProvider(executable, collection.getModels("anthropic"), deps));
-		}
+	}
+	if (appliedGeneration !== registration.generation) {
+		const desired = registration.desired;
+		if (desired) collection.setProvider(claudeCodeProvider(desired.executable, collection.getModels("anthropic"), desired.deps));
+		else collection.deleteProvider("claude-code");
+		appliedGeneration = registration.generation;
 	}
 	return collection;
 }

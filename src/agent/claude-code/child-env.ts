@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, delimiter, join } from "node:path";
 
 import type { ClaudeCodeEndpoint } from "../../core/claude-code-endpoint.ts";
 
@@ -15,12 +15,17 @@ export const CC_CHILD_ENV = {
 	CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
 } as const;
 
-export function buildChildEnv(source: NodeJS.ProcessEnv = process.env, endpoint?: ClaudeCodeEndpoint | null): Record<string, string> {
+export function buildChildEnv(source: NodeJS.ProcessEnv = process.env, endpoint?: ClaudeCodeEndpoint | null, executable?: string): Record<string, string> {
 	const env: Record<string, string> = {};
 	for (const key of CHILD_ENV_ALLOWLIST) {
 		if (source[key] !== undefined) env[key] = source[key];
 	}
+	if (executable) {
+		const dir = dirname(executable);
+		env.PATH = [dir, ...(source.PATH ?? "").split(delimiter).filter(entry => entry && entry !== dir)].join(delimiter);
+	}
 	return { ...env, ...CC_CHILD_ENV, ...(endpoint ? { ANTHROPIC_BASE_URL: endpoint.baseUrl, ANTHROPIC_AUTH_TOKEN: endpoint.token } : {}) };
+
 }
 
 export function childClaudeDir(source: NodeJS.ProcessEnv = process.env): string {
