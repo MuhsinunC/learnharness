@@ -506,3 +506,20 @@ test("R2-F3: supersedes keeps active replacement block indices valid", () => {
  assert.deepEqual(h.mapper.output.content, [{ type: "thinking", thinking: "replacement thought", thinkingSignature: "sig" }]);
  assert.ok(h.events.some(e => e.type === "thinking_delta" && e.contentIndex === 0 && e.delta === "replacement"));
 });
+
+test("R2-F2/F4 review: mixed-stream fallback tools honor result truncation", () => {
+ const h = harness(); let hooks = 0; h.mapper.onToolTurnEnded = () => { hooks++; };
+ h.send(start("X"), block(0, { type: "text", text: "intro" }), stop(0),
+  frame("X", "text", [{ type: "text", text: "intro" }]), toolFrame("X", "fallback-tool"), result({ stop_reason: "max_tokens" }));
+ assertDone(h, "length"); assert.equal(hooks, 1);
+ assert.equal(h.mapper.output.content.filter(b => b.type === "toolCall").length, 1);
+});
+
+test("R2-F3 review: superseding the last fallback tool preserves a later continuation", () => {
+ const h = harness(); let hooks = 0; h.mapper.onToolTurnEnded = () => { hooks++; };
+ h.send(frame("A", "intro", [{ type: "text", text: "intro" }]), frame("A", "tool", [{ type: "tool_use", id: "removed", name: "Bash", input: {} }]),
+  sdk({ type: "assistant", uuid: "replacement", supersedes: ["tool"], message: { id: "A", stop_reason: "end_turn", content: [{ type: "text", text: "replacement" }] } }),
+  frame("B", "answer", [{ type: "text", text: "answer" }]), success);
+ assert.deepEqual(h.mapper.output.content, [{ type: "text", text: "intro" }, { type: "text", text: "replacement" }, { type: "text", text: "answer" }]);
+ assertDone(h, "stop"); assert.equal(hooks, 0);
+});
