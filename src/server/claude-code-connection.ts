@@ -231,7 +231,8 @@ const isJson = (request: Request) => request.headers.get("content-type")?.split(
 async function putClaudeCodeConnectionLocked(request: Request): Promise<Response> {
 	const refusal = refuseCrossOrigin(request);
 	if (refusal) return refusal;
-	if (platformRefusal()) return platformRefusal()!;
+	const platformError = platformRefusal();
+	if (platformError) return platformError;
 	if (claudeCodeEnvOverride().enabled) return json({ error: "connection controlled by launch environment" }, 409);
 	if (!isJson(request)) return json({ error: "application/json required" }, 415);
 	let body;
@@ -284,7 +285,8 @@ async function putClaudeCodeConnectionLocked(request: Request): Promise<Response
 async function postClaudeCodeLoginLocked(request: Request): Promise<Response> {
 	const refusal = refuseCrossOrigin(request);
 	if (refusal) return refusal;
-	if (platformRefusal()) return platformRefusal()!;
+	const platformError = platformRefusal();
+	if (platformError) return platformError;
 	if (!isJson(request)) return json({ error: "application/json required" }, 415);
 	const { executable, version } = await resolveExecutable();
 	if (!executable || !version) return json({ error: "Claude Code not found" }, 400);
