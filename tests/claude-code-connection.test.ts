@@ -232,12 +232,21 @@ const cases = [
   {mode:'endpoint',baseUrl:'http://example.com',token:'sentinel'},
   {mode:'endpoint',baseUrl:'https://relay.example',token:''},
   {mode:'endpoint',baseUrl:'https://relay.example',token:'invalid\\nvalue'},
+  {mode:'endpoint',baseUrl:'https://relay.example',token:'has space'},
+  {mode:'endpoint',baseUrl:'https://relay.example',token:'t\\u00f6ken'},
 ];
 for(const body of cases) {
   assert.equal((await route.PUT(request(body))).status,400);
   assert.equal(fs.existsSync(home+'/claude-code.json'),false);
   assert.equal(fs.existsSync(home+'/claude-endpoint.json'),false);
 }
+`));
+it("a URL-only endpoint PUT over unreadable stored credentials asks to re-enter the token", () => scenario(`
+fs.writeFileSync(home+'/claude-endpoint.json','{"baseUrl":"https://relay.example","token":');
+const response = await route.PUT(request({mode:'endpoint',baseUrl:'https://relay.example'}));
+assert.equal(response.status,400);
+assert.equal((await response.json()).error,'claude-code endpoint: existing endpoint credentials could not be read; re-enter the token');
+assert.equal(fs.existsSync(home+'/claude-code.json'),false);
 `));
 it("all routes reject cross-origin requests before spawning or writing", () => scenario(`
 const handlers = [route.GET,route.PUT,loginRoute.POST,endpointRoute.DELETE];

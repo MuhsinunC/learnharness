@@ -1,5 +1,5 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { readdirSync, realpathSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { buildChildEnv } from "../agent/claude-code/child-env.ts";
@@ -8,7 +8,9 @@ import { applyClaudeCodeSettings, claudeCodeEnvOverride } from "./claude-code-bo
 import {
 	claudeExecutableProblem, claudeSettingsError, claudeSettingsGeneration, readClaudeCodeSettings, writeClaudeCodeSettings,
 } from "./claude-code-settings.ts";
-import { clearEndpointConfig, endpointStatus, isAllowedEndpointUrl, writeEndpointConfig } from "./claude-code-endpoint.ts";
+import { clearEndpointConfig, endpointFile, endpointStatus, isAllowedEndpointUrl, writeEndpointConfig } from "./claude-code-endpoint.ts";
+
+const UNREADABLE_ENDPOINT = "claude-code endpoint: existing endpoint credentials could not be read; re-enter the token";
 
 export type DiscoveryRoots = { pathEnv: string | undefined; home: string; fixedDirs: string[] };
 function defaultRoots(): DiscoveryRoots {
@@ -262,19 +264,24 @@ async function putClaudeCodeConnectionLocked(request: Request): Promise<Response
 			return json({ error: "invalid endpoint URL" }, 400);
 		}
 		const token = body.token;
-		if (token !== undefined && (typeof token !== "string" || !token || token.trim() !== token || /[\x00-\x1f\x7f]/.test(token))) {
+		if (token !== undefined && (typeof token !== "string" || !/^[\x21-\x7e]+$/.test(token))) {
 			return json({ error: "invalid endpoint token" }, 400);
 		}
-		if (token === undefined && !stored.tokenSet) return json({ error: "endpoint token required" }, 400);
+		if (token === undefined && !stored.tokenSet) {
+			return json({ error: existsSync(endpointFile()) ? UNREADABLE_ENDPOINT : "endpoint token required" }, 400);
+		}
 		endpointWrite = { baseUrl, ...(token !== undefined ? { token } : {}) };
 	}
 	try { writeClaudeCodeSettings({ mode: body.mode, executable }); }
 	catch { return json({ error: "unable to save connection settings" }, 500); }
 	if (endpointWrite) {
 		try { writeEndpointConfig(endpointWrite); }
-		catch {
+		catch (error) {
 			writeClaudeCodeSettings(saved);
 			invalidateStatusCache();
+			// The endpoint module's validation errors are fixed texts without secrets.
+			const message = error instanceof Error ? error.message : "";
+			if (message === UNREADABLE_ENDPOINT || message.startsWith("claude-code endpoint: invalid ")) return json({ error: message }, 400);
 			return json({ error: "unable to save endpoint configuration" }, 500);
 		}
 	}
