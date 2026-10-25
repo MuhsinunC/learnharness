@@ -27,7 +27,7 @@ export function isAllowedEndpointUrl(value: string): boolean {
 	return normalizeEndpointUrl(value) !== null;
 }
 
-function validToken(value: unknown): value is string {
+export function validToken(value: unknown): value is string {
 	return typeof value === "string" && value.length > 0 && !/[^\x21-\x7e]/.test(value);
 }
 

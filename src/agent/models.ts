@@ -63,9 +63,15 @@ const registration = registrations[registrationKey] ??= { generation: 0 };
 let appliedGeneration = -1;
 
 export function enableClaudeCodeProvider(executable: string, deps?: ClaudeCodeProviderDeps): void {
+	const current = registration.desired;
+	if (current?.executable === executable && current.deps?.dataDir === deps?.dataDir &&
+		!!current.deps?.endpoint === !!deps?.endpoint && current.deps?.loadQuery === deps?.loadQuery &&
+		current.deps?.logger === deps?.logger && current.deps?.claudeDirForTests === deps?.claudeDirForTests) return;
 	registration.desired = { executable, deps };
 	registration.generation++;
 }
+
+export function claudeCodeRegistrationExecutable(): string | undefined { return registration.desired?.executable; }
 
 export function disableClaudeCodeProvider(): void {
 	registration.desired = undefined;
@@ -93,7 +99,8 @@ export function piModels() {
 	if (appliedGeneration !== registration.generation) {
 		const desired = registration.desired;
 		if (desired) collection.setProvider(claudeCodeProvider(desired.executable, collection.getModels("anthropic"), {
-			...desired.deps, isEnabled: () => !!registration.desired,
+			...desired.deps, registrationError: () => !registration.desired ? "claude-code: provider is off"
+				: registration.desired !== desired ? "claude-code: provider changed; retry" : null,
 		}));
 		else collection.deleteProvider("claude-code");
 		appliedGeneration = registration.generation;
