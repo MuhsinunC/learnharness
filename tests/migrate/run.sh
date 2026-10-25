@@ -192,6 +192,9 @@ case_4() {
 }
 case_5() {
     setup 5
+    renamed_data="$data literal\\t"
+    mv "$data" "$renamed_data"
+    data=$renamed_data
     mv "$data/data/settings.json" "$data/nested dir/settings target.json"
     ln -s '../nested dir/settings target.json' "$data/data/settings.json"
     snapshot "$data" > "$case_root/original-data"
@@ -221,7 +224,10 @@ case_5() {
     mv "$case_root/stubborn" "$case_root/was-stubborn"
     invoke "$backup/rollback-fork.sh" "$backup"
     unchanged_data; unchanged_app
-    aside=$(find "$(dirname "$data")" -maxdepth 1 -name 'LearnHarness.fork-*' -type d)
+    aside=
+    for candidate in "$data".fork-*; do
+        if [ -d "$candidate" ]; then aside=$candidate; fi
+    done
     [ -n "$aside" ]
     snapshot "$aside" > "$case_root/aside-data"
     cmp "$case_root/fork-data" "$case_root/aside-data"
