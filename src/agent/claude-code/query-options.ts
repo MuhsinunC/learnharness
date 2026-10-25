@@ -1,3 +1,4 @@
+import type { ClaudeCodeEndpoint } from "../../core/claude-code-endpoint.ts";
 /**
  * Query options for the personal macOS/Linux provider.
  * The child env allowlist is the safety contract; Windows needs USERPROFILE/SystemRoot/APPDATA, which is out of scope.
@@ -12,6 +13,7 @@ export const MCP_SERVER_NAME = "custom-tools";
 export const MCP_TOOL_PREFIX = `mcp__${MCP_SERVER_NAME}__`;
 
 export type QueryInputs = {
+	endpoint?: ClaudeCodeEndpoint | null;
 	executable: string;
 	cwd: string;
 	cliModel: string;
@@ -47,7 +49,7 @@ export function buildQueryOptions(inputs: QueryInputs, platform: NodeJS.Platform
 		...(inputs.mcpServers !== undefined ? { mcpServers: inputs.mcpServers } : {}),
 		maxTurns: 1,
 		persistSession: false,
-		env: buildChildEnv(),
+		env: buildChildEnv(process.env, inputs.endpoint),
 		permissionMode: "dontAsk",
 		settingSources: [],
 		tools: [],

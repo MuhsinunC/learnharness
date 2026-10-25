@@ -427,3 +427,26 @@ for (const message of ["Query closed before response received", "Query closed be
 	assert.equal(h.warnings.filter(m => m.includes(message)).length, message.startsWith("Query closed") ? 0 : 1);
 	assert.equal(h.debugs.filter(m => m.includes(message)).length, message.startsWith("Query closed") ? 1 : 0);
 });
+
+test("R6: endpoint getter runs once per child and picks up token changes", async () => {
+	const h = fake();
+	let reads = 0, token = "first-token";
+	const deps = { ...h.deps, endpoint: () => { reads++; return { baseUrl: "https://relay.example/v1", token }; } };
+	for (const next of ["first-token", "changed-token"]) {
+		token = next;
+		assert.equal((await collect(streamClaudeCode(model, transcript(), undefined, deps))).at(-1)?.type, "done");
+		assert.equal(h.calls.at(-1)!.options.env!.ANTHROPIC_BASE_URL, "https://relay.example/v1");
+		assert.equal(h.calls.at(-1)!.options.env!.ANTHROPIC_AUTH_TOKEN, next);
+	}
+	assert.equal(reads, 2); assert.equal(h.calls.length, 2);
+});
+
+test("R6: missing endpoint config fails without loading or querying the SDK", async () => {
+	const h = fake(); let reads = 0, loads = 0;
+	const deps = { ...h.deps, endpoint: () => { reads++; return null; }, loadQuery: async () => { loads++; return h.deps.loadQuery(); } };
+	const events = await collect(streamClaudeCode(model, transcript(history()), undefined, deps));
+	const last = events.at(-1);
+	assert.equal(last?.type, "error");
+	if (last?.type === "error") assert.equal(last.error.errorMessage, "claude-code: endpoint not configured");
+	assert.equal(reads, 1); assert.equal(loads, 0); assert.equal(h.calls.length, 0); noFiles(h);
+});

@@ -1,3 +1,4 @@
+import type { ClaudeCodeEndpoint } from "../../core/claude-code-endpoint.ts";
 import type { query, Query, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { createAssistantMessageEventStream, type AssistantMessageEventStream, type Model, type SimpleStreamOptions, type TranscriptContext } from "@earendil-works/pi-ai";
 import { convertPiMessages } from "./convert.ts";
@@ -13,7 +14,7 @@ const sweepKey = Symbol.for("lh.claudeCode.swept");
 const state = globalThis as typeof globalThis & { [sweepKey]?: Set<string> };
 export function resetClaudeCodeStreamForTests(): void { delete state[sweepKey]; }
 export const defaultLoadQuery = () => import("@anthropic-ai/claude-agent-sdk").then(m => m.query);
-type Deps = { executable: string; dataDir: string; claudeDir: string; loadQuery: () => Promise<typeof query>; logger: EventMapperLogger; parkQuietMs?: number; cleanupWaitMs?: number };
+type Deps = { endpoint?: () => ClaudeCodeEndpoint | null; executable: string; dataDir: string; claudeDir: string; loadQuery: () => Promise<typeof query>; logger: EventMapperLogger; parkQuietMs?: number; cleanupWaitMs?: number };
 
 /** options.maxTokens and LH_MAX_OUTPUT_TOKENS do not apply to this provider (no verified SDK surface). */
 export function streamClaudeCode(model: Model<any>, transcript: TranscriptContext, options: SimpleStreamOptions | undefined, deps: Deps): AssistantMessageEventStream {
@@ -83,7 +84,10 @@ export function streamClaudeCode(model: Model<any>, transcript: TranscriptContex
 				markSessionActive(sessionId);
 			} catch (error) { if (!(error instanceof Error && error.message === "claude-code: empty history")) throw error; }
 			if (tools.length) server = createToolServer(tools, { timeoutMs: 3_600_000, onCall: checkParked });
+			const endpoint = deps.endpoint?.();
+			if (deps.endpoint && !endpoint) throw new Error("claude-code: endpoint not configured");
 			const queryOptions = buildQueryOptions({ executable: deps.executable, cwd, cliModel,
+				...(endpoint ? { endpoint } : {}),
 				effort: resolveEffort(model, options?.reasoning), appendPrompt: systemPrompt, resumeId: sessionId,
 				...(server ? { mcpServers: { [MCP_SERVER_NAME]: server.config } } : {}) });
 			const loading = deps.loadQuery();
