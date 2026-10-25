@@ -56,6 +56,7 @@ cleanup() {
     exit "$status"
 }
 # Test-only hooks: bash -c COMMAND hook ARG. Quit/launch get the app path as $1;
+# LH_NO_GUI=1 skips the launch hook, open, and window-process wait.
 # ps gets no arguments and prints "pid command"; launchctl gets the ShipIt label.
 # Test-only timeout overrides: QUIT_TIMEOUT=30, SHIPIT_TIMEOUT=60,
 # SHIPIT_SETTLE=5, LAUNCH_TIMEOUT=30 (all prefixed LH_MIGRATE_).
@@ -105,12 +106,23 @@ quit_app() {
     done
 }
 launch_app() {
+    if [ "${LH_NO_GUI:-}" = 1 ]; then
+        printf '%s\n' 'LH_NO_GUI=1: not launching the app'
+        return
+    fi
     printf 'Launching LearnHarness...\n'
     if [ -n "${LH_MIGRATE_LAUNCH_CMD:-}" ]; then /bin/bash -c "$LH_MIGRATE_LAUNCH_CMD" hook "$app" || true
     else open -a "$app" || true; fi
     start=$SECONDS
     until app_running MacOS/; do
-        if [ "$((SECONDS-start))" -ge "$launch_timeout" ]; then printf '%s\n' 'Warning: no window process was seen; the install is complete.'; break; fi
+        if [ "$((SECONDS-start))" -ge "$launch_timeout" ]; then
+            if [ "${dry:-no}" = yes ]; then
+                printf '%s\n' 'Warning: no window process was seen.'
+            else
+                printf '%s\n' 'Warning: no window process was seen; the install is complete.'
+            fi
+            break
+        fi
         sleep 1
     done
 }
