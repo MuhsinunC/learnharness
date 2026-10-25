@@ -139,7 +139,7 @@ for (const kind of ["network", "parse", "api"]) test(`failed PUT clears token an
 	fixture(); await mount(); await type("Base URL", "https://relay.example"); await type("Token", "SENTINEL-TOKEN-7f3a");
 	globalThis.fetch = async () => {
 		if (kind === "network") throw new Error("SENTINEL-TOKEN-7f3a");
-		return { ok: true, json: async () => { if (kind === "parse") throw new Error("SENTINEL-TOKEN-7f3a"); return { error: "SENTINEL-TOKEN-7f3a" }; } } as Response;
+		return { ok: kind !== "api", status: kind === "api" ? 400 : 200, json: async () => { if (kind === "parse") throw new Error("SENTINEL-TOKEN-7f3a"); return { error: "SENTINEL-TOKEN-7f3a" }; } } as Response;
 	};
 	const events: string[] = [], off = onSettingsSaved((section) => events.push(section));
 	try { await click(button("Save")); assert.equal(input("Token").value, ""); assert(!document.body.innerHTML.includes("SENTINEL-TOKEN-7f3a")); assert(host!.querySelector('[role="alert"]')); assert(!button("Stop using endpoint")); assert.deepEqual(events, []); } finally { off(); }
@@ -204,7 +204,7 @@ test("status-bearing PUT errors redact the submitted token", async () => {
 	const events: string[] = [], off = onSettingsSaved((section) => events.push(section));
 	try {
 		await click(button("Save")); assert(button("Stop using endpoint")); assert.equal(input("Token").value, "");
-		assert(!document.body.innerHTML.includes("SENTINEL-TOKEN-7f3a")); assert(text().includes("The Claude connection could not be changed. Try again.")); assert.deepEqual(events, ["keys"]);
+		assert(!document.body.innerHTML.includes("SENTINEL-TOKEN-7f3a")); assert(!host!.querySelector('[role="alert"]')); assert.deepEqual(events, ["keys"]);
 	} finally { off(); }
 });
 test("Base URL changes through React onChange without controlled-input warnings", async (t) => {
@@ -300,14 +300,14 @@ test("background recovery clears only background errors", async (t) => {
 	await type("Base URL", "not a url"); await click(button("Save"));
 	await act(async () => t.mock.timers.tick(CLAUDE_LOGIN_POLL_MS)); assert(text().includes("Enter an https:// URL"));
 });
-for (const changed of [false, true]) test(`error-bearing write signals only a committed status change: ${changed}`, async () => {
+for (const changed of [false, true]) test(`a 2xx write without ok commits and shows its error muted: changed=${changed}`, async () => {
 	fixture({ loggedIn: true, mode: "local" }); await mount();
 	globalThis.fetch = async () => ({ ok: true, json: async () => ({ ...initial, loggedIn: true, mode: changed ? "off" : "local", error: "auth status timed out" }) }) as Response;
 	const events: string[] = [], off = onSettingsSaved(s => events.push(s));
 	try {
 		await click(host!.querySelector('[role="switch"]')!);
 		assert.equal(host!.querySelector('[role="switch"]')!.getAttribute("aria-checked"), changed ? "false" : "true");
-		assert(text().includes("auth status timed out")); assert.deepEqual(events, changed ? ["keys"] : []);
+		assert(text().includes("auth status timed out")); assert(!host!.querySelector('[role="alert"]')); assert.deepEqual(events, ["keys"]);
 	} finally { off(); }
 });
 test("a completed write notifies even after unmount", async () => {
@@ -412,10 +412,26 @@ test("an explicit ok false reply fires no signal", async () => {
 	fixture({ loggedIn: true, mode: "local" }); await mount();
 	const events: string[] = [], off = onSettingsSaved((s) => events.push(s));
 	globalThis.fetch = (async () => ({ ok: true, json: async () => ({ ...initial, loggedIn: true, mode: "off", ok: false, error: "unable to save connection settings" }) })) as unknown as typeof fetch;
-	try { await click(host!.querySelector('[role="switch"]')!); assert.deepEqual(events, []); assert(text().includes("unable to save connection settings")); } finally { off(); }
+	try { await click(host!.querySelector('[role="switch"]')!); assert.deepEqual(events, []); assert.equal(host!.querySelector('[role="alert"]')?.textContent, "unable to save connection settings"); } finally { off(); }
 });
 test("a probe diagnostic that echoes the submitted token is not rendered", async () => {
 	fixture(); await mount(); await type("Base URL", "https://relay.example"); await type("Token", "SENTINEL-TOKEN-7f3a");
 	globalThis.fetch = (async () => ({ ok: true, json: async () => ({ ...initial, mode: "endpoint", endpoint: { baseUrl: "https://relay.example", tokenSet: true }, ok: true, probeError: "probe saw SENTINEL-TOKEN-7f3a" }) })) as unknown as typeof fetch;
 	await click(button("Save")); assert(!document.body.innerHTML.includes("SENTINEL-TOKEN-7f3a")); assert(!text().includes("probe saw"));
+});
+test("a non-2xx write fires no signal even when it echoes the old status", async () => {
+	fixture({ loggedIn: true, mode: "local" }); await mount();
+	const events: string[] = [], off = onSettingsSaved((s) => events.push(s));
+	globalThis.fetch = (async () => ({ ok: false, status: 500, json: async () => ({ ...initial, loggedIn: true, mode: "off", error: "unable to save connection settings" }) })) as unknown as typeof fetch;
+	try { await click(host!.querySelector('[role="switch"]')!); assert.deepEqual(events, []); assert(host!.querySelector('[role="alert"]')); assert.equal(host!.querySelector('[role="switch"]')!.getAttribute("aria-checked"), "true"); } finally { off(); }
+});
+test("the endpoint URL is sent trimmed but otherwise as typed", async () => {
+	const f = fixture(); await mount(); await type("Base URL", "  https://relay.example/prefix///  "); await type("Token", "SENTINEL-TOKEN-7f3a"); await click(button("Save"));
+	assert.deepEqual(puts(f)[0]!.body, { mode: "endpoint", baseUrl: "https://relay.example/prefix///", token: "SENTINEL-TOKEN-7f3a" });
+});
+test("a failed login POST shows the login error", async () => {
+	fixture(); await mount();
+	globalThis.fetch = (async () => ({ ok: false, status: 502, json: async () => ({ login: { state: "failed", error: "claude auth login exited with code 1" } }) })) as unknown as typeof fetch;
+	await click(button("Log in with Claude"));
+	assert.equal(host!.querySelector('[role="alert"]')?.textContent, "claude auth login exited with code 1"); assert(!text().includes("could not be changed")); assert(button("Log in with Claude"));
 });
