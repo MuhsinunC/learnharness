@@ -149,7 +149,8 @@ cleanup() {
 # Test-only hooks: bash -c COMMAND hook ARG. Quit/launch get the app path as $1;
 # LH_NO_GUI=1 skips the launch hook, open, and window-process wait.
 # ps gets the field (comm or command) and prints "pid comm" or "pid command";
-# launchctl gets the ShipIt label; lsappinfo gets the bundle id and prints each
+# launchctl gets the ShipIt label, prints launchctl-style output, and exits 0
+# when loaded or non-zero when not loaded; lsappinfo gets the bundle id and prints each
 # instance's ASN line followed by its "pid = N" line.
 # Test-only timeout overrides: QUIT_TIMEOUT=30, SHIPIT_TIMEOUT=60,
 # SHIPIT_SETTLE=5, LAUNCH_TIMEOUT=30 (all prefixed LH_MIGRATE_).
@@ -195,6 +196,9 @@ ensure_still_quit() {
         report_running
         fail 'LearnHarness was reopened during the migration. Nothing more was changed. Quit it and run again.'
     fi
+    if ship_running; then
+        fail "A LearnHarness update is still installing; try again in a minute. $state_msg"
+    fi
 }
 # The installed app's window process; its Node-mode backend runs server.js with the same executable.
 gui_running() {
@@ -206,9 +210,11 @@ gui_running() {
 ship_running() {
     label=$bundle_id.ShipIt
     if [ -n "${LH_MIGRATE_LAUNCHCTL_CMD:-}" ]; then
-        /bin/bash -c "$LH_MIGRATE_LAUNCHCTL_CMD" hook "$label" > "$tmp/launchctl" || true
-    else launchctl list "$label" > "$tmp/launchctl" 2>/dev/null || true; fi
-    if /usr/bin/grep -Eq '"PID"[[:space:]]*=' "$tmp/launchctl"; then return 0; fi
+        if /bin/bash -c "$LH_MIGRATE_LAUNCHCTL_CMD" hook "$label" > "$tmp/launchctl" 2>/dev/null; then return 0; fi
+    else
+        if launchctl list "$label" > "$tmp/launchctl" 2>/dev/null; then return 0; fi
+    fi
+    if exists "$HOME/Library/Caches/$label/ShipItState.plist"; then return 0; fi
     processes command > "$tmp/ps" || fail "Could not read the process listing. $state_msg"
     awk -v label="$label" '{sub(/^[[:space:]]*[0-9]+[[:space:]]+/,"");if(index($0,label)>0)found=1}END{exit !found}' "$tmp/ps"
 }
@@ -368,8 +374,8 @@ unique_path() {
 prepare_app() {
     new_app=$(unique_path "$apps/.LearnHarness.app.lh-new-$stamp")
     ditto "$1" "$new_app"
-    xattr -dr com.apple.quarantine "$new_app"
     codesign --verify --deep --strict "$new_app"
+    xattr -drs com.apple.quarantine "$new_app"
 }
 swap_app() {
     aside_app=$(unique_path "$apps/.LearnHarness.app.lh-old-$stamp")
@@ -377,7 +383,7 @@ swap_app() {
     if exists "$app"; then mv "$app" "$aside_app"; fi
     mv "$new_app" "$app"
     new_app=; swap_pending=no
-    if exists "$aside_app"; then rm -rf "${aside_app:?}"; fi
+    if exists "$aside_app"; then rm -rf "${aside_app:?}" || printf 'Could not remove %s; delete it yourself.\n' "$aside_app" >&2; fi
     aside_app=
 }
 # Move current data aside, then make staged dir $1 live (empty $1: leave the data path absent).
