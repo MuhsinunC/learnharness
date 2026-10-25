@@ -27,9 +27,10 @@ function fixture(overrides = {}) {
 	globalThis.fetch = (async (path, options) => {
 		const call = { path: String(path), method: options?.method ?? "GET", ...(options?.body ? { body: JSON.parse(String(options.body)) } : {}) };
 		calls.push(call);
-		assert(["/api/claude-code", "/api/claude-code/login"].includes(call.path));
+		assert(["/api/claude-code", "/api/claude-code/login", "/api/claude-code/endpoint"].includes(call.path));
 		if (call.method === "GET") get?.();
 		if (call.method === "PUT" && failure) return { ok: false, status: failure.code, json: async () => ({ error: failure!.error }) } as Response;
+		if (call.method === "DELETE") status = { ...status, mode: "off", endpoint: { baseUrl: null, tokenSet: false } };
 		if (call.method === "POST") status = { ...status, login: { state: "pending", url: "https://claude.com/login", error: null } };
 		if (call.method === "PUT") status = { ...status, mode: call.body.mode, ...(call.body.executable ? { executable: call.body.executable, discovered: null, hint: null, found: true } : {}), endpoint: call.body.baseUrl ? { baseUrl: call.body.baseUrl, tokenSet: true } : status.endpoint };
 		return { ok: true, json: async () => structuredClone(call.method === "PUT" ? { ...status, ok: true, error: null } : status) } as Response;
@@ -462,4 +463,45 @@ for (const kind of ["network", "parse", "ok false"]) test(`failed use does not r
 	try {
 		await click(button(`Use ${repair.discovered}`)); assert(host!.querySelector('[role="alert"]')); assert.deepEqual(f.calls.map(c => c.method), ["GET", "PUT"]); assert(button(`Use ${repair.discovered}`)); assert.deepEqual(events, []);
 	} finally { off(); }
+});
+
+
+test("origin changes require a freshly typed token", async () => {
+	const f = fixture({ endpoint: { baseUrl: "https://relay.example/a", tokenSet: true } }); await mount();
+	await type("Base URL", "https://other.example");
+	assert.equal(input("Token").placeholder, "Enter the token for this address");
+	assert.equal(button("Save").disabled, true);
+	await type("Token", "new-test-token");
+	assert.equal(button("Save").disabled, false);
+	await click(button("Save"));
+	assert.ok(puts(f)[0]!.body!.token === "new-test-token");
+	assert.equal(input("Token").value, "");
+	await type("Base URL", "https://another.example");
+	assert.equal(button("Save").disabled, true);
+});
+test("same-origin paths retain the saved token", async () => {
+	const f = fixture({ endpoint: { baseUrl: "https://relay.example:443/a", tokenSet: true } }); await mount();
+	await type("Base URL", "https://relay.example/b");
+	assert.equal(input("Token").placeholder, "Token saved — leave empty to keep it");
+	assert.equal(button("Save").disabled, false);
+	await click(button("Save"));
+	assert.equal(puts(f)[0]!.body!.token, undefined);
+});
+test("remove saved endpoint sends DELETE and clears the URL", async () => {
+	const f = fixture({ mode: "endpoint", endpoint: { baseUrl: "https://relay.example", tokenSet: true } }); await mount();
+	const events: string[] = []; const off = onSettingsSaved(section => events.push(section));
+	try {
+		await click(button("Remove saved endpoint"));
+		assert.deepEqual(f.calls.at(-1), { method: "DELETE", path: "/api/claude-code/endpoint" });
+		assert.equal(input("Base URL").value, "");
+		assert.equal(button("Remove saved endpoint"), undefined);
+		assert.deepEqual(events, ["keys"]);
+	} finally { off(); }
+});
+test("no saved endpoint has no remove button", async () => {
+	fixture(); await mount(); assert.equal(button("Remove saved endpoint"), undefined);
+});
+for (const baseUrl of ["http://127.0.0.1:9000", "http://localhost:9000", "https://relay.example"]) test("http warning for " + baseUrl, async () => {
+	fixture(); await mount(); await type("Base URL", baseUrl);
+	assert.equal(text().includes("This address isn't encrypted; anything else running on this computer could read the token."), baseUrl.startsWith("http:"));
 });

@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
+import { endpointOrigin } from "../core/claude-code-endpoint.ts";
 import { buildChildEnv } from "../agent/claude-code/child-env.ts";
 import { claudeCodeRegistrationExecutable, piModels } from "../agent/models.ts";
 import { applyClaudeCodeSettings, claudeCodeEnvOverride } from "./claude-code-boot.ts";
@@ -10,6 +11,7 @@ import {
 } from "./claude-code-settings.ts";
 import { clearEndpointConfig, endpointFile, endpointStatus, isAllowedEndpointUrl, validToken, writeEndpointConfig } from "./claude-code-endpoint.ts";
 
+const NEW_ENDPOINT_TOKEN = "claude-code endpoint: a new endpoint address needs its token; enter the token again";
 const UNREADABLE_ENDPOINT = "claude-code endpoint: existing endpoint credentials could not be read; re-enter the token";
 
 export type DiscoveryRoots = { pathEnv: string | undefined; home: string; fixedDirs: string[] };
@@ -256,21 +258,29 @@ function statusResponse(backed: SpawnStatus) {
 		...backed, error: claudeSettingsError() ?? backed.error, login: { ...loginState.current.login }, endpoint: endpointStatus(),
 	};
 }
-function refuseCrossOrigin(request: Request): Response | null {
+function refuseUntrusted(request: Request, { write }: { write: boolean }): Response | null {
+	const host = request.headers.get("host")?.toLowerCase();
+	const loopback = (value: string) => {
+		const match = /^(127\.0\.0\.1|localhost|\[::1\]):(\d{1,5})$/.exec(value);
+		return !!match && Number(match[2]) >= 1 && Number(match[2]) <= 65535;
+	};
 	const origin = request.headers.get("origin");
-	let mismatch = false;
+	let trusted = !!host && loopback(host);
 	if (origin !== null) {
-		try { mismatch = new URL(origin).host !== request.headers.get("host"); }
-		catch { mismatch = true; }
-	}
-	return mismatch || request.headers.get("sec-fetch-site") === "cross-site"
+		try {
+			const url = new URL(origin);
+			trusted = trusted && (url.protocol === "http:" || url.protocol === "https:") &&
+				url.host === host && loopback(url.host);
+		} catch { trusted = false; }
+	} else if (write) trusted = false;
+	return !trusted || request.headers.get("sec-fetch-site") === "cross-site"
 		? json({ error: "cross-origin request refused" }, 403) : null;
 }
 /** Status uses the registered or configured path, else the first discovered candidate.
  * A different configured path stays separate from discovered fallback and hint.
  * Version and auth fields describe discovered when present, otherwise executable. */
 export async function getClaudeCodeConnection(request: Request): Promise<Response> {
-	const refusal = refuseCrossOrigin(request);
+	const refusal = refuseUntrusted(request, { write: false });
 	if (refusal) return refusal;
 	return json(await getClaudeCodeStatus());
 }
@@ -302,6 +312,9 @@ async function putClaudeCodeConnectionLocked(body: { mode: "off" | "local" | "en
 		if (token === undefined && !stored.tokenSet) {
 			return json({ error: existsSync(endpointFile()) ? UNREADABLE_ENDPOINT : "endpoint token required" }, 400);
 		}
+		if (token === undefined && stored.tokenSet && endpointOrigin(stored.baseUrl) !== endpointOrigin(baseUrl)) {
+			return json({ error: NEW_ENDPOINT_TOKEN }, 400);
+		}
 		endpointWrite = { baseUrl, ...(token !== undefined ? { token } : {}) };
 	}
 	try { writeClaudeCodeSettings({ mode: body.mode, executable }); }
@@ -313,7 +326,7 @@ async function putClaudeCodeConnectionLocked(body: { mode: "off" | "local" | "en
 			invalidateStatusCache();
 			// The endpoint module's validation errors are fixed texts without secrets.
 			const message = error instanceof Error ? error.message : "";
-			if (message === UNREADABLE_ENDPOINT || message.startsWith("claude-code endpoint: invalid ")) return json({ error: message }, 400);
+			if (message === UNREADABLE_ENDPOINT || message === NEW_ENDPOINT_TOKEN || message.startsWith("claude-code endpoint: invalid ")) return json({ error: message }, 400);
 			return json({ error: "unable to save endpoint configuration" }, 500);
 		}
 	}
@@ -322,7 +335,7 @@ async function putClaudeCodeConnectionLocked(body: { mode: "off" | "local" | "en
 	return mutationSuccess(await getClaudeCodeStatus(validation));
 }
 async function postClaudeCodeLoginLocked(request: Request): Promise<Response> {
-	const refusal = refuseCrossOrigin(request);
+	const refusal = refuseUntrusted(request, { write: true });
 	if (refusal) return refusal;
 	const platformError = platformRefusal();
 	if (platformError) return platformError;
@@ -334,15 +347,14 @@ async function postClaudeCodeLoginLocked(request: Request): Promise<Response> {
 }
 
 async function deleteClaudeCodeEndpointLocked(request: Request): Promise<Response> {
-	const refusal = refuseCrossOrigin(request);
+	const refusal = refuseUntrusted(request, { write: true });
 	if (refusal) return refusal;
 	try { clearEndpointConfig(); }
 	catch { return json({ error: "unable to clear endpoint configuration" }, 500); }
 	invalidateStatusCache();
 	const settings = readClaudeCodeSettings();
 	if (settings.mode === "endpoint" && !claudeCodeEnvOverride().enabled) {
-		const status = await getClaudeCodeStatus();
-		try { writeClaudeCodeSettings({ mode: status.loggedIn ? "local" : "off", executable: status.discovered ?? status.executable }); }
+		try { writeClaudeCodeSettings({ mode: "off", executable: settings.executable }); }
 		catch { return json({ error: "unable to save connection settings" }, 500); }
 		applyClaudeCodeSettings();
 		invalidateStatusCache();
@@ -356,7 +368,7 @@ function mutationSuccess(status: ReturnType<typeof statusResponse>): Response {
 }
 /** Commit settings with ok:true/error:null, optional probeError, and the GET executable/discovered/hint fields. */
 export async function putClaudeCodeConnection(request: Request): Promise<Response> {
-	const refusal = refuseCrossOrigin(request);
+	const refusal = refuseUntrusted(request, { write: true });
 	if (refusal) return refusal;
 	const platformError = platformRefusal();
 	if (platformError) return platformError;
