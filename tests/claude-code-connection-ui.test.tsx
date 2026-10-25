@@ -178,16 +178,6 @@ test("GET status with an API error still shows signed-in content", async () => {
 	assert(text().includes("Signed in")); assert(text().includes("auth status timed out"));
 	assert(host!.querySelector('[role="switch"]'));
 });
-test("PUT status with an API error notifies when its mode committed", async () => {
-	fixture({ loggedIn: true, mode: "local" }); await mount();
-	globalThis.fetch = async () => ({ ok: true, json: async () => ({ ...initial, loggedIn: true, mode: "off", error: "auth status timed out" }) }) as Response;
-	const events: string[] = [], off = onSettingsSaved((section) => events.push(section));
-	try {
-		await click(host!.querySelector('[role="switch"]')!);
-		assert.equal(host!.querySelector('[role="switch"]')!.getAttribute("aria-checked"), "false");
-		assert(text().includes("auth status timed out")); assert.deepEqual(events, ["keys"]);
-	} finally { off(); }
-});
 test("endpoint saves preempt background polling and ignore its late reply", async (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
 	fixture({ login: { state: "pending", url: null } }); await mount();
@@ -314,7 +304,11 @@ for (const changed of [false, true]) test(`error-bearing write signals only a co
 	fixture({ loggedIn: true, mode: "local" }); await mount();
 	globalThis.fetch = async () => ({ ok: true, json: async () => ({ ...initial, loggedIn: true, mode: changed ? "off" : "local", error: "auth status timed out" }) }) as Response;
 	const events: string[] = [], off = onSettingsSaved(s => events.push(s));
-	try { await click(host!.querySelector('[role="switch"]')!); assert.deepEqual(events, changed ? ["keys"] : []); } finally { off(); }
+	try {
+		await click(host!.querySelector('[role="switch"]')!);
+		assert.equal(host!.querySelector('[role="switch"]')!.getAttribute("aria-checked"), changed ? "false" : "true");
+		assert(text().includes("auth status timed out")); assert.deepEqual(events, changed ? ["keys"] : []);
+	} finally { off(); }
 });
 test("a completed write notifies even after unmount", async () => {
 	fixture({ loggedIn: true, mode: "local" }); await mount(); let resolve!: (r: Response) => void;
