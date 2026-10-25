@@ -114,10 +114,10 @@ if [ -d "$data" ]; then present=yes; fi
     umask 077
     mkdir -p "$backup_root"
     # Strip ACLs before writing so nothing inherits access to sign-in files.
-    chmod -N "$backup_root"
+    chmod -N "$backup_root" 2>/dev/null || true
     chmod 700 "$backup_root"
     mkdir "$backup"
-    chmod -N "$backup"
+    chmod -N "$backup" 2>/dev/null || true
     if [ "$present" = yes ]; then
         tar -czpf "$backup/data.tar.gz" -C "$(dirname "$data")" "$(basename "$data")"
         chmod 600 "$backup/data.tar.gz"
@@ -145,7 +145,8 @@ manifest=$backup/manifest.txt
     } > "$manifest"
     chmod 600 "$manifest"
 )
-chmod -R -N "$backup"
+# Volumes without ACL support reject -N; the listing check below is the real gate.
+chmod -R -N "$backup" 2>/dev/null || true
 { ls -led "$backup_root" "$backup"; ls -leRA "$backup"; } > "$tmp/acl"
 ! /usr/bin/grep -Eq '^ [0-9]+: ' "$tmp/acl" || fail 'Could not remove access-control entries from the backup. Nothing was changed except the new backup folder.'
 printf 'Verifying data...\n'
