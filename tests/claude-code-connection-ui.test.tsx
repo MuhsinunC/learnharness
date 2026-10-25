@@ -398,3 +398,24 @@ test("a login failure after unmount clears the activation marker", async () => {
 	await act(async () => resolve({ ok: false, json: async () => ({ error: "login failed" }) } as Response));
 	assert.equal(storage.size, 0);
 });
+test("a committed write with ok and a probe diagnostic notifies and shows a muted note", async () => {
+	fixture({ loggedIn: true, mode: "local", discovered: "/Users/example/.local/bin/claude" }); await mount();
+	const events: string[] = [], off = onSettingsSaved((s) => events.push(s));
+	globalThis.fetch = (async () => ({ ok: true, json: async () => ({ ...initial, loggedIn: true, mode: "off", ok: true, probeError: "auth status timed out", error: null }) })) as unknown as typeof fetch;
+	try {
+		await click(host!.querySelector('[role="switch"]')!);
+		assert.deepEqual(events, ["keys"]); assert.equal(host!.querySelector('[role="switch"]')!.getAttribute("aria-checked"), "false");
+		assert(text().includes("auth status timed out")); assert(!host!.querySelector('[role="alert"]'));
+	} finally { off(); }
+});
+test("an explicit ok false reply fires no signal", async () => {
+	fixture({ loggedIn: true, mode: "local" }); await mount();
+	const events: string[] = [], off = onSettingsSaved((s) => events.push(s));
+	globalThis.fetch = (async () => ({ ok: true, json: async () => ({ ...initial, loggedIn: true, mode: "off", ok: false, error: "unable to save connection settings" }) })) as unknown as typeof fetch;
+	try { await click(host!.querySelector('[role="switch"]')!); assert.deepEqual(events, []); assert(text().includes("unable to save connection settings")); } finally { off(); }
+});
+test("a probe diagnostic that echoes the submitted token is not rendered", async () => {
+	fixture(); await mount(); await type("Base URL", "https://relay.example"); await type("Token", "SENTINEL-TOKEN-7f3a");
+	globalThis.fetch = (async () => ({ ok: true, json: async () => ({ ...initial, mode: "endpoint", endpoint: { baseUrl: "https://relay.example", tokenSet: true }, ok: true, probeError: "probe saw SENTINEL-TOKEN-7f3a" }) })) as unknown as typeof fetch;
+	await click(button("Save")); assert(!document.body.innerHTML.includes("SENTINEL-TOKEN-7f3a")); assert(!text().includes("probe saw"));
+});

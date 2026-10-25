@@ -3,9 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { notifySettingsSaved } from "@/components/settings-signal";
 import { Toggle } from "./controls";
-// This lane shares the pure endpoint validator directly with the server.
-// eslint-disable-next-line import/no-restricted-paths
-import { normalizeEndpointUrl } from "@/src/core/claude-code-endpoint";
+import { normalizeEndpointUrl } from "@/src/core";
 
 export const CLAUDE_LOGIN_POLL_MS = 2000;
 export const CLAUDE_LOGIN_POLL_LIMIT_MS = 600000;
@@ -18,6 +16,8 @@ type Status = {
 	executable: string | null; found: boolean; candidates?: string[] | null; version?: string | null;
 	loggedIn: boolean; account?: { email?: string | null; subscriptionType: string | null } | null;
 	login?: Login | null; endpoint?: { baseUrl: string | null; tokenSet: boolean } | null; error?: string | null;
+	// Newer servers: `ok: true` marks a committed write; `probeError` is a diagnostic, not a failure.
+	ok?: boolean; probeError?: string | null; discovered?: string | null;
 };
 type Change = { mode: Status["mode"]; baseUrl?: string; token?: string };
 function safeError(value: unknown, fallback: string, token?: string) {
@@ -65,7 +65,7 @@ export function ClaudeCodeConnection() {
 		polling.current = null; loginStarted.current = null;
 	}
 	function accept(next: Status, token?: string, syncEndpoint = false) {
-		const normalized = { ...next, account: next.account ?? null, login: next.login ?? { state: "idle" as const, url: null, error: null }, endpoint: next.endpoint ?? { baseUrl: null, tokenSet: false } };
+		const normalized = { ...next, probeError: safeError(next.probeError, "", token) || null, account: next.account ?? null, login: next.login ?? { state: "idle" as const, url: null, error: null }, endpoint: next.endpoint ?? { baseUrl: null, tokenSet: false } };
 		if (loginTimedOut.current && normalized.login.state === "pending") normalized.login = { state: "idle", url: null, error: null };
 		if (!current.current || syncEndpoint) setBaseUrl(normalized.endpoint.baseUrl ?? "");
 		if (next.mode !== "off") setBackend(next.mode);
@@ -108,7 +108,7 @@ export function ClaudeCodeConnection() {
 		try {
 			const response = await fetch(method === "POST" ? "/api/claude-code/login" : "/api/claude-code", method === "GET" ? { cache: "no-store" } : { method, headers: { "Content-Type": "application/json" }, ...(body ? { body: JSON.stringify(body) } : {}) });
 			const reply = await response.json();
-			const committed = response.ok && (reply.error == null || (typeof reply.found === "boolean" && (reply.mode !== previous?.mode || reply.active !== previous?.active)));
+			const committed = response.ok && (reply.ok === true || (reply.ok === undefined && (reply.error == null || (typeof reply.found === "boolean" && (reply.mode !== previous?.mode || reply.active !== previous?.active)))));
 			if (method === "PUT" && committed) {
 				if (!automatic) { modeGeneration.current++; clearActivation(); }
 				notifySettingsSaved("keys");
@@ -168,6 +168,7 @@ export function ClaudeCodeConnection() {
 		<span className="font-ui text-xs text-foreground">Claude</span>
 		<p className={help}>Use your Claude subscription through Claude Code on this computer.</p>
 		{error && <p role="alert" className="text-xs text-red-400">{error}</p>}
+		{status?.probeError && <p className={help}>{status.probeError}</p>}
 		{!status ? error && <Button type="button" className="self-start cursor-pointer disabled:cursor-not-allowed" size="xs" variant="outline" disabled={busy} onClick={() => void request("GET")}>Refresh</Button> : status.envOverride ? <>
 			<p className={help}>Configured by the LH_CLAUDE_CODE_EXECUTABLE environment variable.</p>
 			{status.loggedIn && <p className={help}>{signedIn}</p>}
