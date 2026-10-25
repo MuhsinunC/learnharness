@@ -5,6 +5,7 @@ import { normalizeContext } from "@earendil-works/pi-ai";
 import type { AssistantMessage, Message, ToolCall, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
 import { toLlmMessages, type LhMessage } from "../src/core/native-messages.ts";
 import { CONTINUE_TEXT, MCP_TOOL_PREFIX, PROVIDER_ID, convertPiMessages, isDroppedAssistant, mapPiToolNameToSdk, messageContentToText, sanitizeToolId, toolResultContent } from "../src/agent/claude-code/convert.ts";
+import { CONTINUE_TEXT as OPTIONS_CONTINUE_TEXT, MCP_TOOL_PREFIX as OPTIONS_MCP_TOOL_PREFIX } from "../src/agent/claude-code/query-options.ts";
 import { foldTranscript, splitPrompt, turnStart } from "../src/agent/claude-code/history.ts";
 
 const text = (text: string) => ({ type: "text" as const, text });
@@ -225,8 +226,8 @@ test("partial aborted/error assistants are dropped without splitting parallel re
 	assert.deepEqual(converted.anthropicMessages, [...convert(base).anthropicMessages, continueRecord, { role: "assistant", content: [text("done")] }]);
 	assert.equal(converted.dropped.abortedTurns, 2);
 	assert.equal(isDroppedAssistant(assistant(null as unknown as [])), true);
-	// A repeated id also belonging to a kept call must retain its result.
-	assert.equal(convert([assistant([call("X")]), { ...assistant([call("X")]), stopReason: "aborted" }, result("X")]).dropped.other.size, 0);
+	// The latest owner shadows an earlier kept call with the same id.
+	assert.equal(convert([assistant([call("X")]), { ...assistant([call("X")]), stopReason: "aborted" }, result("X")]).dropped.other.get("droppedAssistantToolResult"), 1);
 });
 
 test("splitPrompt trims dropped tails for result continuations and user retries", () => {
@@ -256,4 +257,88 @@ test("user runs replay as block arrays without absorbing results or CONTINUE rec
 	assert.deepEqual(convert([a, result("X"), ...users, result("Y"), assistant([text("done")])]).anthropicMessages.slice(2), [
 		{ role: "user", content: [text("one"), text("two"), wireImage] }, continueRecord, { role: "assistant", content: [text("done")] },
 	]);
+});
+
+
+test("interleaved results attach to their own assistant despite output index shifts", () => {
+	const wireResult = (id: string) => ({ role: "user", content: [{ type: "tool_result", tool_use_id: id, content: id, is_error: false }] });
+	const x = assistant([call("X")]);
+	const y = assistant([call("Y")]);
+	const z = assistant([call("Z")]);
+	assert.deepEqual(convert([x, y, result("X"), result("Y")]).anthropicMessages, [
+		convert([x]).anthropicMessages[0], wireResult("X"), convert([y]).anthropicMessages[0], wireResult("Y"),
+	]);
+	const history = [x, y, z, result("Y"), result("X"), result("Z")];
+	const expected = ["X", "Y", "Z"].flatMap(id => [convert([assistant([call(id)])]).anthropicMessages[0], wireResult(id)]);
+	const before = convert(history).anthropicMessages;
+	assert.deepEqual(before, expected);
+	const replay = convert([...history, assistant([text("done")]), user("next")]).anthropicMessages.slice(0, before.length);
+	assert.deepEqual(replay, before);
+	assert.equal(JSON.stringify(replay), JSON.stringify(before));
+});
+
+test("parallel results and error attachments remain with an earlier owning assistant", () => {
+	const x = assistant([call("X"), call("X2")]);
+	const y = assistant([call("Y")]);
+	const error = { ...result("X", [image]), isError: true };
+	const history = [x, y, error, user("steer"), result("Y"), result("X2")];
+	const output = convert(history).anthropicMessages;
+	assert.deepEqual(output.slice(0, 2), convert([x, error, result("X2")]).anthropicMessages);
+	assert.deepEqual(output.slice(2, 4), convert([y, result("Y")]).anthropicMessages);
+	assert.deepEqual(output[4], { role: "user", content: [text("steer")] });
+	// Unknown ids retain the preceding kept turn's orphan pairing behavior.
+	assert.deepEqual(convert([x, result("unknown")]).anthropicMessages[1]!.content,
+		[{ type: "tool_result", tool_use_id: "unknown", content: "unknown", is_error: false }]);
+});
+
+test("a dropped owner shadows earlier calls of the same id only from its own position", () => {
+	const kept = assistant([call("X")]);
+	for (const stopReason of ["aborted", "error"] as const) {
+		const history = [kept, result("X"), { ...assistant([call("X")]), stopReason }, result("X", [text("discarded")])];
+		const converted = convert(history);
+		assert.deepEqual(converted.anthropicMessages, convert([kept, result("X")]).anthropicMessages);
+		assert.equal(converted.dropped.other.get("droppedAssistantToolResult"), 1);
+		const restored = convert([...history, kept, result("X", [text("restored")])]);
+		assert.equal(restored.dropped.other.get("droppedAssistantToolResult"), 1);
+		assert.deepEqual(restored.anthropicMessages.at(-1)!.content, [{ type: "tool_result", tool_use_id: "X", content: "restored", is_error: false }]);
+	}
+});
+
+test("unknown tool result blocks retain markers and report each lost block", () => {
+	const audio = { type: "audio" };
+	assert.equal(toolResultContent([audio]), "[audio]");
+	assert.equal(toolResultContent([audio, { type: "video" }]), "[audio]\n[video]");
+	assert.equal(toolResultContent([text("heard"), audio]), "heard\n[audio]");
+	assert.equal(messageContentToText([audio]), "");
+	for (const [blocks, expected] of [
+		[[audio], "[audio]"], [[text("heard"), audio], "heard\n[audio]"],
+	] as const) {
+		const converted = convert([assistant([call("A")]), result("A", blocks as unknown as ToolResultMessage["content"])]);
+		assert.deepEqual(converted.anthropicMessages[1]!.content, [{ type: "tool_result", tool_use_id: "A", content: expected, is_error: false }]);
+		assert.equal(converted.dropped.other.get("toolResult:audio"), 1);
+	}
+	const converted = convert([assistant([call("A")]), result("A", [audio, image, audio] as unknown as ToolResultMessage["content"])]);
+	assert.equal(converted.dropped.other.get("toolResult:audio"), 2);
+	assert.deepEqual(converted.anthropicMessages[1]!.content, [{ type: "tool_result", tool_use_id: "A", content: [text("[audio]"), wireImage, text("[audio]")], is_error: false }]);
+});
+
+test("conversion re-exports shared query option constants", () => {
+	assert.equal(CONTINUE_TEXT, OPTIONS_CONTINUE_TEXT);
+	assert.equal(MCP_TOOL_PREFIX, OPTIONS_MCP_TOOL_PREFIX);
+	assert.equal(mapPiToolNameToSdk("shared", new Map()), `${OPTIONS_MCP_TOOL_PREFIX}shared`);
+	assert.deepEqual(convert([assistant([call("A")]), result("A"), assistant([text("done")])]).anthropicMessages[2],
+		{ role: "user", content: [text(OPTIONS_CONTINUE_TEXT)] });
+});
+
+test("sanitization updates and reuses a supplied occupied-id set", () => {
+	const cache = new Map<string, string>();
+	const occupied = new Set<string>();
+	const hashed = sanitizeToolId("a:b", cache, occupied);
+	assert.deepEqual(occupied, new Set([hashed]));
+	assert.equal(sanitizeToolId("a:b", cache, occupied), hashed);
+	const collision = sanitizeToolId(hashed, cache, occupied);
+	assert.notEqual(collision, hashed);
+	assert.equal(sanitizeToolId("short", cache, occupied), "short");
+	assert.deepEqual(occupied, new Set([hashed, collision, "short"]));
+	assert.deepEqual(occupied, new Set(cache.values()));
 });

@@ -2,19 +2,18 @@ import { createHash } from "node:crypto";
 import type { Message as PiMessage, ToolResultMessage } from "@earendil-works/pi-ai";
 import type { ContentBlock, Message as SessionMessage, ToolResultBlock } from "cc-session-io";
 
+import { CONTINUE_TEXT, MCP_TOOL_PREFIX } from "./query-options.ts";
+
+export { CONTINUE_TEXT, MCP_TOOL_PREFIX } from "./query-options.ts";
 export const PROVIDER_ID = "claude-code";
-// query-options.ts (lh-2c) exports the same values; deduplicate at integration.
-export const MCP_TOOL_PREFIX = "mcp__custom-tools__";
-export const CONTINUE_TEXT = "[Continue from the tool result above.]";
 
 type RedactedThinkingBlock = { type: "redacted_thinking"; data: string };
 export type AnthropicMessage = Omit<SessionMessage, "content"> & {
 	content: string | (ContentBlock | RedactedThinkingBlock)[];
 };
 
-export function sanitizeToolId(id: string, cache: Map<string, string>): string {
+export function sanitizeToolId(id: string, cache: Map<string, string>, used = new Set(cache.values())): string {
 	if (cache.has(id)) return cache.get(id)!;
-	const used = new Set(cache.values());
 	let clean = id;
 	if (!/^[a-zA-Z0-9_-]{1,64}$/.test(id) || used.has(id)) {
 		const base = id.replace(/[^a-zA-Z0-9_-]/g, "_");
@@ -26,6 +25,7 @@ export function sanitizeToolId(id: string, cache: Map<string, string>): string {
 		} while (used.has(clean));
 	}
 	cache.set(id, clean);
+	used.add(clean);
 	return clean;
 }
 
@@ -63,7 +63,10 @@ export function toolResultContent(
 ): string | ContentBlock[] {
 	if (typeof content === "string" || !Array.isArray(content)) return messageContentToText(content) || "";
 	const images = content.filter((b) => b.type === "image" && b.data && b.mimeType);
-	if (!images.length) return messageContentToText(content) || "";
+	if (!images.length) return content.flatMap((block) => {
+		if (block.type === "text") return block.text ? [block.text] : [];
+		return block.type === "image" ? [] : [`[${block.type}]`];
+	}).join("\n");
 	const blocks: ContentBlock[] = [];
 	for (const block of content) {
 		if (block.type === "text" && block.text) blocks.push({ type: "text", text: block.text });
@@ -99,23 +102,15 @@ export function convertPiMessages(
 ): { anthropicMessages: AnthropicMessage[]; sanitizedIds: Map<string, string>; dropped: DroppedContent } {
 	const anthropicMessages: AnthropicMessage[] = [];
 	const sanitizedIds = new Map<string, string>();
+	const usedIds = new Set<string>();
 	// What conversion discarded. Nothing downstream can tell: a stripped thinking
 	// block and a message that never carried one convert to the same thing, so
 	// without this the loss is invisible in the log and in a captured request.
 	const dropped: DroppedContent = { thinking: 0, abortedTurns: 0, providers: new Set(), other: new Map() };
-	// The user message collecting this assistant turn's tool results, if one has
-	// been emitted yet, and the index of the assistant message it belongs to. Both
-	// are cleared at every kept assistant message — see the toolResult branch.
-	let turnResults: { role: "user"; content: ContentBlock[] } | null = null;
-	let turnAssistantIdx: number | null = null;
-
-	const droppedToolIds = new Set<string>();
-	const keptToolIds = new Set<string>();
-	for (const msg of messages) {
-		if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
-		const ids = isDroppedAssistant(msg) ? droppedToolIds : keptToolIds;
-		for (const block of msg.content) if (block.type === "toolCall") ids.add(block.id);
-	}
+	type Turn = { assistant?: AnthropicMessage; results?: { role: "user"; content: ContentBlock[] } };
+	let currentTurn: Turn = {};
+	// Each id points to its latest preceding owner; null denotes a dropped turn.
+	const toolOwners = new Map<string, Turn | null>();
 
 	for (let index = 0; index < messages.length; index++) {
 		const msg = messages[index]!;
@@ -137,8 +132,13 @@ export function convertPiMessages(
 			}
 			anthropicMessages.push({ role: "user", content: parts.length ? parts : [{ type: "text", text: placeholder }] });
 		} else if (msg.role === "assistant") {
-			// Do NOT clear turnResults/turnAssistantIdx: parallel results survive an abort.
-			if (isDroppedAssistant(msg)) { dropped.abortedTurns++; continue; }
+			const turn: Turn = {};
+			const discarded = isDroppedAssistant(msg);
+			if (Array.isArray(msg.content)) for (const block of msg.content) {
+				if (block.type === "toolCall") toolOwners.set(block.id, discarded ? null : turn);
+			}
+			// Do NOT clear the preceding turn: parallel results survive an abort.
+			if (discarded) { dropped.abortedTurns++; continue; }
 			let previous = index - 1;
 			while (previous >= 0 && isDroppedAssistant(messages[previous]!)) previous--;
 			// Reinsert the actual prompt after hoisted results AND any intervening steer.
@@ -164,7 +164,7 @@ export function convertPiMessages(
 					}
 				} else if (block.type === "toolCall") {
 					const toolName = mapPiToolNameToSdk(block.name, customToolNameToSdk);
-					blocks.push({ type: "tool_use", id: sanitizeToolId(block.id, sanitizedIds), name: toolName, input: block.arguments ?? {} });
+					blocks.push({ type: "tool_use", id: sanitizeToolId(block.id, sanitizedIds, usedIds), name: toolName, input: block.arguments ?? {} });
 				} else {
 					dropped.other.set(block.type, (dropped.other.get(block.type) ?? 0) + 1);
 				}
@@ -173,14 +173,15 @@ export function convertPiMessages(
 			// dropped here, so keep the slot and say so. Empty content is rejected by
 			// the API, and dropping the message would break tool pairing.
 			if (!blocks.length) blocks.push({ type: "text", text: "[incompatible content omitted]" });
-			turnResults = null;
-			turnAssistantIdx = anthropicMessages.length;
-			anthropicMessages.push({ role: "assistant", content: blocks });
+			turn.assistant = { role: "assistant", content: blocks };
+			anthropicMessages.push(turn.assistant);
+			currentTurn = turn;
 		} else if (msg.role === "toolResult") {
 			// Hoist parallel results into one user message directly after their assistant.
 			// Pairing consumes pending ids at the first user message, so even a steer
 			// before the first result must move after the merged results.
-			if (droppedToolIds.has(msg.toolCallId) && !keptToolIds.has(msg.toolCallId)) {
+			const owner = toolOwners.get(msg.toolCallId);
+			if (owner === null) {
 				dropped.other.set("droppedAssistantToolResult", (dropped.other.get("droppedAssistantToolResult") ?? 0) + 1);
 				continue;
 			}
@@ -188,6 +189,11 @@ export function convertPiMessages(
 			const resultContent: ToolResultMessage["content"] = [];
 			let previousWasImage = false;
 			for (const part of msg.content) {
+				const type: string = part.type;
+				if (type !== "text" && type !== "image") {
+					const key = `toolResult:${type}`;
+					dropped.other.set(key, (dropped.other.get(key) ?? 0) + 1);
+				}
 				if (msg.isError && part.type === "image" && part.data && part.mimeType) {
 					if (!previousWasImage) resultContent.push({ type: "text", text: "(image attached after the tool results)" });
 					previousWasImage = true;
@@ -197,16 +203,18 @@ export function convertPiMessages(
 					resultContent.push(part);
 				}
 			}
-			const block: ToolResultBlock = { type: "tool_result", tool_use_id: sanitizeToolId(msg.toolCallId, sanitizedIds), content: toolResultContent(resultContent), is_error: msg.isError };
-			if (!turnResults) {
-				turnResults = { role: "user", content: [] };
-				// Without a preceding assistant, preserve order for pairing repair.
-				anthropicMessages.splice(turnAssistantIdx === null ? anthropicMessages.length : turnAssistantIdx + 1, 0, turnResults);
+			const block: ToolResultBlock = { type: "tool_result", tool_use_id: sanitizeToolId(msg.toolCallId, sanitizedIds, usedIds), content: toolResultContent(resultContent), is_error: msg.isError };
+			const turn = owner ?? currentTurn;
+			if (!turn.results) {
+				turn.results = { role: "user", content: [] };
+				// Object identity stays valid when an earlier owner's results shift output.
+				const position = turn.assistant ? anthropicMessages.indexOf(turn.assistant) + 1 : anthropicMessages.length;
+				anthropicMessages.splice(position, 0, turn.results);
 			}
-			const firstAttachment = turnResults.content.findIndex((part) => part.type !== "tool_result");
-			turnResults.content.splice(firstAttachment < 0 ? turnResults.content.length : firstAttachment, 0, block);
+			const firstAttachment = turn.results.content.findIndex((part) => part.type !== "tool_result");
+			turn.results.content.splice(firstAttachment < 0 ? turn.results.content.length : firstAttachment, 0, block);
 			if (images.length) {
-				turnResults.content.push({ type: "text", text: `Images from the error result of tool call ${msg.toolCallId} (${msg.toolName}):` }, ...images);
+				turn.results.content.push({ type: "text", text: `Images from the error result of tool call ${msg.toolCallId} (${msg.toolName}):` }, ...images);
 			}
 		}
 	}
