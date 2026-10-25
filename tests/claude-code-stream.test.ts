@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate as tick } from "node:timers/promises";
@@ -13,7 +13,7 @@ import { streamClaudeCode, resetClaudeCodeStreamForTests } from "../src/agent/cl
 import { resetClaudeCodeSlotsForTests, acquireClaudeCodeSlot } from "../src/agent/claude-code/slots.ts";
 import { OVERAGE_REFUSAL, resetOverageLatchForTests } from "../src/agent/claude-code/events.ts";
 import { buildQueryOptions, CONTINUE_TEXT } from "../src/agent/claude-code/query-options.ts";
-import { claudeCodeWorkdir } from "../src/agent/claude-code/session-file.ts";
+import { claudeCodeWorkdir, writeSessionFile } from "../src/agent/claude-code/session-file.ts";
 
 const model = { id: "test-model", api: "claude-agent-sdk", provider: "claude-code" } as Model<any>;
 const user = (content: string): Message => ({ role: "user", content, timestamp: 0 });
@@ -47,8 +47,8 @@ afterEach(async () => {
 });
 type RecordCall = { prompt: SDKUserMessage[]; options: Options; file?: string; pulls: number; interrupts: number; closes: number; returns: number };
 function fake(script: (call: RecordCall) => AsyncGenerator<SDKMessage> = async function* () { yield* turn(); }) {
-	const calls: RecordCall[] = [], warnings: string[] = [];
-	const deps = { parkQuietMs: 3, cleanupWaitMs: 5, executable: "/fake/claude", dataDir: join(root, "data"), claudeDir: join(root, "home", ".claude"), logger: { debug() {}, warn(m: string) { warnings.push(m); } },
+	const calls: RecordCall[] = [], warnings: string[] = [], debugs: string[] = [];
+	const deps = { parkQuietMs: 3, cleanupWaitMs: 5, executable: "/fake/claude", dataDir: join(root, "data"), claudeDir: join(root, "home", ".claude"), logger: { debug(m: string) { debugs.push(m); }, warn(m: string) { warnings.push(m); } },
 		loadQuery: async () => (({ prompt, options }: Parameters<typeof query>[0]) => {
 			const call: RecordCall = { prompt: [], options: options!, pulls: 0, interrupts: 0, closes: 0, returns: 0 };
 			if (options?.resume) call.file = readFileSync(join(getProjectDir(options.cwd!, deps.claudeDir), options.resume + ".jsonl"), "utf8");
@@ -63,7 +63,7 @@ function fake(script: (call: RecordCall) => AsyncGenerator<SDKMessage> = async f
 				return: async () => { call.returns++; return { done: true, value: undefined }; },
 				interrupt: async () => { call.interrupts++; }, close() { call.closes++; unblock(); } };
 		}) as unknown as typeof query };
-	return { deps, calls, warnings, run: (t = transcript(), signal?: AbortSignal) => streamClaudeCode(model, t, { signal }, deps) };
+	return { deps, calls, warnings, debugs, run: (t = transcript(), signal?: AbortSignal) => streamClaudeCode(model, t, { signal }, deps) };
 }
 async function collect(stream: ReturnType<typeof streamClaudeCode>) {
 	const events = [];
@@ -317,4 +317,87 @@ test("cleanup timeout releases permit and catches a late return rejection", asyn
 	await tick(); assert.equal(acquired, false); t.mock.timers.tick(5); await waiting; await tick();
 	assert.ok(h.warnings.some(w => w.includes("cleanup timed out"))); noFiles(h);
 	reject(new Error("late cleanup rejection")); await tick(); assert.ok(h.warnings.some(w => w.includes("late cleanup rejection")));
+});
+
+test("sequential MCP calls end after only the first parks, preserving both fallback tools", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const h = fake(async function* (c) {
+		yield sdk({ type: "assistant", message: { id: "sequential", content: [toolBlock], usage: {} } });
+		yield sdk({ type: "assistant", message: { id: "sequential", content: [{ ...toolBlock, id: "call-2" }], usage: {} } });
+		await park(c, "call-1"); await new Promise(() => {});
+	});
+	const stream = h.run(transcript(history(), [tool]));
+	await until(() => h.calls[0]?.pulls === 3); t.mock.timers.tick(3);
+	const events = await collect(stream); const done = events.filter(e => e.type === "done");
+	assert.equal(done.length, 1); assert.equal(done[0]!.reason, "toolUse");
+	assert.deepEqual(done[0]!.message.content.filter(b => b.type === "toolCall").map(b => b.id), ["call-1", "call-2"]);
+});
+
+test("abort during SDK load releases slot and session and catches late rejection", async () => {
+	process.env.LH_CLAUDE_CODE_MAX_CHILDREN = "1";
+	const h = fake(); let loading = false, reject!: (error: Error) => void;
+	h.deps.loadQuery = () => { loading = true; return new Promise((_, r) => { reject = r; }); };
+	const controller = new AbortController(); const stream = h.run(transcript(history()), controller.signal);
+	await until(() => loading);
+	const dir = getProjectDir(claudeCodeWorkdir(h.deps.dataDir), h.deps.claudeDir);
+	assert.equal(readdirSync(dir).filter(f => f.endsWith(".jsonl")).length, 1);
+	controller.abort(); const events = await collect(stream);
+	assert.equal((events.at(-1) as any).reason, "aborted"); noFiles(h);
+	let acquired = false; const waiting = acquireClaudeCodeSlot().then(release => { acquired = true; release(); });
+	await tick(); assert.equal(acquired, true); await waiting;
+	reject(new Error("late SDK load")); await tick(); assert.ok(h.warnings.some(m => m.includes("late SDK load")));
+});
+
+test("dropped history is warned once with counts and providers; clean history is silent", async () => {
+	const h = fake(); const messages = history();
+	const assistant = messages[1] as any;
+	assistant.provider = "other-provider";
+	assistant.content.unshift({ type: "thinking", thinking: "private" });
+	await collect(h.run(transcript(messages)));
+	const warnings = h.warnings.filter(m => m.includes("dropped history content:"));
+	assert.equal(warnings.length, 1);
+	assert.match(warnings[0]!, /thinking=1 providers=\[other-provider\] abortedTurns=0/);
+	const clean = fake(); await collect(clean.run(transcript(history())));
+	assert.deepEqual(clean.warnings.filter(m => m.includes("dropped history content:")), []);
+});
+
+test("sweeps exactly once for each workdir and claudeDir pair", async () => {
+	const x = fake(), y = fake();
+	y.deps.dataDir = join(root, "other-data"); y.deps.claudeDir = join(root, "other-claude");
+	const plant = (h: ReturnType<typeof fake>) => {
+		const cwd = claudeCodeWorkdir(h.deps.dataDir);
+		const file = writeSessionFile({ cwd, claudeDir: h.deps.claudeDir, model: model.id, messages: [{ role: "user", content: [{ type: "text", text: "stale" }] }] });
+		utimesSync(file.jsonlPath, new Date(0), new Date(0));
+		return file.jsonlPath;
+	};
+	const oldX = plant(x), oldY = plant(y);
+	await collect(x.run()); assert.throws(() => readFileSync(oldX), { code: "ENOENT" });
+	const retainedX = plant(x); await collect(x.run()); assert.ok(readFileSync(retainedX).length);
+	await collect(y.run()); assert.throws(() => readFileSync(oldY), { code: "ENOENT" });
+	const retainedY = plant(y); await collect(y.run()); assert.ok(readFileSync(retainedY).length);
+});
+
+test("queued cancellation removes its ticket immediately and preserves the next handoff", async () => {
+	process.env.LH_CLAUDE_CODE_MAX_CHILDREN = "1";
+	const release = await acquireClaudeCodeSlot(); const controller = new AbortController();
+	const cancelled = acquireClaudeCodeSlot(controller.signal);
+	const rejection = assert.rejects(cancelled, /aborted/);
+	let granted = false; const remaining = acquireClaudeCodeSlot().then(r => { granted = true; r(); });
+	const pool = (globalThis as any)[Symbol.for("lh.claudeCode.slots")];
+	assert.equal(pool.queue.length, 2); controller.abort(); assert.equal(pool.queue.length, 1);
+	await rejection; assert.equal(granted, false); release(); await remaining;
+	assert.equal(granted, true); assert.equal(pool.active, 0);
+});
+
+for (const message of ["Query closed before response received", "Query closed before spawn", "unexpected interrupt failure"]) test(`interrupt logging: ${message}`, async () => {
+	const h = fake(); const load = h.deps.loadQuery;
+	h.deps.loadQuery = async () => {
+		const queryFn = await load();
+		return ((params: Parameters<typeof query>[0]) => {
+			const child = queryFn(params); child.interrupt = async () => { throw new Error(message); }; return child;
+		}) as typeof query;
+	};
+	await collect(h.run(transcript(history())));
+	assert.equal(h.warnings.filter(m => m.includes(message)).length, message.startsWith("Query closed") ? 0 : 1);
+	assert.equal(h.debugs.filter(m => m.includes(message)).length, message.startsWith("Query closed") ? 1 : 0);
 });
