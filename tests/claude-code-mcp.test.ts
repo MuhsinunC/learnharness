@@ -165,6 +165,27 @@ test("snapshots descriptors without retaining the input registry", async (t) => 
 	await assert.rejects(client.callTool({ name: "added" }), /Unknown tool: added/);
 });
 
+test("deep-copies parameter schemas so in-place mutation cannot change tools/list", async (t) => {
+	const original: Tool = {
+		name: "deep",
+		description: "Deep schema",
+		parameters: Type.Object({ nested: Type.Object({ mode: Type.String() }), flag: Type.Boolean() }),
+	};
+	const { client } = await connect(t, [original]);
+	const list = () => client.request({ method: "tools/list" }, z.custom<ListToolsResult>());
+	const before = JSON.stringify(await list());
+	const schema = original.parameters as unknown as {
+		type: string;
+		required: string[];
+		properties: { nested: { properties: Record<string, unknown>; required: string[] } };
+	};
+	schema.type = "string";
+	schema.required.push("added");
+	schema.properties.nested.properties.mode = { type: "number" };
+	schema.properties.nested.required.length = 0;
+	assert.equal(JSON.stringify(await list()), before);
+});
+
 // The SDK's in-flight-handler map drops entries only after handlers settle.
 function inflight(server: ReturnType<typeof createToolServer>): number {
 	return (server.config.instance.server as unknown as {

@@ -48,11 +48,14 @@ export function createToolServer(tools: Tool[], opts: { timeoutMs: number }): {
 	calls: string[];
 } {
 	const names = new Set<string>();
+	// Deep-copy each schema so later mutation of the caller's registry cannot
+	// change what tools/list serves; validate the copy that is served.
 	const descriptors = tools.map(({ name, description, parameters }) => {
-		assertObjectSchema({ name, description, parameters });
+		const descriptor = { name, description, parameters: structuredClone(parameters) };
+		assertObjectSchema(descriptor);
 		if (names.has(name)) throw new Error(`duplicate MCP tool name: ${name}`);
 		names.add(name);
-		return { name, description, parameters };
+		return descriptor;
 	});
 	const server = new McpServer({ name: MCP_SERVER_NAME, version: "1.0.0" }, { capabilities: { tools: {} } });
 	const calls: string[] = [];
