@@ -58,6 +58,19 @@ function scenario(kind: string, entry: "catalog" | "chat" = "catalog") {
 				});
 				const first = snapshot();
 				const keys = await import(${JSON.stringify(path.join(root, "src/server/keys.ts"))});
+				if (!["accepted", "restore"].includes(${JSON.stringify(kind)})) {
+					const { default: assert } = await import("node:assert/strict");
+					const { piModels } = await import(${JSON.stringify(path.join(root, "src/agent/models.ts"))});
+					const { builtinProviders } = await import(${JSON.stringify(import.meta.resolve("@earendil-works/pi-ai/providers/all"))});
+					const { AUTH_PROVIDER_KEYS } = await import(${JSON.stringify(path.join(root, "src/core/auth-keys.ts"))});
+					assert.deepEqual(piModels().getProviders().map(p => p.id), builtinProviders().map(p => p.id));
+					assert.deepEqual(m.catalogProviders(), AUTH_PROVIDER_KEYS.map(p => ({
+						id: p.id, envVar: p.envVar, keyPresent: keys.keyValue(p.envVar) !== undefined,
+					})).sort((a, b) => a.id.localeCompare(b.id)));
+					assert.ok(m.catalogProviders().every(p => !("keyless" in p)));
+					assert.ok(m.modelCatalog().models.every(m => m.provider !== "claude-code"));
+					assert.ok([...m.catalogContextLimits().keys()].every(key => !key.startsWith("claude-code:")));
+				}
 				if (${JSON.stringify(kind)} === "restore" || ${JSON.stringify(kind)} === "late" || ${JSON.stringify(kind)} === "reject-repeat") {
 					const a = await import(${JSON.stringify(path.join(root, "src/agent/models.ts"))});
 					const b = await import(${JSON.stringify(path.join(root, "src/server/claude-code-boot.ts"))});
