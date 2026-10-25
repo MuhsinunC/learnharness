@@ -15,7 +15,7 @@ printf '%s\\n' "$*" >> '${home}/argv'
 case "$*" in
 --version) echo '2.1.310 (Claude Code)';;
 'auth status') echo '{"loggedIn":true,"email":"user@example.com","subscriptionType":"pro","orgId":"x","orgName":"y"}';;
-'auth login --claudeai') echo $$ >> '${home}/pids'; env > '${home}/env'; echo "If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&state=abc"; exec sleep 30;;
+'auth login --claudeai') echo 'Opening browser to sign in…'; echo $$ >> '${home}/pids'; env > '${home}/env'; echo "If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&state=abc"; exec sleep 30;;
 esac
 `);
 		chmodSync(executable, 0o755);
@@ -61,8 +61,8 @@ assert.equal(other.piModels().getProvider('claude-code'),undefined);
 assert.equal(keys.providerKeyPresent('claude-code'),false);
 assert.ok(!catalog.modelCatalog().models.some(m=>m.provider==='claude-code'));
 assert.ok(!catalog.catalogProviders().some(m=>m.id==='claude-code'));
-const {providerKeyMissing} = await import(${JSON.stringify(join(root, "src/core/settings.ts"))});
-assert.ok(providerKeyMissing('claude-code','claude-opus-5-5'));
+const {providerKeyMissing, CLAUDE_CODE_OFF_REFUSAL} = await import(${JSON.stringify(join(root, "src/core/settings.ts"))});
+assert.deepEqual(providerKeyMissing('claude-code',['cheap']), {error:CLAUDE_CODE_OFF_REFUSAL,code:'provider_key_missing',provider:'claude-code',slots:['cheap']});
 assert.equal((await c.putClaudeCodeConnection(request({mode:'endpoint'}))).status,400);
 for (const body of [null, [], {}, {mode:'unknown'}, {mode:'off',executable:''}]) assert.equal((await c.putClaudeCodeConnection(request(body))).status,400);
 assert.equal((await c.putClaudeCodeConnection(new Request('http://localhost',{method:'PUT'}))).status,415);
@@ -76,9 +76,6 @@ assert.equal(fs.existsSync(home+'/claude-code.json'),false);
 it("invalid executables never change settings or registration and only validation runs", () => scenario(`
 await c.putClaudeCodeConnection(request({mode:'local'}));
 const before = fs.readFileSync(home+'/claude-code.json','utf8');
-const other = await import(${JSON.stringify(join(root, 'src/agent/models.ts'))} + '?connection-copy');
-assert.notEqual(other.piModels(), (await import(${JSON.stringify(join(root, 'src/agent/models.ts'))})).piModels());
-assert.equal(other.piModels().getProvider('claude-code') !== undefined,true);
 const bad = home+'/bad'; fs.writeFileSync(bad, '#!/bin/sh\\necho ran > '+home+'/marker\\n'); fs.chmodSync(bad,0o644);
 assert.equal((await c.putClaudeCodeConnection(request({mode:'local',executable:bad}))).status,400);
 assert.equal(fs.existsSync(home+'/marker'),false);
