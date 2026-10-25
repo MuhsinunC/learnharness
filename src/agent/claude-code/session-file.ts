@@ -53,7 +53,10 @@ function recordedCwd(path: string): string | undefined {
 	}
 }
 
-/** Deletes only sessions whose recorded cwd is this workdir, plus orphaned companion dirs. */
+/**
+ * Deletes only sessions whose recorded cwd is this workdir, plus orphaned companion dirs.
+ * Liveness is in-process only: one server owns a data dir; cross-process liveness is out of scope.
+ */
 export function sweepStaleSessions(
 	cwd: string,
 	claudeDir: string,
