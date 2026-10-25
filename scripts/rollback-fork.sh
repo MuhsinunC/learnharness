@@ -70,9 +70,10 @@ fi
 ensure_still_quit
 if [ "$present" = yes ]; then
     swap_data "$stage/$archive_name"
-    rmdir "$stage"
-    stage=
 else swap_data ''; fi
+state_msg='The backup data is restored, but the app is not. Rerun the rollback to finish.'
+if [ "$aside_data" != none ]; then state_msg="$state_msg Your previous data is preserved at $aside_data."; fi
+if [ -n "$stage" ]; then rmdir "$stage"; stage=; fi
 if [ "$old_path" != none ]; then
     ensure_still_quit
     swap_app
