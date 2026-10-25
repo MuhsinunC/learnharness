@@ -257,6 +257,32 @@ test("fallback quiet window collects both frames of the same assistant message",
 	assert.deepEqual(done[0]!.message.content.filter(b => b.type === "toolCall").map(b => b.id), ["call-1", "call-2"]);
 });
 
+test("streaming turn ignores a parked call across the quiet window and ends at message_stop", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	let second!: () => void;
+	const wait = new Promise<void>(resolve => { second = resolve; });
+	const h = fake(async function* (c) {
+		yield event("message_start", { message: { id: "streamed", usage: {} } });
+		yield event("content_block_start", { index: 0, content_block: toolBlock });
+		yield event("content_block_stop", { index: 0 });
+		void park(c, "call-1"); await wait;
+		yield event("content_block_start", { index: 1, content_block: { ...toolBlock, id: "call-2" } });
+		yield event("content_block_stop", { index: 1 });
+		yield event("message_delta", { delta: { stop_reason: "tool_use" }, usage: {} });
+		yield event("message_stop");
+		await new Promise(() => {});
+	});
+	h.deps.parkQuietMs = 20;
+	const stream = h.run(transcript(history(), [tool]));
+	await until(() => h.calls[0]?.pulls === 4);
+	t.mock.timers.tick(50); await tick(); assert.equal(h.calls[0]!.closes, 0);
+	second(); const events = await collect(stream);
+	const done = events.filter(e => e.type === "done"); assert.equal(done.length, 1);
+	assert.equal(done[0]!.reason, "toolUse");
+	assert.deepEqual(done[0]!.message.content.filter(b => b.type === "toolCall").map(b => b.id), ["call-1", "call-2"]);
+	assert.equal(h.calls[0]!.closes, 1);
+});
+
 test("parked tool with unfinished argument deltas cannot end during quiet window", async (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout"] });
 	const h = fake(async function* (c) {

@@ -531,6 +531,20 @@ test("R2-F3 review: superseding the last fallback tool preserves a later continu
  assertDone(h, "stop"); assert.equal(hooks, 0);
 });
 
+test("currentRequestStreamed is true only for a request opened by message_start", () => {
+ const h = harness();
+ assert.equal(h.mapper.currentRequestStreamed, false);
+ h.send(assistant("fallback", [{ type: "tool_use", id: "fb", name: "mcp__custom-tools__bash", input: {} }]));
+ assert.equal(h.mapper.currentRequestStreamed, false);
+ h.mapper.fail("error", "test cleanup");
+ const s = harness();
+ s.send(start("streamed"), block(0, { type: "tool_use", id: "st", name: "mcp__custom-tools__bash", input: {} }), stop(0));
+ assert.equal(s.mapper.currentRequestStreamed, true);
+ s.send(assistant("streamed", [{ type: "tool_use", id: "st", name: "mcp__custom-tools__bash", input: {} }]));
+ assert.equal(s.mapper.currentRequestStreamed, true);
+ s.mapper.fail("error", "test cleanup");
+});
+
 test("hasOpenBlocks tracks tool argument streaming", () => {
  const h = harness();
  assert.equal(h.mapper.hasOpenBlocks, false);

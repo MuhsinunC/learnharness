@@ -45,13 +45,14 @@ export function streamClaudeCode(model: Model<any>, transcript: TranscriptContex
 		}
 		/** Fallback frames describe a complete API response and arrive back to back before tools/call.
 		 * Parking the first call means those frames arrived; MCP calls may run sequentially, so
-		 * later calls cannot arrive while the first is parked. Streaming ends at message_stop. */
+		 * later calls cannot arrive while the first is parked. A request that has seen stream
+		 * events ends only at message_stop, so parks never end it. */
 		function checkParked(): void {
 			clearTimeout(parkTimer);
 			if (mapper.ended) return;
 			parkTimer = setTimeout(() => {
 				const ids = mapper.output.content.filter(b => b.type === "toolCall").map(b => b.id);
-				if (!mapper.ended && !mapper.hasOpenBlocks && ids.some(id => server?.calls.includes(id))) mapper.endToolTurn("tool call parked after quiet window");
+				if (!mapper.ended && !mapper.currentRequestStreamed && !mapper.hasOpenBlocks && ids.some(id => server?.calls.includes(id))) mapper.endToolTurn("tool call parked after quiet window");
 			}, deps.parkQuietMs ?? 2000);
 		}
 
