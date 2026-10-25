@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { zeroKeysVerdict, hasKeylessProvider, hasProviderKey, strongKeyless, ZeroKeysPill } from "../components/setup-cta.tsx";
+import { preSendRemedy, zeroKeysVerdict, hasKeylessProvider, hasProviderKey, strongKeyless, ZeroKeysPill } from "../components/setup-cta.tsx";
 import type { ModelCatalogResponse } from "../src/core/index.ts";
 import { SetupKeysBody } from "../components/setup-dialog.tsx";
 import { DICTATION_KEYLESS, DEEPGRAM_KEY_ID } from "../components/dictation.tsx";
@@ -166,10 +166,10 @@ describe("strongKeyless — the pre-send guard's truth (owner interlude, no-orph
 
 describe("keyless provider availability for the zero-keys guard", () => {
 	it("only a known catalog without keyless providers requires key setup", () => {
-		assert.equal(zeroKeysVerdict(true, undefined), false);
-		assert.equal(zeroKeysVerdict(true, catalog(null)), true);
-		assert.equal(zeroKeysVerdict(false, undefined), false);
-		assert.equal(zeroKeysVerdict(false, catalog(null)), false);
+		assert.equal(zeroKeysVerdict(true, undefined, false), false);
+		assert.equal(zeroKeysVerdict(true, catalog(null), false), true);
+		assert.equal(zeroKeysVerdict(false, undefined, false), false);
+		assert.equal(zeroKeysVerdict(false, catalog(null), false), false);
 		const unavailable = catalog(null);
 		unavailable.providers.push({ id: "claude-code", envVar: "LH_CLAUDE_CODE_EXECUTABLE", keyless: true, keyPresent: false });
 		assert.equal(hasKeylessProvider(unavailable), false);
@@ -181,13 +181,53 @@ describe("keyless provider availability for the zero-keys guard", () => {
 		const { modelCatalog } = await import("../src/server/model-catalog.ts");
 		try {
 			enableClaudeCodeProvider("/nonexistent/claude");
-			assert.equal(zeroKeysVerdict(!hasProviderKey([], undefined), modelCatalog()), false);
-			assert.equal(zeroKeysVerdict(false, modelCatalog()), false);
+			assert.equal(zeroKeysVerdict(!hasProviderKey([], undefined), modelCatalog(), false), false);
+			assert.equal(zeroKeysVerdict(false, modelCatalog(), false), false);
 		} finally {
 			resetClaudeCodeProviderForTests();
 		}
 		assert.equal(modelCatalog().providers.some((p) => p.keyless), false);
 		assert.equal(hasKeylessProvider(modelCatalog()), false);
-		assert.equal(zeroKeysVerdict(true, modelCatalog()), true);
+		assert.equal(zeroKeysVerdict(true, modelCatalog(), false), true);
+	});
+});
+
+
+describe("zeroKeysVerdict catalog states", () => {
+	const keyless = catalog("claude-code", "claude-code");
+	keyless.providers[0]!.keyless = true;
+	for (const zeroKeys of [true, false]) {
+		for (const [name, value, failed, needsKey] of [
+			["loading", undefined, false, false],
+			["failed", undefined, true, true],
+			["known without keyless", catalog(null), false, true],
+			["known with keyless", keyless, false, false],
+		] as const) {
+			it(`zeroKeys=${zeroKeys}, catalog=${name}`, () => {
+				assert.equal(zeroKeysVerdict(zeroKeys, value, failed), zeroKeys && needsKey);
+			});
+		}
+	}
+});
+
+describe("preSendRemedy", () => {
+	it("a disabled Claude Code strong pin needs a notice even when no keys exist", () => {
+		assert.equal(preSendRemedy(false, catalog("claude-code")), "notice");
+		assert.equal(preSendRemedy(true, catalog("claude-code")), "notice");
+	});
+
+	it("an available Claude Code pin can proceed", () => {
+		assert.equal(preSendRemedy(false, catalog("claude-code", "claude-code")), null);
+	});
+
+	it("other missing keys still need setup", () => {
+		assert.equal(preSendRemedy(false, catalog("openrouter")), "setup");
+		assert.equal(preSendRemedy(true, catalog("openrouter", "openrouter")), "setup");
+	});
+
+	it("an unknown catalog follows keys truth and available providers can proceed", () => {
+		assert.equal(preSendRemedy(true, undefined), "setup");
+		assert.equal(preSendRemedy(false, undefined), null);
+		assert.equal(preSendRemedy(false, catalog("openrouter", "openrouter")), null);
 	});
 });

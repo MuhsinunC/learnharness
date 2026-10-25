@@ -7,7 +7,7 @@ import { GraphView } from "@/components/graph-view";
 import { MinimalHome } from "@/components/minimal-home";
 import { SetupDialog } from "@/components/setup-dialog";
 import { ComposerActions, NodePickerControl } from "@/components/composer-actions";
-import { useStrongKeyless, useZeroKeys, ZeroKeysPill } from "@/components/setup-cta";
+import { ClaudeCodeOffNotice, usePreSendRemedy, useZeroKeys, ZeroKeysPill } from "@/components/setup-cta";
 import { DictationBar, joinDictation, useDictation } from "@/components/dictation";
 import { useFieldCycle } from "@/components/field-cycle";
 import { SidebarToggle } from "@/components/sidebar";
@@ -46,10 +46,8 @@ export function Home({
 	// The zero-keys truth (zero-keys wave): no provider key = the pill
 	// takes precedence over the models CTA (keys come first in the chain).
 	const zeroKeys = useZeroKeys();
-	// The strong slot's keyless truth (pre-send key guards, owner interlude
-	// 2026-09-25): keys may exist generally while the STRONG slot's pinned
-	// provider has none — the same skip-everything treatment on send.
-	const strongKeyless = useStrongKeyless();
+	const remedy = usePreSendRemedy(zeroKeys);
+	const [noticeShown, setNoticeShown] = useState(false);
 	const [setupOpen, setSetupOpen] = useState(false);
 	// Voice dictation (STT wave, 2026-09-17): finals append at the end of the
 	// topic draft; the strip lives in the stats bar's middle slot.
@@ -119,15 +117,10 @@ export function Home({
 			setSetupOpen(true);
 			return;
 		}
-		// The pre-send KEY guards (owner interlude, no-orphan-chats): the
-		// models case guards BEFORE creation; the key cases must too — a
-		// refused first send would otherwise leave an orphan error-shell
-		// chat in the sidebar (the 503 lands only after POST /api/chats
-		// already created the record). Same skip-everything-and-open-setup
-		// treatment; the server's 503 gate remains the belt for /chat/[id]
-		// sessions.
-		if (zeroKeys || strongKeyless) {
-			setSetupOpen(true);
+		// Refuse before creating an orphan session; subscription pins need a notice.
+		if (remedy) {
+			if (remedy === "notice") setNoticeShown(true);
+			else setSetupOpen(true);
 			return;
 		}
 		setBusy(true);
@@ -226,7 +219,9 @@ export function Home({
 								onClear={() => setPracticeProps([])}
 							/>
 						)}
-						setup={zeroKeys ? (
+						setup={noticeShown && remedy === "notice" ? (
+							<ClaudeCodeOffNotice />
+						) : zeroKeys ? (
 							<ZeroKeysPill inline onOpen={() => setSetupOpen(true)} />
 						) : (
 							!configured && (

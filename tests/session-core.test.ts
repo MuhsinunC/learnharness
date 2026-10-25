@@ -1113,3 +1113,43 @@ describe("absorbed — the custom role (the doubled thinking card)", () => {
 		assert.equal((customs[0] as { id?: string }).id, "srv_1");
 	});
 });
+
+describe("refusal recovery", () => {
+	it("recovers send readiness without clearing the subscription refusal banner", async () => {
+		const { providerKeyMissing } = await import("../src/core/settings.ts");
+		const envelope = JSON.stringify(providerKeyMissing("claude-code", ["strong"]));
+		let posts = 0;
+		const model = new SessionModel({ chatId: "chat_x", initialMessages: [], fetch: (async () => {
+			posts++;
+			assert.equal(model.getState().error, null, "sending clears the previous banner");
+			return new Response(envelope, { status: 503 });
+		}) as typeof fetch });
+		await model.send({ type: "text", text: "first" });
+		assert.equal(model.status, "error");
+		assert.equal(model.readyRef, false);
+		model.recoverFromError();
+		assert.equal(model.status, "ready");
+		assert.equal(model.readyRef, true);
+		assert.equal(model.getState().error?.message, envelope);
+		await model.send({ type: "text", text: "retry" });
+		assert.equal(posts, 2);
+		model.recoverFromError();
+		model.clearError();
+		assert.equal(model.getState().error, null);
+		assert.equal(model.status, "ready");
+	});
+
+	it("recovery is a no-op outside error status", async () => {
+		let finishPost!: (response: Response) => void;
+		const model = new SessionModel({ chatId: "chat_x", initialMessages: [], fetch: (() => new Promise<Response>((resolve) => { finishPost = resolve; })) as typeof fetch });
+		model.recoverFromError();
+		assert.equal(model.status, "ready");
+		const sending = model.send({ type: "text", text: "pending" });
+		assert.equal(model.status, "submitted");
+		model.recoverFromError();
+		assert.equal(model.status, "submitted");
+		assert.equal(model.readyRef, false);
+		finishPost(new Response("unavailable", { status: 503 }));
+		await sending;
+	});
+});

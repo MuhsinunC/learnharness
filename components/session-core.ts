@@ -739,6 +739,10 @@ export class SessionModel {
 	/** The mount/sync continuation fold (native-messages.ts). */
 	static needsContinuation = needsContinuation;
 
+	recoverFromError(): void {
+		if (this.statusValue === "error") this.setStatus("ready");
+	}
+
 	clearError(): void {
 		this.setError(null);
 	}

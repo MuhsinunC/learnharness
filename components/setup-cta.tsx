@@ -16,6 +16,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { CLAUDE_CODE_OFF_REFUSAL } from "@/src/core";
 import type { AuthKeyStatus } from "@/src/core";
 import { classifyKeys, type ProviderKeyInfo } from "@/components/settings/keys-section";
 import { useModelCatalog } from "@/components/model-picker";
@@ -39,9 +40,9 @@ export function hasKeylessProvider(catalog: ModelCatalogResponse | undefined): b
 	return catalog?.providers.some((p) => p.keyless && p.keyPresent) ?? false;
 }
 
-/** Unknown catalog availability must not intercept a send. */
-export function zeroKeysVerdict(zeroKeys: boolean, catalog: ModelCatalogResponse | undefined): boolean {
-	return zeroKeys && catalog !== undefined && !hasKeylessProvider(catalog);
+/** Loading is unknown; a failed catalog falls back to the keys answer. */
+export function zeroKeysVerdict(zeroKeys: boolean, catalog: ModelCatalogResponse | undefined, catalogFailed: boolean): boolean {
+	return catalog === undefined ? zeroKeys && catalogFailed : zeroKeys && !hasKeylessProvider(catalog);
 }
 
 /** The zero-keys truth for the calling page: TRUE only after a
@@ -51,7 +52,7 @@ export function zeroKeysVerdict(zeroKeys: boolean, catalog: ModelCatalogResponse
  *  leans on). Re-reads on the keys signal. */
 export function useZeroKeys(): boolean {
 	const [zeroKeys, setZeroKeys] = useState(false);
-	const { catalog, refresh } = useModelCatalog();
+	const { catalog, failed, refresh } = useModelCatalog();
 	const read = useCallback(() => {
 		fetch("/api/keys")
 			.then((r) => r.json())
@@ -69,7 +70,7 @@ export function useZeroKeys(): boolean {
 			refresh();
 		}
 	});
-	return zeroKeysVerdict(zeroKeys, catalog);
+	return zeroKeysVerdict(zeroKeys, catalog, failed);
 }
 
 /** The pill itself — the models CTA's chrome and placement, the keys
@@ -102,14 +103,28 @@ export function strongKeyless(catalog: ModelCatalogResponse | undefined): boolea
 	return !catalog.providers.some((p) => p.id === strong.model.provider && p.keyPresent);
 }
 
+export function preSendRemedy(zeroKeys: boolean, catalog: ModelCatalogResponse | undefined): "setup" | "notice" | null {
+	const missing = strongKeyless(catalog);
+	if (missing && catalog?.slots.strong?.model.provider === "claude-code") return "notice";
+	return zeroKeys || missing ? "setup" : null;
+}
+
+export function ClaudeCodeOffNotice() {
+	return (
+		<div data-testid="claude-code-off-notice" className="rounded-lg border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm">
+			{CLAUDE_CODE_OFF_REFUSAL}
+		</div>
+	);
+}
+
 /** The strong-slot keyless truth for the PRE-SEND guard (home / /chat/new):
  *  the catalog seam with re-reads on BOTH signals that can flip it — "keys"
  *  (a provider key saved or deleted) and "models" (the strong slot
  *  re-pinned). Live-updates with the page, never mid-send. */
-export function useStrongKeyless(): boolean {
+export function usePreSendRemedy(zeroKeys: boolean): "setup" | "notice" | null {
 	const { catalog, refresh } = useModelCatalog();
 	useSettingsSaved((section) => {
 		if (section === "keys" || section === "models") refresh();
 	});
-	return strongKeyless(catalog);
+	return preSendRemedy(zeroKeys, catalog);
 }
