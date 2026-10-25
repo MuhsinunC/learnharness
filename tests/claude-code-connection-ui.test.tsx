@@ -2,15 +2,18 @@ import React, { act } from "react";
 (globalThis as Record<string, unknown>).React = React;
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
-import { createRoot, type Root } from "react-dom/client";
-import { renderToStaticMarkup } from "react-dom/server";
+import type { Root } from "react-dom/client";
 import { parseHTML } from "linkedom";
-import { ClaudeCodeConnection, CLAUDE_LOGIN_POLL_MS, CLAUDE_LOGIN_POLL_LIMIT_MS } from "../components/settings/claude-code-connection.tsx";
-import { SubscriptionConnections, NativeSubscriptionUIProvider } from "../components/settings/subscription-connections.tsx";
-import { ChatGPTUIProvider } from "../components/settings/chatgpt-connection.tsx";
-import { onSettingsSaved } from "../components/settings-signal.ts";
 const dom = parseHTML("<html><body></body></html>");
 Object.assign(globalThis, { window: dom.window, document: dom.document, Element: dom.window.Element, HTMLElement: dom.window.HTMLElement, CustomEvent: dom.window.CustomEvent, IS_REACT_ACT_ENVIRONMENT: true });
+// Enable React's input-event detection before loading the DOM renderer.
+document.oninput = null;
+const { createRoot } = await import("react-dom/client");
+const { renderToStaticMarkup } = await import("react-dom/server");
+const { ClaudeCodeConnection, CLAUDE_LOGIN_POLL_MS, CLAUDE_LOGIN_POLL_LIMIT_MS } = await import("../components/settings/claude-code-connection.tsx");
+const { SubscriptionConnections, NativeSubscriptionUIProvider } = await import("../components/settings/subscription-connections.tsx");
+const { ChatGPTUIProvider } = await import("../components/settings/chatgpt-connection.tsx");
+const { onSettingsSaved } = await import("../components/settings-signal.ts");
 const originalFetch = globalThis.fetch;
 let root: Root | undefined, host: HTMLDivElement | undefined;
 const initial = { mode: "off", envOverride: false, active: false, executable: "/Users/example/.local/bin/claude", found: true, loggedIn: false, account: null, login: { state: "idle", url: null as string | null, error: null as string | null }, endpoint: { baseUrl: null as string | null, tokenSet: false }, error: null };
@@ -38,7 +41,8 @@ const button = (label: string) => [...host!.querySelectorAll<HTMLButtonElement>(
 async function click(element: HTMLElement) { assert(element); await act(async () => element.click()); }
 async function type(label: string, value: string) {
 	await act(async () => {
-		const element = input(label); element.value = value;
+		const element = input(label);
+		Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value")!.set!.call(element, value);
 		element.dispatchEvent(new window.Event("input", { bubbles: true }));
 	});
 }
@@ -165,4 +169,65 @@ test("pending login polls preserve the custom endpoint URL draft", async (t) => 
 	assert.deepEqual(puts(f)[0]!.body, { mode: "local" });
 	await type("Token", "SENTINEL-TOKEN-7f3a");
 	await click(button("Save")); assert.deepEqual(puts(f)[1]!.body, { mode: "endpoint", baseUrl: "https://relay.example", token: "SENTINEL-TOKEN-7f3a" });
+});
+
+test("GET status with an API error still shows signed-in content", async () => {
+	fixture({ loggedIn: true, mode: "local", error: "auth status timed out" }); await mount();
+	assert(text().includes("Signed in")); assert(text().includes("auth status timed out"));
+	assert(host!.querySelector('[role="switch"]'));
+});
+test("PUT status with an API error updates the card without a refresh signal", async () => {
+	fixture({ loggedIn: true, mode: "local" }); await mount();
+	globalThis.fetch = async () => ({ ok: true, json: async () => ({ ...initial, loggedIn: true, mode: "off", error: "auth status timed out" }) }) as Response;
+	const events: string[] = [], off = onSettingsSaved((section) => events.push(section));
+	try {
+		await click(host!.querySelector('[role="switch"]')!);
+		assert.equal(host!.querySelector('[role="switch"]')!.getAttribute("aria-checked"), "false");
+		assert(text().includes("auth status timed out")); assert.deepEqual(events, []);
+	} finally { off(); }
+});
+test("endpoint saves preempt background polling and ignore its late reply", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+	fixture({ login: { state: "pending", url: null } }); await mount();
+	let resolve!: (value: Response) => void;
+	const calls: Call[] = [];
+	globalThis.fetch = (async (path, options) => {
+		const method = options?.method ?? "GET";
+		calls.push({ path: String(path), method, ...(options?.body ? { body: JSON.parse(String(options.body)) } : {}) });
+		if (method === "GET") return new Promise<Response>((done) => { resolve = done; });
+		return { ok: true, json: async () => ({ ...initial, mode: "endpoint", endpoint: { baseUrl: "https://relay.example", tokenSet: true } }) } as Response;
+	}) as typeof fetch;
+	await act(async () => t.mock.timers.tick(CLAUDE_LOGIN_POLL_MS));
+	assert(!input("Base URL").disabled); assert(!input("Token").disabled); assert(!button("Save").disabled);
+	await type("Base URL", "https://relay.example"); await type("Token", "SENTINEL-TOKEN-7f3a");
+	await click(button("Save")); assert.equal(calls.filter((call) => call.method === "PUT").length, 1);
+	assert(button("Stop using endpoint"));
+	await act(async () => resolve({ ok: true, json: async () => ({ ...initial, loggedIn: true, mode: "off" }) } as Response));
+	assert(button("Stop using endpoint")); assert(!host!.querySelector('[role="switch"]'));
+	assert.equal(calls.filter((call) => call.method === "PUT").length, 1);
+});
+test("status-bearing PUT errors redact the submitted token", async () => {
+	fixture(); await mount(); await type("Base URL", "https://relay.example"); await type("Token", "SENTINEL-TOKEN-7f3a");
+	globalThis.fetch = async () => ({ ok: true, json: async () => ({ ...initial, mode: "endpoint", endpoint: { baseUrl: "https://relay.example", tokenSet: true }, error: "bad relay SENTINEL-TOKEN-7f3a" }) }) as Response;
+	const events: string[] = [], off = onSettingsSaved((section) => events.push(section));
+	try {
+		await click(button("Save")); assert(button("Stop using endpoint")); assert.equal(input("Token").value, "");
+		assert(!document.body.innerHTML.includes("SENTINEL-TOKEN-7f3a")); assert(text().includes("The Claude connection could not be changed. Try again.")); assert.deepEqual(events, []);
+	} finally { off(); }
+});
+test("Base URL changes through React onChange without controlled-input warnings", async (t) => {
+	const errors: unknown[][] = []; t.mock.method(console, "error", (...args: unknown[]) => errors.push(args));
+	fixture(); await mount(); await type("Base URL", "https://relay.example");
+	assert.equal(input("Base URL").value, "https://relay.example"); assert.deepEqual(errors, []);
+});
+test("a held background poll expires at the login deadline", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+	fixture({ login: { state: "pending", url: null } }); await mount();
+	let resolve!: (value: Response) => void;
+	globalThis.fetch = () => new Promise<Response>((done) => { resolve = done; });
+	await act(async () => t.mock.timers.tick(CLAUDE_LOGIN_POLL_MS));
+	await act(async () => t.mock.timers.tick(CLAUDE_LOGIN_POLL_LIMIT_MS));
+	assert(text().includes("Sign-in timed out. Try again.")); assert(!button("Log in with Claude").disabled);
+	await act(async () => resolve({ ok: true, json: async () => ({ ...initial, loggedIn: true }) } as Response));
+	assert(button("Log in with Claude")); assert(!host!.querySelector('[role="switch"]'));
 });
