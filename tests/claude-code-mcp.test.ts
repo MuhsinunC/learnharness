@@ -1,0 +1,266 @@
+import assert from "node:assert/strict";
+import { setImmediate as tick } from "node:timers/promises";
+import { test, type TestContext } from "node:test";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type { Tool } from "@earendil-works/pi-ai";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { Type } from "typebox";
+import { z } from "zod";
+import type { ListToolsResult } from "@modelcontextprotocol/sdk/types.js";
+import { createToolServer } from "../src/agent/claude-code/mcp-server.ts";
+import { MCP_TOOL_PREFIX } from "../src/agent/claude-code/query-options.ts";
+import { createProberTools, createTeacherTools, type ProberToolContext } from "../src/agent/tools.ts";
+import { practiceTools } from "../src/agent/tools/practice.ts";
+import { bareQuestionTools } from "../src/agent/teacher-agent.ts";
+import { createDemoBuilderTools } from "../src/agent/subagents/demo-builder.ts";
+import { createPdfTools } from "../src/agent/subagents/pdf-reader.ts";
+import { createVisualTools } from "../src/agent/subagents/visual-maker.ts";
+import { createWebTools } from "../src/agent/tools/web.ts";
+import { createPdfReadTools } from "../src/agent/tools/pdf-read.ts";
+import { auditorGraphTools } from "../src/agent/tools/graph.ts";
+
+const parameters = Type.Object({
+	nested: Type.Object({ mode: Type.Union([Type.Literal("first"), Type.Literal("second")]) }),
+});
+const tool: Tool = { name: "nested", description: "Nested schema", parameters };
+
+async function connect(t: TestContext, tools: Tool[] = [tool]) {
+	const server = createToolServer(tools, { timeoutMs: 3_600_000 });
+	const client = new Client({ name: "test", version: "1.0.0" });
+	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+	t.after(async () => {
+		server.closeAll("test cleanup");
+		await client.close();
+		await server.config.instance.close();
+	});
+	await server.config.instance.connect(serverTransport);
+	await client.connect(clientTransport);
+	return { ...server, client };
+}
+
+test("serves TypeBox schemas verbatim and configures the SDK timeout", async (t) => {
+	const { config, client } = await connect(t);
+	assert.equal(config.timeout, 3_600_000);
+	assert.equal(config.type, "sdk");
+	assert.equal(config.name, "custom-tools");
+	assert.equal(MCP_TOOL_PREFIX, "mcp__custom-tools__");
+	const { tools } = await client.listTools();
+	assert.equal(tools.length, 1);
+	assert.ok(tools[0]);
+	assert.equal(tools[0].name, tool.name);
+	assert.equal(tools[0].description, tool.description);
+	assert.deepEqual(tools[0].inputSchema, parameters);
+	// Client.listTools parses with Zod and reorders top-level schema keys.
+	// Read the same wire response without transforming it for the byte check.
+	const wire = await client.request({ method: "tools/list" }, z.custom<ListToolsResult>());
+	assert.ok(wire.tools[0]);
+	assert.equal(JSON.stringify(wire.tools[0].inputSchema), JSON.stringify(parameters));
+});
+
+test("parks parallel calls without executing, then closes once including late calls", async (t) => {
+	const execute = t.mock.fn(async () => ({ content: [], details: null }));
+	const spyTool: AgentTool<typeof parameters> = { ...tool, parameters, label: "nested", execute };
+	const { client, calls, closeAll } = await connect(t, [spyTool]);
+	const call = (id: string) => client.callTool({
+		name: tool.name,
+		// Deliberately schema-invalid: the endpoint must not validate arguments.
+		arguments: { nested: false },
+		_meta: { "claudecode/toolUseId": id },
+	});
+	const first = call("one");
+	const second = call("two");
+	assert.equal(await Promise.race([first, second, tick().then(() => "pending")]), "pending");
+	assert.deepEqual(calls, ["one", "two"]);
+	assert.equal(execute.mock.callCount(), 0);
+	closeAll("reason text");
+	closeAll("ignored");
+	const expected = {
+		content: [{ type: "text", text: "reason text" }],
+		isError: true,
+		_meta: { "claude/endTurn": true },
+	};
+	assert.deepEqual(await first, expected);
+	assert.deepEqual(await second, expected);
+	assert.deepEqual(await call("late"), expected);
+	assert.deepEqual(calls, ["one", "two", "late"]);
+	assert.equal(execute.mock.callCount(), 0);
+});
+
+test("rejects unknown names and missing or non-string toolUseId without recording them", async (t) => {
+	const { client, calls } = await connect(t);
+	await assert.rejects(client.callTool({ name: "unknown" }), /Unknown tool: unknown/);
+	for (const _meta of [undefined, {}, { "claudecode/toolUseId": 42 }]) {
+		await assert.rejects(client.callTool({ name: tool.name, _meta }),
+			/nested: tools\/call is missing _meta\["claudecode\/toolUseId"\]/);
+	}
+	assert.deepEqual(calls, []);
+});
+
+test("rejects non-object schemas at construction with the tool name", () => {
+	for (const parameters of [Type.String(), Type.Array(Type.String())]) {
+		assert.throws(() => createToolServer([{ ...tool, parameters }], { timeoutMs: 1 }),
+			/nested: MCP tool parameters must be an object schema/);
+	}
+});
+
+// Construction-only contexts: no tool executes or touches storage/headless APIs.
+export function assertLhToolSets(): number {
+	const ctx: ProberToolContext = {
+		chatId: "test",
+		chatStore: { getChat: () => null } as unknown as ProberToolContext["chatStore"],
+		jobStore: {} as ProberToolContext["jobStore"],
+		graphStore: {} as NonNullable<ProberToolContext["graphStore"]>,
+		deliver: () => {},
+		spawn: () => {},
+	};
+	const graph = { chatStore: ctx.chatStore, graphStore: ctx.graphStore! };
+	const registries = [
+		createProberTools(ctx), createProberTools(ctx, { explain: true }),
+		createTeacherTools(ctx), createTeacherTools(ctx, { explain: true }),
+		practiceTools({ ...ctx, graph, jobs: ctx }), bareQuestionTools(),
+		createDemoBuilderTools({ html: null, testedHtml: null, lastResult: null },
+			{} as Parameters<typeof createDemoBuilderTools>[1]),
+		createPdfTools("unused.pdf"), createVisualTools(), createWebTools(() => null),
+		createPdfReadTools("unused-dir"), auditorGraphTools(graph),
+	];
+	// Extraction's submit schemas and runSubmitAgent's inline registry are
+	// private; covering those requires an export outside this lane's scope.
+	let count = 0;
+	for (const registry of registries) {
+		const tools = Object.values(registry);
+		const server = createToolServer(tools, { timeoutMs: 1 });
+		server.closeAll("schema sweep");
+		for (const tool of tools) {
+			assert.equal(tool.parameters.type, "object", tool.name);
+			assert.ok(!tool.name.startsWith("mcp__"), tool.name);
+			count++;
+		}
+	}
+	return count;
+}
+
+test("LH registries use object schemas and unprefixed names", () => {
+	assert.ok(assertLhToolSets() > 50, "the sweep must cover a non-trivial tool set");
+});
+
+
+test("rejects duplicate tool names at construction", () => {
+	assert.throws(() => createToolServer([
+		{ ...tool, name: "find" }, { ...tool, name: "find" },
+	], { timeoutMs: 1 }), /duplicate MCP tool name: find/);
+});
+
+test("snapshots descriptors without retaining the input registry", async (t) => {
+	const original = { ...tool };
+	const tools = [original];
+	const { client } = await connect(t, tools);
+	const list = () => client.request({ method: "tools/list" }, z.custom<ListToolsResult>());
+	const before = JSON.stringify(await list());
+	original.description = "changed";
+	original.name = "renamed";
+	original.parameters = Type.Object({ changed: Type.Boolean() });
+	tools.push({ ...tool, name: "added" });
+	assert.equal(JSON.stringify(await list()), before);
+	await assert.rejects(client.callTool({ name: "added" }), /Unknown tool: added/);
+});
+
+test("deep-copies parameter schemas so in-place mutation cannot change tools/list", async (t) => {
+	const original: Tool = {
+		name: "deep",
+		description: "Deep schema",
+		parameters: Type.Object({ nested: Type.Object({ mode: Type.String() }), flag: Type.Boolean() }),
+	};
+	const { client } = await connect(t, [original]);
+	const list = () => client.request({ method: "tools/list" }, z.custom<ListToolsResult>());
+	const before = JSON.stringify(await list());
+	const schema = original.parameters as unknown as {
+		type: string;
+		required: string[];
+		properties: { nested: { properties: Record<string, unknown>; required: string[] } };
+	};
+	schema.type = "string";
+	schema.required.push("added");
+	schema.properties.nested.properties.mode = { type: "number" };
+	schema.properties.nested.required.length = 0;
+	assert.equal(JSON.stringify(await list()), before);
+});
+
+// The SDK's in-flight-handler map drops entries only after handlers settle.
+function inflight(server: ReturnType<typeof createToolServer>): number {
+	return (server.config.instance.server as unknown as {
+		_requestHandlerAbortControllers: Map<unknown, unknown>;
+	})._requestHandlerAbortControllers.size;
+}
+
+test("cancels one parked call while closeAll settles the remaining call", async (t) => {
+	const server = await connect(t);
+	const { client, calls, closeAll } = server;
+	const controller = new AbortController();
+	const cancelled = client.callTool({ name: tool.name, _meta: { "claudecode/toolUseId": "cancel" } },
+		undefined, { signal: controller.signal });
+	const remaining = client.callTool({ name: tool.name, _meta: { "claudecode/toolUseId": "remain" } });
+	assert.equal(await Promise.race([cancelled, remaining, tick().then(() => "pending")]), "pending");
+	assert.equal(inflight(server), 2);
+	const rejection = assert.rejects(cancelled, /test cancellation/);
+	controller.abort(new Error("test cancellation"));
+	await rejection;
+	await tick(); // Deliver notifications/cancelled and settle the server handler.
+	assert.equal(inflight(server), 1);
+	assert.equal(await Promise.race([remaining, tick().then(() => "pending")]), "pending");
+	closeAll("remaining reason");
+	assert.deepEqual(await remaining, {
+		content: [{ type: "text", text: "remaining reason" }],
+		isError: true,
+		_meta: { "claude/endTurn": true },
+	});
+	await tick();
+	assert.equal(inflight(server), 0);
+	assert.deepEqual(calls, ["cancel", "remain"]);
+	controller.abort();
+});
+
+test("handles cancellation delivered before the SDK invokes the handler", async (t) => {
+	const server = await connect(t);
+	const { client, calls, closeAll } = server;
+	const controller = new AbortController();
+	const pending = client.callTool({ name: tool.name, _meta: { "claudecode/toolUseId": "early" } },
+		undefined, { signal: controller.signal });
+	// InMemoryTransport delivers synchronously; the SDK defers its handler
+	// to a microtask, so cancellation reaches extra.signal before invocation.
+	const rejection = assert.rejects(pending, /early cancellation/);
+	controller.abort(new Error("early cancellation"));
+	await rejection;
+	await tick();
+	assert.deepEqual(calls, ["early"]);
+	assert.equal(inflight(server), 0);
+	closeAll("cleanup after early cancellation");
+});
+
+
+test("cancelled handlers return endTurn errors, including already-aborted signals", async (t) => {
+	// Use a fresh server for each path so closeAll's result cannot mask abort handling.
+	for (const alreadyAborted of [false, true]) {
+		const server = createToolServer([tool], { timeoutMs: 1 });
+		t.after(() => server.closeAll("test cleanup"));
+		const handler = (server.config.instance.server as unknown as {
+			_requestHandlers: Map<string, (req: unknown, extra: unknown) => Promise<unknown>>;
+		})._requestHandlers.get("tools/call");
+		assert.ok(handler);
+		const controller = new AbortController();
+		if (alreadyAborted) controller.abort();
+		const pending = handler({
+			method: "tools/call",
+			params: { name: tool.name, _meta: { "claudecode/toolUseId": "x" } },
+		}, { signal: controller.signal });
+		if (!alreadyAborted) controller.abort();
+		const expected = {
+			content: [{ type: "text", text: "cancelled" }],
+			isError: true,
+			_meta: { "claude/endTurn": true },
+		};
+		assert.deepEqual(await Promise.race([pending, tick().then(() => "still pending")]), expected);
+		server.closeAll("later");
+		assert.deepEqual(await pending, expected);
+	}
+});
