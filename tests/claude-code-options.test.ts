@@ -45,7 +45,6 @@ describe("Claude Code query contract", () => {
 		withEnv({ PATH: "/test/bin", TMPDIR: "/test/tmp" }, home => {
 			const result = buildQueryOptions({
 				...required, effort: "high", mcpServers: { "custom-tools": { type: "stdio", command: "x" } },
-				maxTurns: 1, persistSession: false,
 			});
 			assertSnapshot(result, {
 				cwd: "/workspace", includePartialMessages: true, resume: "session-id",
@@ -70,10 +69,12 @@ describe("Claude Code query contract", () => {
 				systemPrompt: { type: "preset", preset: "claude_code", append: "Tutor prompt" },
 				settings: { autoMemoryEnabled: false, includeGitInstructions: false, claudeMdExcludes: ["**/CLAUDE.md", "**/.claude/rules/**"] },
 				extraArgs: { model: "claude-test", "strict-mcp-config": null },
+				maxTurns: 1, persistSession: false,
 				env: { HOME: home, ...flags }, permissionMode: "dontAsk", settingSources: [], tools: [],
 				allowedTools: ["mcp__custom-tools__*"], strictMcpConfig: true,
 			});
-			assert.equal(buildQueryOptions({ ...required, maxTurns: 0 }).maxTurns, 0);
+			assert.equal(buildQueryOptions(required).maxTurns, 1);
+			assert.equal(Object.hasOwn(buildQueryOptions({ ...required, resumeId: undefined }), "resume"), false);
 		});
 	});
 
@@ -137,7 +138,7 @@ describe("Claude Code query contract", () => {
 				allowedTools: ["Bash"], env: { ANTHROPIC_API_KEY: "x" }, strictMcpConfig: false,
 				extraArgs: { foo: "bar" }, pathToClaudeCodeExecutable: "/evil", executableArgs: ["evil"],
 				settings: { autoMemoryEnabled: true }, systemPrompt: "evil", includePartialMessages: false,
-				resume: "evil", thinking: { type: "disabled" },
+				maxTurns: 0, persistSession: true, resume: "evil", thinking: { type: "disabled" },
 			} as QueryInputs;
 			assert.deepStrictEqual(buildQueryOptions(hostile), buildQueryOptions(required));
 		});

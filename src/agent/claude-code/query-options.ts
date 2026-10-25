@@ -18,9 +18,7 @@ export type QueryInputs = {
 	effort?: EffortLevel;
 	appendPrompt: string;
 	mcpServers?: Record<string, McpServerConfig>;
-	resumeId: string;
-	maxTurns?: number;
-	persistSession?: boolean;
+	resumeId?: string;
 };
 
 export function buildQueryOptions(inputs: QueryInputs, platform: NodeJS.Platform = process.platform): Options {
@@ -31,7 +29,7 @@ export function buildQueryOptions(inputs: QueryInputs, platform: NodeJS.Platform
 	return {
 		cwd: inputs.cwd,
 		includePartialMessages: true,
-		resume: inputs.resumeId,
+		...(inputs.resumeId ? { resume: inputs.resumeId } : {}),
 		pathToClaudeCodeExecutable: inputs.executable,
 		systemPrompt: { type: "preset", preset: "claude_code", append: inputs.appendPrompt },
 		settings: {
@@ -47,8 +45,8 @@ export function buildQueryOptions(inputs: QueryInputs, platform: NodeJS.Platform
 		},
 		...(inputs.effort !== undefined ? { effort: inputs.effort } : {}),
 		...(inputs.mcpServers !== undefined ? { mcpServers: inputs.mcpServers } : {}),
-		...(inputs.maxTurns !== undefined ? { maxTurns: inputs.maxTurns } : {}),
-		...(inputs.persistSession !== undefined ? { persistSession: inputs.persistSession } : {}),
+		maxTurns: 1,
+		persistSession: false,
 		env: buildChildEnv(),
 		permissionMode: "dontAsk",
 		settingSources: [],
