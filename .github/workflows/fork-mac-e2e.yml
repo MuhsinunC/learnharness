@@ -163,7 +163,9 @@ jobs:
           log="$HOME/Library/Application Support/LearnHarness/logs/main.log"
           port=
           for ((i=0; i<60; i++)); do
-            port=$(sed -nE 's/.*server up: http:\/\/127\.0\.0\.1:([0-9]+).*/\1/p' "$log" | tail -1)
+            if [[ -f $log ]]; then
+              port=$(sed -nE 's/.*server up: http:\/\/127\.0\.0\.1:([0-9]+).*/\1/p' "$log" | tail -1)
+            fi
             [[ -z $port ]] || break
             sleep 1
           done
