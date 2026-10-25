@@ -5,7 +5,9 @@ export PATH
 script_dir=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=scripts/migrate-common.sh
 . "$script_dir/migrate-common.sh"
-[ "$#" -eq 1 ] || fail 'Usage: rollback-fork.sh BACKUP_DIR'
+force_unlock=no
+if [ "${1:-}" = --force-unlock ]; then force_unlock=yes; shift; fi
+[ "$#" -eq 1 ] || fail 'Usage: rollback-fork.sh [--force-unlock] BACKUP_DIR'
 backup=$1
 printf 'Checking the backup...\n'
 manifest=$backup/manifest.txt
@@ -59,27 +61,17 @@ if [ "$present" = yes ]; then
     mkdir -p "$(dirname "$data")"
     stage=$(mktemp -d "$(dirname "$data")/.lh-restore.XXXXXX")
     archive_name=$(basename "$manifest_data")
-    # BSD tar protects extraction paths; inspect actual names, not its escaped listing.
-    tar -xpf "$backup/data.tar.gz" -C "$stage"
-    (shopt -s dotglob nullglob; set -- "$stage"/*
-        [ "$#" -eq 1 ] && [ "$1" = "$stage/$archive_name" ]
-    ) || fail 'Unexpected archive contents.'
-    verify_data "$stage/$archive_name"
+    extract_verified "$backup/data.tar.gz" "$stage" "$archive_name"
 fi
 if [ "$old_path" != none ]; then
     printf 'Restoring the app...\n'
     prepare_app "$backup/LearnHarness.app"
 fi
-aside_data=none
-if exists "$data"; then
-    aside_data=$(unique_path "$data.fork-$stamp")
-    mv "$data" "$aside_data"
-fi
 if [ "$present" = yes ]; then
-    mv "$stage/$archive_name" "$data"
+    swap_data "$stage/$archive_name"
     rmdir "$stage"
     stage=
-fi
+else swap_data ''; fi
 if [ "$old_path" != none ]; then
     swap_app
     [ "$(version "$app")" = "$old_version" ] || fail 'Restored app version mismatch.'
