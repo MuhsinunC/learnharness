@@ -72,15 +72,49 @@ describe("desktop window chrome", () => {
 						bridge = api;
 					},
 				},
-				ipcRenderer: {},
+				ipcRenderer: { on() {} },
 			}),
 		};
 		runInNewContext(readFileSync(new URL("../electron/preload.cjs", import.meta.url), "utf8"), context);
 		assert.equal(bridge.platform, "win32");
 		assert.deepEqual(Object.keys(bridge).sort(), [
-			"chatgpt", "expandWindow", "getZoom", "installUpdate", "onUpdateStatus", "onZoom", "platform", "subscriptions",
+			"chatgpt", "checkForUpdates", "expandWindow", "getUpdateState", "getZoom", "installUpdate", "onOpenSettings", "onUpdateStatus", "onZoom", "platform", "subscriptions",
 		]);
 		assert.deepEqual(Object.keys(bridge.subscriptions as object).sort(), ["cancel", "consent", "disconnect", "login", "onChange", "open", "respond", "retry", "status"]);
+	});
+});
+
+describe("update preload bridge", () => {
+	it("buffers the menu request, unsubscribes safely, and uses the matching snapshot/check channels", async () => {
+		let bridge!: {
+			onOpenSettings: (cb: (section: string) => void) => () => void;
+			getUpdateState: () => Promise<unknown>;
+			checkForUpdates: () => Promise<void>;
+		};
+		const handlers = new Map<string, (event: unknown, value: string) => void>();
+		const invoked: string[] = [];
+		runInNewContext(readFileSync(new URL("../electron/preload.cjs", import.meta.url), "utf8"), {
+			process: { platform: "darwin" },
+			require: () => ({
+				contextBridge: { exposeInMainWorld: (_: string, value: typeof bridge) => { bridge = value; } },
+				ipcRenderer: {
+					on: (channel: string, listener: (event: unknown, value: string) => void) => handlers.set(channel, listener),
+					invoke: async (channel: string) => { invoked.push(channel); },
+				},
+			}),
+		});
+		const send = () => handlers.get("lh:open-settings")!({}, "general");
+		const seen: string[] = [];
+		send(); const off = bridge.onOpenSettings(section => seen.push(section));
+		assert.deepEqual(seen, ["general"], "pre-subscription request is delivered once");
+		send(); assert.deepEqual(seen, ["general", "general"]);
+		off(); send(); assert.equal(seen.length, 2);
+		const next: string[] = []; const offNext = bridge.onOpenSettings(section => next.push(section));
+		assert.deepEqual(next, ["general"]);
+		off(); send(); assert.equal(next.length, 2, "old cleanup cannot remove a newer subscriber");
+		offNext();
+		await bridge.getUpdateState(); await bridge.checkForUpdates();
+		assert.deepEqual(invoked, ["lh:update:get", "lh:update:check"]);
 	});
 });
 
