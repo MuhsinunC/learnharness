@@ -55,7 +55,7 @@ export type { ThinkingLevel };
 
 let collection: ReturnType<typeof createModels> | undefined;
 
-const registrationKey = Symbol.for("lh.claudeCodeRegistration");
+const registrationKey = Symbol.for("lh.claudeCodeRegistration.v2");
 const registrations = globalThis as typeof globalThis & {
 	[registrationKey]?: { generation: number; desired?: { executable: string; deps?: ClaudeCodeProviderDeps } };
 };
@@ -92,7 +92,9 @@ export function piModels() {
 	}
 	if (appliedGeneration !== registration.generation) {
 		const desired = registration.desired;
-		if (desired) collection.setProvider(claudeCodeProvider(desired.executable, collection.getModels("anthropic"), desired.deps));
+		if (desired) collection.setProvider(claudeCodeProvider(desired.executable, collection.getModels("anthropic"), {
+			...desired.deps, isEnabled: () => !!registration.desired,
+		}));
 		else collection.deleteProvider("claude-code");
 		appliedGeneration = registration.generation;
 	}

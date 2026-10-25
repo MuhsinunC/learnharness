@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { it } from "node:test";
 
 const root = resolve(import.meta.dirname, "..");
-function scenario(code: string, settings?: string, override = false) {
+function scenario(code: string, settings?: string, override = false, prelude = "") {
 	const home = mkdtempSync(join(tmpdir(), "lh-connection-"));
 	try {
 		const executable = join(home, "claude");
@@ -38,6 +38,7 @@ const {default: assert} = await import('node:assert/strict');
 const fs = await import('node:fs');
 const home = ${JSON.stringify(home)}, executable = ${JSON.stringify(executable)};
 const warnings = []; console.warn = (...args) => warnings.push(args.join(' '));
+${prelude}
 const connection = await import(${JSON.stringify(join(root, "src/server/claude-code-connection.ts"))});
 const route = await import(${JSON.stringify(join(root, "app/api/claude-code/route.ts"))});
 const loginRoute = await import(${JSON.stringify(join(root, "app/api/claude-code/login/route.ts"))});
@@ -262,11 +263,142 @@ const probes = () => fs.readFileSync(home+'/argv','utf8').trim().split('\\n');
 assert.deepEqual(probes(),['--version','auth status']);
 await route.PUT(request({mode:'local'}));
 const before = probes().length;
-await get(); assert.equal(probes().length,before+2);
-await get(); assert.equal(probes().length,before+2);
+await get(); assert.equal(probes().length,before);
+await get(); assert.equal(probes().length,before);
 now += 5_001;
 fs.writeFileSync(home+'/no-account','');
 const status = await (await get()).json(); assert.equal(status.loggedIn,true); assert.equal(status.account,null);
-assert.equal(probes().length,before+4);
-c.invalidateClaudeStatusCacheForTests(); await get(); assert.equal(probes().length,before+6);
+assert.equal(probes().length,before+2);
+c.invalidateClaudeStatusCacheForTests(); await get(); assert.equal(probes().length,before+4);
+`));
+it("rejected launch overrides never execute, including after an environment change", () => {
+	for (const setup of [
+		"process.env.LH_IGNORE_ENV_KEYS='1';",
+		"Object.defineProperty(process,'platform',{value:'freebsd'});",
+	]) scenario(`
+const status = await c.getClaudeCodeStatus();
+assert.equal(status.envOverride,true); assert.equal(status.active,false);
+assert.equal(status.version,null);
+delete process.env.LH_IGNORE_ENV_KEYS;
+assert.equal((await loginRoute.POST(loginRequest())).status,400);
+assert.equal(fs.existsSync(home+'/argv'),false);
+`, undefined, true, setup);
+});
+it("Windows mutations refuse before spawning", () => scenario(`
+for (const response of [await route.PUT(request({mode:'local'})), await loginRoute.POST(loginRequest())]) {
+  assert.equal(response.status,400);
+  assert.deepEqual(await response.json(),{error:'Claude Code provider is not supported on Windows'});
+}
+assert.equal(fs.existsSync(home+'/argv'),false);
+`, undefined, false, "Object.defineProperty(process,'platform',{value:'win32'});"));
+it("old global shapes are ignored by versioned boot and registration state", () => scenario(`
+assert.equal((await route.PUT(request({mode:'local'}))).status,200);
+assert.equal((await c.getClaudeCodeStatus()).active,true);
+`, undefined, false, `
+globalThis[Symbol.for('lh.claudeCodeBoot')] = {kind:'accepted',path:executable};
+globalThis[Symbol.for('lh.claudeCodeRegistration')] = {generation:99,desired:{}};
+`));
+it("failed settings and endpoint writes preserve the previous working configuration", () => scenario(`
+const endpoint = await import(${JSON.stringify(join(root, "src/server/claude-code-endpoint.ts"))});
+await route.PUT(request({mode:'endpoint',baseUrl:'https://old.example',token:'old-token'}));
+const oldEndpoint = fs.readFileSync(endpoint.endpointFile(),'utf8');
+const oldSettings = fs.readFileSync(home+'/claude-code.json','utf8');
+fs.unlinkSync(home+'/claude-code.json'); fs.mkdirSync(home+'/claude-code.json');
+let response = await route.PUT(request({mode:'endpoint',baseUrl:'https://new.example',token:'new-token'}));
+assert.equal(response.status,500); assert.equal(fs.readFileSync(endpoint.endpointFile(),'utf8'),oldEndpoint);
+assert.equal(keys.providerKeyPresent('claude-code'),true);
+fs.rmdirSync(home+'/claude-code.json'); fs.writeFileSync(home+'/claude-code.json',oldSettings);
+fs.unlinkSync(endpoint.endpointFile()); fs.mkdirSync(endpoint.endpointFile());
+response = await route.PUT(request({mode:'endpoint',baseUrl:'https://new.example',token:'new-token'}));
+assert.equal(response.status,500); assert.equal(fs.readFileSync(home+'/claude-code.json','utf8'),oldSettings);
+`));
+it("captured collections from two module copies refuse streams after off", () => scenario(`
+const boot = await import(${JSON.stringify(join(root, "src/server/claude-code-boot.ts"))});
+let calls = 0;
+boot.setClaudeCodeLoadQueryForTests(async () => { calls++; throw new Error('must not load'); });
+await route.PUT(request({mode:'local'}));
+const first = await import(${JSON.stringify(join(root, "src/agent/models.ts"))}+'?capture-first');
+const second = await import(${JSON.stringify(join(root, "src/agent/models.ts"))}+'?guard-copy');
+const collections = [first.piModels(),second.piModels()];
+const model = collections[0].getModels('claude-code')[0];
+// Disable in a third copy, leaving both captured collections untouched.
+assert.equal((await route.PUT(request({mode:'off'}))).status,200);
+const {normalizeContext} = await import('@earendil-works/pi-ai');
+for (const models of collections) {
+  const events = models.streamSimple(model,normalizeContext({systemPrompt:'',tools:[],messages:[{role:'user',content:'x',timestamp:0}]}));
+  const result = await events.result();
+  assert.equal(result.errorMessage,'claude-code: provider is off');
+}
+assert.equal(calls,0);
+`));
+it("stale saved executables fall back to discovery in GET, PUT and login", () => scenario(`
+for (const exists of [false,true]) {
+  const stale = home+'/stale';
+  if (exists) { fs.writeFileSync(stale,'#!/bin/sh\\necho wrong\\n'); fs.chmodSync(stale,0o755); }
+  settingsModule.writeClaudeCodeSettings({mode:'local',executable:stale});
+  c.invalidateClaudeStatusCacheForTests();
+  const status = await c.getClaudeCodeStatus();
+  assert.equal(status.executable,executable); assert.equal(status.staleExecutable,stale); assert.equal(status.error,null);
+  const changed = await route.PUT(request({mode:'local'}));
+  assert.equal(changed.status,200); assert.equal((await changed.json()).executable,executable);
+  settingsModule.writeClaudeCodeSettings({mode:'local',executable:stale});
+  assert.equal((await loginRoute.POST(loginRequest())).status,200);
+  c.resetClaudeLoginForTests();
+}
+`));
+it("successful URL-free login is idle and only login inherits desktop variables", () => scenario(`
+for(const key of ['DISPLAY','WAYLAND_DISPLAY','XDG_RUNTIME_DIR','DBUS_SESSION_BUS_ADDRESS']) process.env[key]='desktop';
+fs.writeFileSync(executable, '#!/bin/sh\\ncase "$*" in\\n--version) env > "' +
+  home + '/version-env"; echo "Claude Code";;\\n"auth status") env > "' +
+  home + '/status-env"; echo "{}";;\\nauth*) env > "' +
+  home + '/login-env";;\\nesac\\n');
+const response = await loginRoute.POST(loginRequest());
+assert.equal(response.status,200); assert.deepEqual(await response.json(),{login:{state:'idle'}});
+const versionEnv = fs.readFileSync(home+'/version-env','utf8'), loginEnv = fs.readFileSync(home+'/login-env','utf8');
+for(const key of ['DISPLAY','WAYLAND_DISPLAY','XDG_RUNTIME_DIR','DBUS_SESSION_BUS_ADDRESS']) {
+  assert.ok(!versionEnv.includes(key+'=')); assert.ok(loginEnv.includes(key+'=desktop'));
+}
+assert.equal((await c.getClaudeCodeStatus()).login.state,'idle');
+const statusEnv = fs.readFileSync(home+'/status-env','utf8');
+for(const key of ['DISPLAY','WAYLAND_DISPLAY','XDG_RUNTIME_DIR','DBUS_SESSION_BUS_ADDRESS']) assert.ok(!statusEnv.includes(key+'='));
+`));
+it("corrupt or unreadable settings report a private error without fabricating off", () => scenario(`
+await route.PUT(request({mode:'local'}));
+for(const directory of [false,true]) {
+  fs.rmSync(home+'/claude-code.json',{force:true,recursive:true});
+  if(directory) fs.mkdirSync(home+'/claude-code.json'); else fs.writeFileSync(home+'/claude-code.json','{bad');
+  const status = await c.getClaudeCodeStatus();
+  assert.equal(status.error,'saved Claude settings could not be read');
+  assert.equal(status.mode,'local'); assert.equal(status.active,true);
+  assert.ok(!status.error.includes(home));
+}
+`));
+it("mutations across module copies serialize and GET retries a changed settings generation", () => scenario(`
+const endpoint = await import(${JSON.stringify(join(root, "src/server/claude-code-endpoint.ts"))});
+const other = await import(${JSON.stringify(join(root, "src/server/claude-code-connection.ts"))}+'?mutex-copy');
+endpoint.writeEndpointConfig({baseUrl:'https://old.example',token:'old'});
+let release;
+const blocked = request({mode:'local'});
+blocked.json = () => new Promise(resolve => { release = () => resolve({mode:'local'}); });
+const put = route.PUT(blocked);
+while(!release) await new Promise(resolve => setImmediate(resolve));
+let deleteDone=false, loginDone=false;
+const remove = other.deleteClaudeCodeEndpoint(new Request('http://localhost',{method:'DELETE'})).then(r=>{deleteDone=true;return r;});
+const login = other.postClaudeCodeLogin(loginRequest()).then(r=>{loginDone=true;return r;});
+await new Promise(resolve => setImmediate(resolve));
+assert.equal(deleteDone,false); assert.equal(loginDone,false); assert.equal(fs.existsSync(endpoint.endpointFile()),true);
+release(); await put; await remove; await login; c.resetClaudeLoginForTests();
+// Hold A's probe while writing B, then ensure GET retries rather than mixing A with B's mode.
+const a = home+'/a', b=home+'/b';
+fs.copyFileSync(executable,b); fs.chmodSync(b,0o755);
+fs.writeFileSync(a,'#!/bin/sh\\nif [ "$1" = "--version" ]; then touch "' +
+  home + '/started"; while [ ! -f "' +
+  home + '/release" ]; do sleep 0.01; done; echo "A Claude Code"; else echo "{}"; fi\\n');
+fs.chmodSync(a,0o755);
+settingsModule.writeClaudeCodeSettings({mode:'local',executable:a}); c.invalidateClaudeStatusCacheForTests();
+const pending = c.getClaudeCodeStatus();
+while(!fs.existsSync(home+'/started')) await new Promise(resolve=>setTimeout(resolve,5));
+settingsModule.writeClaudeCodeSettings({mode:'endpoint',executable:b}); fs.writeFileSync(home+'/release','');
+const status = await pending;
+assert.equal(status.mode,'endpoint'); assert.equal(status.executable,b); assert.equal(status.version,'2.1.310 (Claude Code)');
 `));

@@ -9,7 +9,7 @@ type BootDecision =
 	| { kind: "unset" }
 	| { kind: "rejected"; reason: string }
 	| { kind: "accepted"; path: string; mode: "local" | "endpoint" };
-const BOOT_KEY = Symbol.for("lh.claudeCodeBoot");
+const BOOT_KEY = Symbol.for("lh.claudeCodeBoot.v2");
 type BootState = { decision: BootDecision; override: boolean; path?: string };
 const bootState = globalThis as Record<symbol, BootState | undefined>;
 
@@ -54,10 +54,10 @@ export function bootClaudeCodeProvider(env = process.env, platform: NodeJS.Platf
 	}
 	else disableClaudeCodeProvider();
 }
-export function claudeCodeEnvOverride(): { enabled: boolean; path?: string } {
+export function claudeCodeEnvOverride(): { enabled: boolean; path?: string; rejected: boolean } {
 	if (!bootState[BOOT_KEY]) bootClaudeCodeProvider();
 	const state = bootState[BOOT_KEY]!;
-	return { enabled: state.override, path: state.path };
+	return { enabled: state.override, path: state.path, rejected: state.override && state.decision.kind !== "accepted" };
 }
 export function applyClaudeCodeSettings(): void {
 	if (claudeCodeEnvOverride().enabled) return;
