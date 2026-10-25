@@ -12,6 +12,11 @@ import { enableClaudeCodeProvider, piEngineForSpec, piModels, resetClaudeCodePro
 import { claudeCodeCatalog, claudeCodeModelId, CLAUDE_CODE_SETTINGS, MEASURED_ONE_M } from "../src/agent/claude-code/models.ts";
 import { resetClaudeCodeStreamForTests } from "../src/agent/claude-code/stream.ts";
 
+void (() => {
+	// @ts-expect-error claudeDir is not a public dep
+	enableClaudeCodeProvider("/abs/stub", { claudeDir: "/x" });
+});
+
 let root: string, oldHome: string | undefined;
 beforeEach(() => {
 	root = mkdtempSync(join(tmpdir(), "lh-provider-"));
@@ -24,17 +29,18 @@ afterEach(async () => {
 	if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
 	rmSync(root, { recursive: true, force: true });
 });
-function fake() {
+function fake({ production = false } = {}) {
 	let loads = 0;
 	const calls: { model: string | null | undefined; file?: string; options: Parameters<typeof query>[0]["options"] }[] = [];
 	const deps = {
-		dataDir: join(root, "data"), claudeDir: join(root, "claude"),
+		dataDir: join(root, "data"),
+		...(production ? {} : { claudeDirForTests: join(root, "claude") }),
 		logger: { debug() {}, warn(message: string) { assert.fail(message); } },
 		loadQuery: async () => {
 			loads++;
 			return (({ options }: Parameters<typeof query>[0]) => {
 				calls.push({ model: options?.extraArgs?.model, options,
-					file: options?.resume ? readFileSync(join(getProjectDir(options.cwd!, deps.claudeDir), options.resume + ".jsonl"), "utf8") : undefined });
+					file: options?.resume ? readFileSync(join(getProjectDir(options.cwd!, deps.claudeDirForTests ?? join(process.env.HOME!, ".claude")), options.resume + ".jsonl"), "utf8") : undefined });
 				const iterator = (async function* () {
 					yield { type: "assistant", message: { id: "answer", content: [{ type: "text", text: "OK" }], usage: {} } } as SDKMessage;
 					yield { type: "result", subtype: "success", is_error: false } as SDKMessage;
@@ -97,8 +103,16 @@ test("catalog projects only model fields, orders families newest first, and matc
 	for (const id of MEASURED_ONE_M) assert.ok(catalog.some(m => m.id === id));
 });
 
-for (const id of ["claude-opus-5-5", "claude-haiku-5-5", "claude-sonnet-5-5"]) test(`Models.streamSimple resolves auth and sends served model for ${id}`, async () => {
-	const h = fake(); enableClaudeCodeProvider("/abs/stub", h.deps);
+for (const { id, production } of [
+	{ id: "claude-opus-5-5", production: false },
+	{ id: "claude-haiku-5-5", production: false },
+	{ id: "claude-sonnet-5-5", production: false },
+	{ id: "claude-opus-5-5", production: true },
+]) test(production ? "production provider resumes from temporary HOME/.claude" : `Models.streamSimple resolves auth and sends served model for ${id}`, async () => {
+	assert.ok(process.env.HOME?.startsWith(root + "/"), "HOME must be inside the temporary test root");
+	const h = fake({ production });
+	if (production) assert.equal(Object.hasOwn(h.deps, "claudeDirForTests"), false);
+	enableClaudeCodeProvider("/abs/stub", h.deps);
 	const engine = piEngineForSpec({ provider: "claude-code", id, thinkingLevel: "max" });
 	assert.equal(engine.model.id, id);
 	const auth = await piModels().getAuth(engine.model);
@@ -116,7 +130,10 @@ for (const id of ["claude-opus-5-5", "claude-haiku-5-5", "claude-sonnet-5-5"]) t
 	assert.equal(events.at(-1)?.type, "done"); assert.equal(h.loads(), 1);
 	const cliId = id + (id === "claude-opus-5-5" ? "[1m]" : "");
 	assert.equal(h.calls[0]!.model, cliId);
-	const records = h.calls[0]!.file!.trim().split("\n").map(line => JSON.parse(line));
+	assert.ok(h.calls[0]!.file, "resumed session file was found in the expected Claude directory");
+	assert.match(h.calls[0]!.file, /prior/);
+	assert.match(h.calls[0]!.file, /previous answer/);
+	const records = h.calls[0]!.file.trim().split("\n").map(line => JSON.parse(line));
 	assert.ok(records.some(record => record.message?.model === cliId), "session uses the same CLI model");
 	assert.equal(h.calls[0]!.options?.pathToClaudeCodeExecutable, "/abs/stub");
 	assert.equal(Object.hasOwn(h.calls[0]!.options!, "apiKey"), false);

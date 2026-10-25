@@ -8,7 +8,8 @@ import { defaultLoadQuery, streamClaudeCode } from "./stream.ts";
 export type ClaudeCodeProviderDeps = {
 	loadQuery?: typeof defaultLoadQuery;
 	dataDir?: string;
-	claudeDir?: string;
+	// The child env allowlist never passes CLAUDE_CONFIG_DIR, so the real child always reads $HOME/.claude; other dirs only work with a fake loadQuery.
+	claudeDirForTests?: string;
 	logger?: EventMapperLogger;
 };
 
@@ -17,7 +18,7 @@ export function claudeCodeProvider(executable: string, anthropicModels: readonly
 		executable,
 		loadQuery: deps.loadQuery ?? defaultLoadQuery,
 		dataDir: deps.dataDir ?? PATHS.data,
-		claudeDir: deps.claudeDir ?? childClaudeDir(),
+		claudeDir: deps.claudeDirForTests ?? childClaudeDir(),
 		logger: deps.logger ?? { debug: () => {}, warn: (message: string) => console.warn(message) },
 	};
 	const s = (model: Model<Api>, transcript: TranscriptContext, options?: SimpleStreamOptions) => streamClaudeCode(model, transcript, options, streamDeps);
