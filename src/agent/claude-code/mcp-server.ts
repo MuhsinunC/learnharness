@@ -42,7 +42,7 @@ function endTurnResult(reason: string): CallToolResult {
 	};
 }
 
-export function createToolServer(tools: Tool[], opts: { timeoutMs: number }): {
+export function createToolServer(tools: Tool[], opts: { timeoutMs: number; onCall?: (toolCallId: string) => void }): {
 	config: McpSdkServerConfig & { instance: McpServer };
 	closeAll: (reason: string) => void;
 	calls: string[];
@@ -78,6 +78,7 @@ export function createToolServer(tools: Tool[], opts: { timeoutMs: number }): {
 			throw new Error(`${name}: tools/call is missing _meta["${TOOL_USE_ID_META}"] — cannot pair the result with its tool call`);
 		}
 		calls.push(toolCallId);
+		opts.onCall?.(toolCallId);
 		// Park until the query closes, leaving Claude Code without a result
 		// from which it could start another request. Late calls cannot hang.
 		if (closedResult) return closedResult;

@@ -264,3 +264,19 @@ test("cancelled handlers return endTurn errors, including already-aborted signal
 		assert.deepEqual(await pending, expected);
 	}
 });
+
+test("onCall runs after recording the raw id and may close the parked handler", async () => {
+	const ids: string[] = [];
+	const server = createToolServer([tool], { timeoutMs: 1, onCall: id => {
+		assert.deepEqual(server.calls, [id]);
+		ids.push(id);
+		server.closeAll("hook closed");
+	} });
+	const handler = (server.config.instance.server as unknown as {
+		_requestHandlers: Map<string, (req: unknown, extra: unknown) => Promise<unknown>>;
+	})._requestHandlers.get("tools/call")!;
+	const result = await handler({ method: "tools/call", params: { name: tool.name, _meta: { "claudecode/toolUseId": "hook" } } }, { signal: new AbortController().signal });
+	assert.deepEqual(ids, ["hook"]);
+	assert.deepEqual(result, { content: [{ type: "text", text: "hook closed" }], isError: true, _meta: { "claude/endTurn": true } });
+	await server.config.instance.close();
+});
