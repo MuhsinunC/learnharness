@@ -7,6 +7,7 @@ script_dir=$(cd "$(dirname "$0")" && pwd)
 . "$script_dir/migrate-common.sh"
 [ "$#" -eq 1 ] || fail 'Usage: rollback-fork.sh BACKUP_DIR'
 backup=$1
+printf 'Checking the backup...\n'
 manifest=$backup/manifest.txt
 [ -f "$manifest" ] || fail 'Backup manifest is missing.'
 # Validate the record structure without executing any manifest text.
@@ -53,6 +54,7 @@ init
 quit_app
 # Pre-stage and verify before moving the current data, keeping it safe on errors.
 stage=
+printf 'Restoring data...\n'
 if [ "$present" = yes ]; then
     mkdir -p "$(dirname "$data")"
     stage=$(mktemp -d "$(dirname "$data")/.lh-restore.XXXXXX")
@@ -62,7 +64,10 @@ if [ "$present" = yes ]; then
     tar -xpf "$backup/data.tar.gz" -C "$stage"
     verify_data "$stage/$archive_name"
 fi
-if [ "$old_path" != none ]; then prepare_app "$backup/LearnHarness.app"; fi
+if [ "$old_path" != none ]; then
+    printf 'Restoring the app...\n'
+    prepare_app "$backup/LearnHarness.app"
+fi
 aside_data=none
 if exists "$data"; then
     aside_data=$(unique_path "$data.fork-$stamp")
@@ -77,5 +82,6 @@ if [ "$old_path" != none ]; then
     swap_app
     [ "$(version "$app")" = "$old_version" ] || fail 'Restored app version mismatch.'
 else printf '%s\n' 'Backup contains no old app; leaving the installed app in place.'; fi
+printf 'Verifying the restored data and app...\n'
 verify_data "$data"
 printf 'Rollback complete. Preserved current data: %s\n' "$aside_data"
