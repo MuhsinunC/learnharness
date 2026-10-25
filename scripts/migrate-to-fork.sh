@@ -5,21 +5,22 @@ export PATH
 script_dir=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=scripts/migrate-common.sh
 . "$script_dir/migrate-common.sh"
-dry=no; dmg=; expected_hash=; release_json=${LH_MIGRATE_RELEASE_JSON:-}; force_unlock=no; release_version=
+dry=no; dmg=; expected_hash=; hash_supplied=no; release_json=${LH_MIGRATE_RELEASE_JSON:-}; force_unlock=no; release_version=
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --dry-run) dry=yes; shift;;
         --force-unlock) force_unlock=yes; shift;;
         --dmg|--sha256|--release-json)
             [ "$#" -ge 2 ] || fail "Missing argument for $1"
-            case "$1" in --dmg) dmg=$2;; --sha256) expected_hash=$2;; --release-json) release_json=$2;; esac
+            case "$1" in --dmg) dmg=$2;; --sha256) expected_hash=$2; hash_supplied=yes;; --release-json) release_json=$2;; esac
             shift 2;;
         -h|--help) printf '%s\n' 'Usage: migrate-to-fork.sh [--dry-run] [--force-unlock] [--dmg PATH [--sha256 HEX]] [--release-json PATH]'; exit 0;;
         *) fail "Unknown option: $1";;
     esac
 done
-if [ -n "$expected_hash" ]; then
-    printf '%s\n' "$expected_hash" | /usr/bin/grep -Eq '^[a-fA-F0-9]{64}$' || fail 'Invalid SHA-256 digest.'
+if [ "$hash_supplied" = yes ]; then
+    case "$expected_hash" in *[!a-fA-F0-9]*) fail 'Invalid SHA-256 digest.';; esac
+    [ "${#expected_hash}" -eq 64 ] || fail 'Invalid SHA-256 digest.'
 fi
 [ -n "$dmg" ] || [ -z "$expected_hash" ] || fail '--sha256 requires --dmg.'
 init
