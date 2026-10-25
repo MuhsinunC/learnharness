@@ -148,7 +148,10 @@ snapshot() {
             printf '%s  %s\n' "$(hash_file "$path")" "$path" >> "$tmp/hashes"
         done < "$tmp/escaped-paths"
         while IFS= read -r -d '' path; do
-            value=$(readlink "$path"); plain "$value"
+            # -n adds no delimiter; the sentinel preserves target newlines for validation.
+            value=$(readlink -n "$path" && printf '.')
+            value=${value%.}
+            plain "$value"
             printf '%s\t%s\n' "$path" "$value"
         done < "$tmp/links" > "$tmp/targets"
     )
@@ -163,7 +166,8 @@ snapshot() {
             print $3 "\tentry\t" kind "\t" $2 "\t" value "\t" $3
         }
     ' "$tmp/hashes" "$tmp/targets" "$tmp/metadata" > "$tmp/records" || fail 'Unsupported or unreadable entry in backup.'
-    LC_ALL=C sort -t $'\t' -k1,1 "$tmp/records" | cut -f 2-
+    LC_ALL=C sort -t $'\t' -k1,1 "$tmp/records" > "$tmp/sorted"
+    cut -f 2- "$tmp/sorted"
 }
 verify_data() {
     snapshot "$1" > "$tmp/live"
