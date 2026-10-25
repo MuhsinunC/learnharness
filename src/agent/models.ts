@@ -56,7 +56,9 @@ export type { ThinkingLevel };
 let collection: ReturnType<typeof createModels> | undefined;
 
 const registrationKey = Symbol.for("lh.claudeCodeRegistration");
-const registrations = globalThis as typeof globalThis & { [registrationKey]?: { generation: number; desired?: { executable: string; deps?: ClaudeCodeProviderDeps } } };
+const registrations = globalThis as typeof globalThis & {
+	[registrationKey]?: { generation: number; desired?: { executable: string; deps?: ClaudeCodeProviderDeps } };
+};
 const registration = registrations[registrationKey] ??= { generation: 0 };
 let appliedGeneration = -1;
 

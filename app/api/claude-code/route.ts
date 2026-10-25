@@ -1,9 +1,7 @@
-import { getClaudeCodeStatus, putClaudeCodeConnection } from "@/src/server";
+import { getClaudeCodeConnection, putClaudeCodeConnection } from "@/src/server";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-export async function GET() {
-	return Response.json(await getClaudeCodeStatus());
-}
+export const GET = getClaudeCodeConnection;
 export const PUT = putClaudeCodeConnection;

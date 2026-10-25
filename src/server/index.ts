@@ -45,5 +45,4 @@ export * from "./observability.ts";
 export * from "./model-catalog.ts";
 export { sessionCost } from "./pricing.ts";
 
-export { getClaudeCodeStatus, putClaudeCodeConnection, postClaudeCodeLogin } from "./claude-code-connection.ts";
-
+export { getClaudeCodeConnection, putClaudeCodeConnection, postClaudeCodeLogin, deleteClaudeCodeEndpoint } from "./claude-code-connection.ts";

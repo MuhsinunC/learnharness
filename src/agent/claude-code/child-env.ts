@@ -25,7 +25,6 @@ export function buildChildEnv(source: NodeJS.ProcessEnv = process.env, endpoint?
 		env.PATH = [dir, ...(source.PATH ?? "").split(delimiter).filter(entry => entry && entry !== dir)].join(delimiter);
 	}
 	return { ...env, ...CC_CHILD_ENV, ...(endpoint ? { ANTHROPIC_BASE_URL: endpoint.baseUrl, ANTHROPIC_AUTH_TOKEN: endpoint.token } : {}) };
-
 }
 
 export function childClaudeDir(source: NodeJS.ProcessEnv = process.env): string {

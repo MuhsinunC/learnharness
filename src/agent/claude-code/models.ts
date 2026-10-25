@@ -106,6 +106,6 @@ export const CLAUDE_CODE_SETTINGS: LongContextSettings = Object.freeze({ plan: "
 
 export function claudeCodeCatalog(anthropicModels: readonly Model<Api>[]): Model<"claude-agent-sdk">[] {
 	return applyLongContext(buildModels(anthropicModels), CLAUDE_CODE_SETTINGS).map(model => ({
-		...model, provider: "claude-code", api: "claude-agent-sdk", baseUrl: "",
+		...model, provider: "claude-code", api: "claude-agent-sdk", "baseUrl": "",
 	}));
 }
