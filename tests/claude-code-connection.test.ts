@@ -537,3 +537,13 @@ const removed=await (await endpointRoute.DELETE(new Request('http://localhost',{
 assert.equal(removed.ok,true); assert.equal(removed.executable,nextCandidate); assert.equal(removed.discovered,null);
 
 `));
+it("fresh discovery reports the runnable binary as executable without a replacement hint", () => scenario(`
+assert.equal(fs.existsSync(home+'/claude-code.json'),false);
+const status=await c.getClaudeCodeStatus();
+assert.equal(status.mode,'off'); assert.equal(status.active,false);
+assert.equal(status.executable,executable); assert.equal(status.found,true);
+assert.equal(status.discovered,null); assert.equal(status.hint,null);
+assert.equal(status.version,'2.1.310 (Claude Code)'); assert.equal(status.loggedIn,true);
+assert.deepEqual(status.account,{email:'user@example.com',subscriptionType:'pro'});
+assert.equal(status.error,null); assert.equal(fs.existsSync(home+'/claude-code.json'),false);
+`));
