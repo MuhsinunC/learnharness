@@ -1,53 +1,33 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { accessSync, constants, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, writeFileSync, rmSync } from "node:fs";
+import { readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
-import { randomUUID } from "node:crypto";
-import { PATHS } from "../../config.ts";
 import { buildChildEnv } from "../agent/claude-code/child-env.ts";
 import { piModels } from "../agent/models.ts";
 import { applyClaudeCodeSettings, claudeCodeEnvOverride } from "./claude-code-boot.ts";
+import { claudeExecutableProblem, readClaudeCodeSettings, writeClaudeCodeSettings } from "./claude-code-settings.ts";
+import { clearEndpointConfig, endpointStatus, isAllowedEndpointUrl, writeEndpointConfig } from "./claude-code-endpoint.ts";
 
-type Settings = { mode: "off" | "local"; executable: string | null };
-const settingsFile = join(PATHS.data, "claude-code.json");
-const warningKey = Symbol.for("lh.claudeCodeSettingsWarning");
-const warnings = globalThis as Record<symbol, boolean | undefined>;
-export function readClaudeCodeSettings(): Settings {
-	try {
-		const value = JSON.parse(readFileSync(settingsFile, "utf8"));
-		if (!value || !["off", "local"].includes(value.mode) || !(value.executable === null || typeof value.executable === "string")) throw new Error();
-		return { mode: value.mode, executable: value.executable };
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "ENOENT" && !warnings[warningKey]) {
-			warnings[warningKey] = true;
-			console.warn("claude-code: invalid connection settings ignored");
-		}
-		return { mode: "off", executable: null };
-	}
-}
-function writeSettings(settings: Settings): void {
-	mkdirSync(PATHS.data, { recursive: true });
-	const temporary = `${settingsFile}.${randomUUID()}.tmp`;
-	try {
-		writeFileSync(temporary, JSON.stringify(settings));
-		renameSync(temporary, settingsFile);
-	} finally { rmSync(temporary, { force: true }); }
-}
-export function claudeExecutableProblem(executable: string): string | null {
-	if (!isAbsolute(executable)) return "not an absolute path";
-	try { if (!statSync(executable).isFile()) return "not a file"; } catch { return "not a file"; }
-	try { accessSync(executable, constants.X_OK); } catch { return "not executable"; }
-	return null;
-}
 export type DiscoveryRoots = { pathEnv: string | undefined; home: string; fixedDirs: string[] };
 function defaultRoots(): DiscoveryRoots {
-	return { pathEnv: process.env.PATH, home: process.env.HOME ?? homedir(), fixedDirs: process.env.NODE_ENV === "test" && process.env.LH_CLAUDE_CODE_TEST_NO_FIXED_DIRS === "1" ? [] : ["/opt/homebrew/bin", "/usr/local/bin"] };
+	return {
+		pathEnv: process.env.PATH, home: process.env.HOME ?? homedir(),
+		fixedDirs: process.env.NODE_ENV === "test" && process.env.LH_CLAUDE_CODE_TEST_NO_FIXED_DIRS === "1"
+			? [] : ["/opt/homebrew/bin", "/usr/local/bin"],
+	};
 }
 export function discoverClaudeExecutables(roots = defaultRoots()): string[] {
 	const { home } = roots;
 	let versions: string[] = [];
 	try { versions = readdirSync(join(home, ".nvm/versions/node")).sort((a, b) => b.localeCompare(a, undefined, { numeric: true })); } catch { /* no nvm */ }
-	const paths = [readClaudeCodeSettings().executable, ...(roots.pathEnv ?? "").split(delimiter).filter(Boolean).map(dir => join(dir, "claude")), join(home, ".local/bin/claude"), join(home, ".claude/local/claude"), ...roots.fixedDirs.map(dir => join(dir, "claude")), join(home, ".npm-global/bin/claude"), join(home, ".bun/bin/claude"), ...versions.map(version => join(home, ".nvm/versions/node", version, "bin/claude"))];
+	const paths = [
+		readClaudeCodeSettings().executable,
+		...(roots.pathEnv ?? "").split(delimiter).filter(Boolean).map(dir => join(dir, "claude")),
+		join(home, ".local/bin/claude"), join(home, ".claude/local/claude"),
+		...roots.fixedDirs.map(dir => join(dir, "claude")),
+		join(home, ".npm-global/bin/claude"), join(home, ".bun/bin/claude"),
+		...versions.map(version => join(home, ".nvm/versions/node", version, "bin/claude")),
+	];
 	const seen = new Set<string>();
 	return paths.filter((p): p is string => {
 		if (!p || claudeExecutableProblem(p)) return false;
@@ -56,7 +36,10 @@ export function discoverClaudeExecutables(roots = defaultRoots()): string[] {
 }
 function run(executable: string, args: string[]): Promise<string> {
 	return new Promise((resolve, reject) => {
-		const child = execFile(executable, args, { env: buildChildEnv(process.env, null, executable) as NodeJS.ProcessEnv, encoding: "utf8", timeout: 10_000, maxBuffer: 64 * 1024 }, (error, stdout) => error ? reject(new Error("command failed")) : resolve(stdout));
+		const child = execFile(executable, args, {
+			env: buildChildEnv(process.env, null, executable) as NodeJS.ProcessEnv,
+			encoding: "utf8", timeout: 10_000, maxBuffer: 64 * 1024,
+		}, (error, stdout) => error ? reject(new Error("command failed")) : resolve(stdout));
 		child.stdin?.end();
 	});
 }
@@ -72,7 +55,11 @@ export async function validateClaudeExecutable(executable: string): Promise<{ ve
 export async function readClaudeAuthStatus(executable: string) {
 	try {
 		const value = JSON.parse(await run(executable, ["auth", "status"]));
-		const account = value.loggedIn === true ? { ...(typeof value.email === "string" ? { email: value.email } : {}), ...(typeof value.subscriptionType === "string" ? { subscriptionType: value.subscriptionType } : {}) } : null;
+		const account = value.loggedIn === true && (typeof value.email === "string" || typeof value.subscriptionType === "string")
+			? {
+				...(typeof value.email === "string" ? { email: value.email } : {}),
+				...(typeof value.subscriptionType === "string" ? { subscriptionType: value.subscriptionType } : {}),
+			} : null;
 		return { loggedIn: value.loggedIn === true, account, error: null };
 	} catch { return { loggedIn: false, account: null, error: "unable to read login status" }; }
 }
@@ -80,21 +67,28 @@ type Login = { state: "idle" | "pending" | "failed"; url: string | null; error: 
 type LoginSession = { child?: ChildProcess; login: Login; timer?: NodeJS.Timeout; finish?: () => void };
 const loginKey = Symbol.for("lh.claudeCodeLogin");
 const loginGlobal = globalThis as typeof globalThis & { [loginKey]?: { current: LoginSession; exitRegistered?: boolean } };
-const loginState: { current: LoginSession; exitRegistered?: boolean } = loginGlobal[loginKey] ??= { current: { login: { state: "idle", url: null, error: null } } };
+const loginState = loginGlobal[loginKey] ??= {
+	current: { login: { state: "idle", url: null, error: null } } as LoginSession,
+	exitRegistered: false,
+};
 if (!loginState.exitRegistered) {
 	// Install once across HMR copies without capturing a particular child.
 	loginState.exitRegistered = true;
 	process.once("exit", () => loginState.current.child?.kill("SIGTERM"));
 }
-export function cancelClaudeLoginForTests(): void {
+export function cancelClaudeLogin(): void {
 	const old = loginState.current;
-	loginState.current = { login: { state: "idle", url: null, error: null } };
+	loginState.current = { login: { state: "failed", url: null, error: "login cancelled" } };
 	clearTimeout(old.timer); old.child?.kill("SIGTERM");
 	old.login = { state: "failed", url: null, error: "login cancelled" };
 	old.finish?.();
 }
+export function resetClaudeLoginForTests(): void {
+	cancelClaudeLogin();
+	loginState.current = { login: { state: "idle", url: null, error: null } };
+}
 async function startLogin(executable: string): Promise<Login> {
-	cancelClaudeLoginForTests();
+	cancelClaudeLogin();
 	const session: LoginSession = { login: { state: "pending", url: null, error: null } };
 	loginState.current = session;
 	return new Promise(resolve => {
@@ -107,10 +101,14 @@ async function startLogin(executable: string): Promise<Login> {
 		const current = () => loginState.current === session;
 		const fail = (error: string) => {
 			if (!current()) return;
+			invalidateStatusCache();
 			session.login = { state: "failed", url: null, error };
 			clearTimeout(session.timer); session.child?.kill("SIGTERM"); finish();
 		};
-		const child = session.child = spawn(executable, ["auth", "login", "--claudeai"], { detached: true, stdio: ["ignore", "pipe", "pipe"], env: buildChildEnv(process.env, null, executable) as NodeJS.ProcessEnv });
+		const child = session.child = spawn(executable, ["auth", "login", "--claudeai"], {
+			detached: true, stdio: ["ignore", "pipe", "pipe"],
+			env: buildChildEnv(process.env, null, executable) as NodeJS.ProcessEnv,
+		});
 		let buffer = "";
 		child.stdout!.on("data", chunk => {
 			if (!current() || session.login.url) return;
@@ -123,6 +121,8 @@ async function startLogin(executable: string): Promise<Login> {
 		child.on("exit", code => {
 			if (!current() || session.login.state === "failed") return;
 			clearTimeout(session.timer);
+			invalidateStatusCache();
+			session.child = undefined;
 			session.login = code === 0 ? { state: "idle", url: null, error: null } : { state: "failed", url: null, error: "login exited before completion" };
 			finish();
 		});
@@ -136,40 +136,109 @@ function resolveExecutable() {
 	const candidates = discoverClaudeExecutables();
 	return { override, settings, candidates, executable: override.path ?? settings.executable ?? candidates[0] ?? null };
 }
-export async function getClaudeCodeStatus(validation?: { executable: string; version: string }) {
-	const { override, settings, candidates, executable } = resolveExecutable();
+type Validation = { executable: string; version: string };
+async function readSpawnStatus(validation?: Validation) {
+	const { executable, candidates } = resolveExecutable();
 	const validated = validation?.executable === executable ? { version: validation.version, error: null }
 		: executable ? await validateClaudeExecutable(executable) : { version: null, error: "Claude Code not found" };
-	const auth = validated.version && executable ? await readClaudeAuthStatus(executable) : { loggedIn: false, account: null, error: null };
-	return { mode: override.enabled ? "local" : settings.mode, envOverride: override.enabled, active: piModels().getProvider("claude-code") !== undefined, executable, found: !!executable && !claudeExecutableProblem(executable), candidates, version: validated.version, loggedIn: auth.loggedIn, account: auth.account, login: { ...loginState.current.login }, endpoint: { baseUrl: null, tokenSet: false }, error: validated.error ?? auth.error };
+	const auth = validated.version && executable ? await readClaudeAuthStatus(executable)
+		: { loggedIn: false, account: null, error: null };
+	return {
+		executable, candidates, found: !!executable && !claudeExecutableProblem(executable),
+		version: validated.version, loggedIn: auth.loggedIn, account: auth.account, error: validated.error ?? auth.error,
+	};
+}
+type SpawnStatus = Awaited<ReturnType<typeof readSpawnStatus>>;
+const cacheKey = Symbol.for("lh.claudeCodeStatusCache");
+const cacheGlobal = globalThis as typeof globalThis & {
+	[cacheKey]?: { entry?: { expires: number; promise: Promise<SpawnStatus> } };
+};
+const statusCache = cacheGlobal[cacheKey] ??= {};
+function invalidateStatusCache(): void { statusCache.entry = undefined; }
+export function invalidateClaudeStatusCacheForTests(): void { invalidateStatusCache(); }
+async function getClaudeCodeStatus(validation?: Validation) {
+	if (validation) invalidateStatusCache();
+	if (!statusCache.entry || statusCache.entry.expires <= Date.now()) {
+		const entry = { expires: Infinity, promise: readSpawnStatus(validation) };
+		statusCache.entry = entry;
+		entry.promise.then(() => { entry.expires = Date.now() + 5_000; }, () => {
+			if (statusCache.entry === entry) invalidateStatusCache();
+		});
+	}
+	const backed = await statusCache.entry.promise;
+	const override = claudeCodeEnvOverride();
+	const settings = readClaudeCodeSettings();
+	return {
+		mode: override.enabled ? "local" : settings.mode, envOverride: override.enabled,
+		active: piModels().getProvider("claude-code") !== undefined,
+		...backed, login: { ...loginState.current.login }, endpoint: endpointStatus(),
+	};
+}
+function refuseCrossOrigin(request: Request): Response | null {
+	const origin = request.headers.get("origin");
+	let mismatch = false;
+	if (origin !== null) {
+		try { mismatch = new URL(origin).host !== request.headers.get("host"); }
+		catch { mismatch = true; }
+	}
+	return mismatch || request.headers.get("sec-fetch-site") === "cross-site"
+		? json({ error: "cross-origin request refused" }, 403) : null;
+}
+export async function getClaudeCodeConnection(request: Request): Promise<Response> {
+	const refusal = refuseCrossOrigin(request);
+	if (refusal) return refusal;
+	return json(await getClaudeCodeStatus());
 }
 const json = (body: unknown, status = 200) => Response.json(body, { status });
 const isJson = (request: Request) => request.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() === "application/json";
 export async function putClaudeCodeConnection(request: Request): Promise<Response> {
+	const refusal = refuseCrossOrigin(request);
+	if (refusal) return refusal;
 	if (claudeCodeEnvOverride().enabled) return json({ error: "connection controlled by launch environment" }, 409);
 	if (!isJson(request)) return json({ error: "application/json required" }, 415);
 	let body;
 	try { body = await request.json(); } catch { return json({ error: "invalid JSON object" }, 400); }
 	if (!body || typeof body !== "object" || Array.isArray(body)) return json({ error: "invalid JSON object" }, 400);
 	if (!["off", "local", "endpoint"].includes(body.mode)) return json({ error: "invalid mode" }, 400);
-	if (body.mode === "endpoint") return json({ error: "endpoint mode not available yet" }, 400);
-	if (Object.hasOwn(body, "executable") && (typeof body.executable !== "string" || !body.executable || !isAbsolute(body.executable))) return json({ error: "executable must be an absolute path" }, 400);
+	if (Object.hasOwn(body, "executable") &&
+		(typeof body.executable !== "string" || !body.executable || !isAbsolute(body.executable))) {
+		return json({ error: "executable must be an absolute path" }, 400);
+	}
 	const saved = readClaudeCodeSettings();
 	let executable = saved.executable;
 	let validation: { executable: string; version: string } | undefined;
-	if (body.mode === "local") {
+	if (body.mode !== "off") {
 		executable = body.executable ?? saved.executable ?? discoverClaudeExecutables()[0];
 		if (!executable) return json({ error: "Claude Code not found" }, 400);
 		const result = await validateClaudeExecutable(executable);
 		if (result.error) return json({ error: result.error }, 400);
 		validation = { executable, version: result.version! };
 	}
-	try { writeSettings({ mode: body.mode, executable }); }
+	if (body.mode === "endpoint") {
+		const stored = endpointStatus();
+		const baseUrl = body.baseUrl === undefined ? stored.baseUrl : body.baseUrl;
+		if (typeof baseUrl !== "string" || !isAllowedEndpointUrl(baseUrl)) {
+			return json({ error: "invalid endpoint URL" }, 400);
+		}
+		const token = body.token;
+		if (token !== undefined && (typeof token !== "string" || !token || token.trim() !== token || /[\x00-\x1f\x7f]/.test(token))) {
+			return json({ error: "invalid endpoint token" }, 400);
+		}
+		if (token === undefined && !stored.tokenSet) return json({ error: "endpoint token required" }, 400);
+		try { writeEndpointConfig({ baseUrl, ...(token !== undefined ? { token } : {}) }); }
+		catch { return json({ error: "unable to save endpoint configuration" }, 500); }
+	}
+	try { writeClaudeCodeSettings({ mode: body.mode, executable }); }
 	catch { return json({ error: "unable to save connection settings" }, 500); }
 	applyClaudeCodeSettings();
-	return json(await getClaudeCodeStatus(validation));
+	invalidateStatusCache();
+	const response = json(await getClaudeCodeStatus(validation));
+	invalidateStatusCache();
+	return response;
 }
 export async function postClaudeCodeLogin(request: Request): Promise<Response> {
+	const refusal = refuseCrossOrigin(request);
+	if (refusal) return refusal;
 	if (!isJson(request)) return json({ error: "application/json required" }, 415);
 	const { executable } = resolveExecutable();
 	if (!executable) return json({ error: "Claude Code not found" }, 400);
@@ -177,4 +246,22 @@ export async function postClaudeCodeLogin(request: Request): Promise<Response> {
 	if (validated.error) return json({ error: validated.error }, 400);
 	const login = await startLogin(executable);
 	return json({ login }, login.state === "pending" ? 200 : 502);
+}
+
+export async function deleteClaudeCodeEndpoint(request: Request): Promise<Response> {
+	const refusal = refuseCrossOrigin(request);
+	if (refusal) return refusal;
+	try { clearEndpointConfig(); }
+	catch { return json({ error: "unable to clear endpoint configuration" }, 500); }
+	invalidateStatusCache();
+	const settings = readClaudeCodeSettings();
+	if (settings.mode === "endpoint" && !claudeCodeEnvOverride().enabled) {
+		const status = await getClaudeCodeStatus();
+		try { writeClaudeCodeSettings({ mode: status.loggedIn ? "local" : "off", executable: status.executable }); }
+		catch { return json({ error: "unable to save connection settings" }, 500); }
+		applyClaudeCodeSettings();
+	}
+	const response = json(await getClaudeCodeStatus());
+	invalidateStatusCache();
+	return response;
 }
