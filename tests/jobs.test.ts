@@ -25,8 +25,9 @@
 
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
-import { after, afterEach, describe, it } from "node:test";
+import { after, afterEach, before, describe, it } from "node:test";
 import { createFauxCore, fauxAssistantMessage, fauxText, fauxToolCall, type AssistantMessage, type FauxResponseStep } from "@earendil-works/pi-ai";
 import {
 	accumulateJobUsage,
@@ -717,6 +718,27 @@ describe("research runner (async protocol §3)", () => {
 describe("pdf runner (sources v0)", () => {
 	const PDF_FIXTURE = path.join(import.meta.dirname, "fixtures", "sample-3page.pdf");
 	const PDF_INPUT = { path: PDF_FIXTURE, question: "What is the integral of x dx?" };
+	const relativePath = path.join("Course notes", "sample document.pdf");
+	let home: string;
+	const originalHome = process.env.HOME;
+	const originalUserProfile = process.env.USERPROFILE;
+
+	before(() => {
+		home = fs.mkdtempSync(path.join(os.tmpdir(), "lh-pdf-job-home-"));
+		const target = path.join(home, relativePath);
+		fs.mkdirSync(path.dirname(target), { recursive: true });
+		fs.copyFileSync(PDF_FIXTURE, target);
+		process.env.HOME = home;
+		process.env.USERPROFILE = home;
+	});
+
+	after(() => {
+		if (originalHome === undefined) delete process.env.HOME;
+		else process.env.HOME = originalHome;
+		if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+		else process.env.USERPROFILE = originalUserProfile;
+		fs.rmSync(home, { recursive: true, force: true });
+	});
 
 	/** A pdf-reader that triages, extracts pages 1-2, then briefs. */
 	function pdfReaderModel(): PiEngine {
@@ -758,6 +780,37 @@ describe("pdf runner (sources v0)", () => {
 		assert.equal((steer.details as { kind: string }).kind, "pdf");
 		assert.ok(steer.content.includes("integral rule"), "steer text carries the brief");
 	});
+
+	for (const mode of ["dispatch", "recovery"] as const) {
+		it(`resolves a home-relative PDF from ${mode} input without rewriting history`, async () => {
+			const chat = chatStore.createChat(`Test: relative PDF ${mode}`);
+			trackChat(chat.id);
+			const toolCallId = `call-pdf-relative-${mode}`;
+			const input = { ...PDF_INPUT, path: relativePath };
+			const messages = nativeToolMessages("read this pdf", "pdf", toolCallId, input);
+			chatStore.saveMessages(chat.id, messages);
+			const job = jobStore.createJob({ kind: "pdf", chatId: chat.id, toolCallId });
+			trackJob(job.id);
+			const delivery = fakeDeliver();
+			const runner = createJobRunner({ chatStore, jobStore, deliver: delivery.deliver });
+			pdfModelOverride.current = pdfReaderModel();
+			try {
+				await runner.runJob(job.id, mode === "dispatch" ? input : undefined);
+			} finally {
+				pdfModelOverride.current = undefined;
+			}
+
+			const done = jobStore.getJob(job.id)!;
+			assert.equal(done.status, "done");
+			const result = done.result as PdfResult;
+			assert.equal(result.path, path.join(home, relativePath));
+			assert.match(result.brief, /integral rule/);
+			assert.deepEqual(result.pagesRead, [1, 2]);
+			assert.deepEqual(result.pagesConsulted, [1, 2]);
+			assert.equal(delivery.steers.length, 1);
+			assert.deepEqual(chatStore.getChat(chat.id)!.messages, messages, "tool-call arguments remain as supplied");
+		});
+	}
 
 	it("an unreadable source: the job lands error with the PDF failed: brief and the steer flags the gap", async () => {
 		const chat = chatStore.createChat("Test: pdf runner failure");
