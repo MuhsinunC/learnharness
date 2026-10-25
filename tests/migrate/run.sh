@@ -7,6 +7,7 @@ set -eu
 shellcheck_bin=$(command -v shellcheck || true)
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH LC_ALL=C
+export LH_NO_GUI=1
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 failures=0
 run_logs=$(mktemp -d "${TMPDIR:-/tmp}/lh migrate logs.XXXXXX")
@@ -105,13 +106,22 @@ snapshot() {
     done)
 }
 invoke() {
-    # Fail closed: never invoke a production script without all four fixture hooks.
+    # Fail closed: only case 2 may omit no-GUI, once, with every fixture hook.
+    local gui_env=(LH_NO_GUI=1)
+    [ "${LH_NO_GUI:-}" = 1 ] || return 99
+    if [ "${1:-}" = --launch-stub-test ]; then
+        [ "$number" = 2 ] && [ ! -e "$case_root/launch-exception-used" ] || return 99
+        touch "$case_root/launch-exception-used"
+        gui_env=(-u LH_NO_GUI)
+        shift
+    fi
+    # Never invoke a production script without all four fixture hooks.
     [ "${quit_hook:-}" = 'exec /bin/bash "$LH_TEST_ROOT/quit stub" "$@"' ] &&
     [ "${launch_hook:-}" = 'exec /bin/bash "$LH_TEST_ROOT/launch stub" "$@"' ] &&
     [ "${ps_hook:-}" = 'exec /bin/bash "$LH_TEST_ROOT/ps stub" "$@"' ] &&
     [ "${launchctl_hook:-}" = 'exec /bin/bash "$LH_TEST_ROOT/launchctl stub" "$@"' ] || return 99
     for hook in quit launch ps launchctl; do [ -f "$case_root/$hook stub" ] || return 99; done
-    env -i HOME="$fake_home" TMPDIR="$case_tmp" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+    env -i "${gui_env[@]}" HOME="$fake_home" TMPDIR="$case_tmp" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
         LH_TEST_ROOT="$case_root" LH_MIGRATE_APPS_DIR="$apps" LH_MIGRATE_DATA_DIR="$data" LH_MIGRATE_BACKUP_ROOT="$backups" \
         LH_MIGRATE_RELEASE_JSON="$case_root/releases.json" \
         LH_MIGRATE_QUIT_CMD="$quit_hook" LH_MIGRATE_LAUNCH_CMD="$launch_hook" \
@@ -160,11 +170,14 @@ case_1() {
     tar -xpf "$backup/data.tar.gz" -C "$case_root/extracted"
     snapshot "$case_root/extracted/LearnHarness" > "$case_root/archive-data"
     cmp "$case_root/original-data" "$case_root/archive-data"
-    [ -f "$case_root/quit-called" ] && [ -f "$case_root/launched" ]
+    [ -f "$case_root/quit-called" ]
+    grep -Fxq 'LH_NO_GUI=1: not launching the app' "$case_root/output"
+    [ ! -e "$case_root/launched" ]
 }
 case_2() {
     setup 2
-    migrate
+    invoke --launch-stub-test "$repo/scripts/migrate-to-fork.sh"
+    [ -f "$case_root/launched" ]
     unchanged_data
     [ "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$apps/LearnHarness.app/Contents/Info.plist")" = 0.3.4-fork.2 ]
     if xattr -lr "$apps/LearnHarness.app" | grep -q com.apple.quarantine; then return 1; fi
@@ -182,7 +195,8 @@ case_3() {
     expect_failure
     no_backup; unchanged_data; unchanged_app
     grep -Fq 'Your installed LearnHarness (0.3.10) is newer than the fork build (v0.3.4-fork.2). Nothing was changed. Ask for a fork update.' "$case_root/output"
-    [ -f "$case_root/launched" ]
+    grep -Fxq 'LH_NO_GUI=1: not launching the app' "$case_root/output"
+    [ ! -e "$case_root/launched" ]
 }
 case_4() {
     setup 4
