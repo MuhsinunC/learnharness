@@ -5,6 +5,7 @@
 set -eu
 # Locate optional shellcheck before restricting PATH to stock macOS tools.
 shellcheck_bin=$(command -v shellcheck || true)
+if [ -z "$shellcheck_bin" ] && [ -x /opt/homebrew/bin/shellcheck ]; then shellcheck_bin=/opt/homebrew/bin/shellcheck; fi
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH LC_ALL=C
 export LH_NO_GUI=1
@@ -63,29 +64,46 @@ setup() {
     url=$(printf '%s' "$case_root/fork.dmg" | sed 's/ /%20/g')
     cat > "$case_root/releases.json" <<JSON
 [
- {"tag_name":"v99.0-fork.1","draft":true,"assets":[]},
+ {"tag_name":"lh-99.0.0-fork.1","draft":true,"assets":[]},
  {"tag_name":"v99.0","draft":false,"assets":[]},
- {"tag_name":"v0.3.4-fork.1","draft":false,"assets":[{"name":"LearnHarness-old-arm64.dmg","digest":null}]},
- {"tag_name":"v0.3.4-fork.2","draft":false,"prerelease":true,"assets":[{"name":"other.zip"},{"name":"LearnHarness-0.3.4-fork.2-arm64.dmg","browser_download_url":"file://$url","digest":"sha256:$digest"}]},
- {"tag_name":"v0.3.3-fork.99","draft":false,"assets":[]}
+ {"tag_name":"v99.0.0-fork.1","draft":false,"assets":[{"name":"LearnHarness-99.0.0-fork.1-arm64.dmg","browser_download_url":"file://$url","digest":"sha256:$digest"}]},
+ {"tag_name":"0.3.4-fork.1","draft":false,"assets":[{"name":"LearnHarness-old-arm64.dmg","digest":null}]},
+ {"tag_name":"lh-0.3.4-fork.2","draft":false,"prerelease":true,"assets":[{"name":"other.zip"},{"name":"LearnHarness-0.3.4-fork.2-arm64.dmg","browser_download_url":"file://$url","digest":"sha256:$digest"}]},
+ {"tag_name":"lh-0.3.3-fork.99","draft":false,"assets":[]}
 ]
 JSON
-    for hook in quit launch ps launchctl; do
+    # Stubs only print text: no process is started, signalled, or looked up for real.
+    for hook in quit launch ps launchctl lsappinfo; do
         cat > "$case_root/$hook stub" <<'STUB'
 #!/bin/bash
 set -eu
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 printf '%s\n' "$0 $*" >> "$LH_TEST_ROOT/calls"
 name=${0##*/}
+quits=0
+if [ -f "$LH_TEST_ROOT/quit-called" ]; then quits=$(( $(wc -c < "$LH_TEST_ROOT/quit-called") / 4 )); fi
+exe=$LH_MIGRATE_APPS_DIR/LearnHarness.app/Contents/MacOS/LearnHarness
 case "$name" in
     'quit stub')
         printf quit >> "$LH_TEST_ROOT/quit-called"
         if [ -f "$LH_TEST_ROOT/launched" ]; then mv "$LH_TEST_ROOT/launched" "$LH_TEST_ROOT/previous-launch"; fi;;
     'launch stub') printf launched >> "$LH_TEST_ROOT/launched";;
     'ps stub')
-        if [ -f "$LH_TEST_ROOT/stubborn" ] || [ -f "$LH_TEST_ROOT/launched" ]; then printf '123 %s/Contents/MacOS/LearnHarness\n' "$LH_MIGRATE_APPS_DIR/LearnHarness.app";
-        elif [ -f "$LH_TEST_ROOT/running" ] && [ ! -f "$LH_TEST_ROOT/quit-called" ]; then printf '123 %s/Contents/MacOS/LearnHarness\n' "$LH_MIGRATE_APPS_DIR/LearnHarness.app"; fi;;
-    'launchctl stub') if [ -f "$LH_TEST_ROOT/shipit" ]; then printf '"PID" = 123;\n'; fi;;
+        if [ -f "$LH_TEST_ROOT/ps-fail" ]; then exit 1; fi
+        if [ -f "$LH_TEST_ROOT/stubborn" ] || [ -f "$LH_TEST_ROOT/launched" ]; then printf '123 %s\n' "$exe";
+        elif [ -f "$LH_TEST_ROOT/running" ] && [ "$quits" -eq 0 ]; then printf '123 %s\n' "$exe"; fi
+        # A copy outside the selected install path, e.g. a mounted DMG.
+        if [ -f "$LH_TEST_ROOT/elsewhere" ] && [ "$quits" -eq 0 ]; then printf '124 /Volumes/LearnHarness/LearnHarness.app/Contents/MacOS/LearnHarness\n'; fi
+        # The Node-mode backend: same executable, plus server.js.
+        if { [ -f "$LH_TEST_ROOT/backend" ] && [ "$quits" -eq 0 ]; } || [ -f "$LH_TEST_ROOT/backend-only" ]; then
+            printf '125 %s %s\n' "$exe" "$LH_MIGRATE_APPS_DIR/LearnHarness.app/Contents/Resources/server/standalone/server.js"
+        fi
+        if [ -f "$LH_TEST_ROOT/relaunched" ] && [ "$quits" -lt 2 ]; then printf '126 %s\n' "$exe"; fi;;
+    'launchctl stub')
+        if [ -f "$LH_TEST_ROOT/shipit" ]; then printf '"PID" = 123;\n'; fi
+        # An update restart relaunches the app while ShipIt finishes.
+        if [ -f "$LH_TEST_ROOT/shipit-once" ]; then rm "$LH_TEST_ROOT/shipit-once"; touch "$LH_TEST_ROOT/relaunched"; printf '"PID" = 123;\n'; fi;;
+    'lsappinfo stub') if [ -f "$LH_TEST_ROOT/bundle-running" ] && [ "$quits" -eq 0 ]; then printf 'ASN:0x0-0x1-"LearnHarness":\n'; fi;;
 esac
 STUB
     done
@@ -93,6 +111,7 @@ STUB
     launch_hook='exec /bin/bash "$LH_TEST_ROOT/launch stub" "$@"'
     ps_hook='exec /bin/bash "$LH_TEST_ROOT/ps stub" "$@"'
     launchctl_hook='exec /bin/bash "$LH_TEST_ROOT/launchctl stub" "$@"'
+    lsappinfo_hook='exec /bin/bash "$LH_TEST_ROOT/lsappinfo stub" "$@"'
     snapshot "$data" > "$case_root/original-data"
     snapshot "$apps/LearnHarness.app" > "$case_root/original-app"
 }
@@ -115,21 +134,24 @@ invoke() {
         gui_env=(-u LH_NO_GUI)
         shift
     fi
-    # Never invoke a production script without all four fixture hooks.
+    # Never invoke a production script without all five fixture hooks.
     [ "${quit_hook:-}" = 'exec /bin/bash "$LH_TEST_ROOT/quit stub" "$@"' ] &&
     [ "${launch_hook:-}" = 'exec /bin/bash "$LH_TEST_ROOT/launch stub" "$@"' ] &&
     [ "${ps_hook:-}" = 'exec /bin/bash "$LH_TEST_ROOT/ps stub" "$@"' ] &&
-    [ "${launchctl_hook:-}" = 'exec /bin/bash "$LH_TEST_ROOT/launchctl stub" "$@"' ] || return 99
-    for hook in quit launch ps launchctl; do [ -f "$case_root/$hook stub" ] || return 99; done
+    [ "${launchctl_hook:-}" = 'exec /bin/bash "$LH_TEST_ROOT/launchctl stub" "$@"' ] &&
+    [ "${lsappinfo_hook:-}" = 'exec /bin/bash "$LH_TEST_ROOT/lsappinfo stub" "$@"' ] || return 99
+    for hook in quit launch ps launchctl lsappinfo; do [ -f "$case_root/$hook stub" ] || return 99; done
     env -i "${gui_env[@]}" HOME="$fake_home" TMPDIR="$case_tmp" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
         LH_TEST_ROOT="$case_root" LH_MIGRATE_APPS_DIR="$apps" LH_MIGRATE_DATA_DIR="$data" LH_MIGRATE_BACKUP_ROOT="$backups" \
         LH_MIGRATE_RELEASE_JSON="$case_root/releases.json" \
         LH_MIGRATE_QUIT_CMD="$quit_hook" LH_MIGRATE_LAUNCH_CMD="$launch_hook" \
-        LH_MIGRATE_PS_CMD="$ps_hook" LH_MIGRATE_LAUNCHCTL_CMD="$launchctl_hook" \
+        LH_MIGRATE_PS_CMD="$ps_hook" LH_MIGRATE_LAUNCHCTL_CMD="$launchctl_hook" LH_MIGRATE_LSAPPINFO_CMD="$lsappinfo_hook" \
         LH_MIGRATE_QUIT_TIMEOUT=1 LH_MIGRATE_SHIPIT_TIMEOUT=1 LH_MIGRATE_SHIPIT_SETTLE=0 LH_MIGRATE_LAUNCH_TIMEOUT=1 \
         /bin/bash "$@" > "$case_root/output" 2>&1
 }
 migrate() { invoke "$repo/scripts/migrate-to-fork.sh" "$@"; }
+# Run a snippet with migrate-common.sh sourced as $1, under the same hooks and environment.
+unit() { snippet=$1; shift; invoke -c "set -eu; . \"\$1\"; $snippet" unit "$repo/scripts/migrate-common.sh" "$@"; }
 backup_path() { find "$backups" -mindepth 1 -maxdepth 1 -type d | sort | tail -1; }
 unchanged_data() { snapshot "$data" > "$case_root/now-data"; cmp "$case_root/original-data" "$case_root/now-data"; }
 unchanged_app() { snapshot "$apps/LearnHarness.app" > "$case_root/now-app"; cmp "$case_root/original-app" "$case_root/now-app"; }
@@ -178,6 +200,8 @@ case_2() {
     setup 2
     invoke --launch-stub-test "$repo/scripts/migrate-to-fork.sh"
     [ -f "$case_root/launched" ]
+    # The undo command is printed before the launch step.
+    [ "$(grep -n '^To undo: ' "$case_root/output" | cut -d: -f1)" -lt "$(grep -n '^Launching LearnHarness' "$case_root/output" | cut -d: -f1)" ]
     unchanged_data
     [ "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$apps/LearnHarness.app/Contents/Info.plist")" = 0.3.4-fork.2 ]
     if xattr -lr "$apps/LearnHarness.app" | grep -q com.apple.quarantine; then return 1; fi
@@ -194,7 +218,7 @@ case_3() {
     touch "$case_root/running"
     expect_failure
     no_backup; unchanged_data; unchanged_app
-    grep -Fq 'Your installed LearnHarness (0.3.10) is newer than the fork build (v0.3.4-fork.2). Nothing was changed. Ask for a fork update.' "$case_root/output"
+    grep -Fq 'Your installed LearnHarness (0.3.10) is newer than the fork build (0.3.4-fork.2). Nothing was changed. Ask for a fork update.' "$case_root/output"
     grep -Fxq 'LH_NO_GUI=1: not launching the app' "$case_root/output"
     [ ! -e "$case_root/launched" ]
 }
@@ -306,7 +330,157 @@ case_10() {
     [ "$before" = "$(find "$backups" -type d | wc -l)" ]
     unchanged_data; unchanged_app
 }
-for number in 1 2 3 4 5 6 7 8 9 10; do
+case_11() {
+    # One lock shared by migrate and rollback; stale locks need --force-unlock.
+    setup 11
+    lock_dir=$fake_home/LearnHarness-backups/.lock
+    mkdir -p "$lock_dir"
+    printf '%s\n' "$$" > "$lock_dir/pid"
+    touch "$case_root/running"
+    expect_failure --dry-run
+    grep -Fq "Another migration or rollback is running (pid $$). Nothing was changed." "$case_root/output"
+    no_backup; unchanged_data; unchanged_app
+    [ ! -e "$case_root/quit-called" ]
+    [ "$(cat "$lock_dir/pid")" = "$$" ]
+    sleep 0 & dead=$!
+    wait "$dead"
+    printf '%s\n' "$dead" > "$lock_dir/pid"
+    expect_failure --dry-run
+    grep -Fq 'A stale lock from an interrupted run exists' "$case_root/output"
+    grep -Fq 'rerun with --force-unlock' "$case_root/output"
+    no_backup; [ -d "$lock_dir" ]; [ ! -e "$case_root/quit-called" ]
+    migrate --dry-run --force-unlock
+    grep -Fq "Removed a stale lock (pid $dead)." "$case_root/output"
+    [ ! -e "$lock_dir" ]
+    backup=$(backup_path)
+    mkdir "$lock_dir"
+    printf '%s\n' "$$" > "$lock_dir/pid"
+    if invoke "$backup/rollback-fork.sh" "$backup"; then return 1; fi
+    grep -Fq 'Another migration or rollback is running' "$case_root/output"
+    unchanged_data; unchanged_app
+    rm -rf "$lock_dir"
+    invoke "$backup/rollback-fork.sh" "$backup"
+    [ ! -e "$lock_dir" ]
+}
+case_12() {
+    # Copies outside the install path, the backend, and update relaunches all block the backup.
+    setup 12
+    touch "$case_root/elsewhere"
+    migrate --dry-run
+    [ "$(cat "$case_root/quit-called")" = quit ]
+    rm "$case_root/quit-called" "$case_root/elsewhere"
+    touch "$case_root/bundle-running"
+    migrate --dry-run
+    [ "$(cat "$case_root/quit-called")" = quit ]
+    rm "$case_root/quit-called" "$case_root/bundle-running"
+    touch "$case_root/backend"
+    migrate --dry-run
+    [ "$(cat "$case_root/quit-called")" = quit ]
+    rm "$case_root/quit-called" "$case_root/backend"
+    touch "$case_root/running" "$case_root/shipit-once"
+    migrate --dry-run
+    [ "$(cat "$case_root/quit-called")" = quitquit ]
+    grep -Fq 'LearnHarness relaunched after an update; asking it to quit again.' "$case_root/output"
+    unchanged_data; unchanged_app
+}
+case_13() {
+    # Full fork versions: revision-aware downgrade check and exact DMG version.
+    setup 13
+    fixture_app "$apps/LearnHarness.app" 0.3.4-fork.5
+    snapshot "$apps/LearnHarness.app" > "$case_root/original-app"
+    expect_failure
+    grep -Fq 'Your installed LearnHarness (0.3.4-fork.5) is newer than the fork build (0.3.4-fork.2).' "$case_root/output"
+    no_backup; unchanged_data; unchanged_app
+    for allowed in 0.3.4-fork.2 0.3.4; do
+        fixture_app "$apps/LearnHarness.app" "$allowed"
+        migrate --dry-run
+        rm -rf "$backups"
+    done
+    sed 's/"lh-0.3.4-fork.2"/"lh-0.3.4-fork.3"/' "$case_root/releases.json" > "$case_root/mismatch.json"
+    touch "$case_root/running"
+    expect_failure --release-json "$case_root/mismatch.json"
+    grep -Fq 'The DMG app version (0.3.4-fork.2) differs from the release version (0.3.4-fork.3). Nothing was changed.' "$case_root/output"
+    no_backup; unchanged_data; [ ! -e "$case_root/quit-called" ]
+    mkdir "$case_root/official"
+    fixture_app "$case_root/official/LearnHarness.app" 0.3.4
+    hdiutil create -srcfolder "$case_root/official" -volname LearnHarness -format UDZO -ov "$case_root/official.dmg" >/dev/null
+    expect_failure --dmg "$case_root/official.dmg"
+    grep -Fq 'The DMG is not a fork build (version 0.3.4). Nothing was changed.' "$case_root/output"
+    no_backup; unchanged_data; [ ! -e "$case_root/quit-called" ]
+}
+case_14() {
+    # Backup root validation, private ACL-free backups, and a shell-escaped undo command.
+    setup 14
+    touch "$case_root/running"
+    bad_roots=("$data/backups" "$data" relative/backups "$case_root/x/../backups" "$case_root/./backups")
+    if [ -d "$case_root/user data/learnharness" ]; then bad_roots+=("$case_root/user data/learnharness/backups"); fi
+    for bad in "${bad_roots[@]}"; do
+        backups=$bad
+        expect_failure --dry-run
+        grep -Eq 'outside the data folder|absolute path|components\. Nothing was changed\.' "$case_root/output"
+        [ ! -e "$case_root/quit-called" ]
+        unchanged_data
+    done
+    acl_parent="$case_root/acl parent"
+    mkdir "$acl_parent"
+    chmod +a 'everyone allow list,search,read,readattr,readextattr,readsecurity,file_inherit,directory_inherit' "$acl_parent"
+    ls -led "$acl_parent" > "$case_root/parent-acl"
+    grep -Eq '^ [0-9]+: ' "$case_root/parent-acl"
+    backups="$acl_parent/backups"
+    migrate --dry-run
+    backup=$(backup_path)
+    if { ls -led "$backups" "$backup"; ls -leRA "$backups"; } | grep -Eq '^ [0-9]+: '; then return 1; fi
+    rm "$case_root/quit-called"
+    backups="$case_root/odd \$HOME \`touch pwned\` \"double\" 'single'"
+    migrate --dry-run
+    backup=$(backup_path)
+    line=$(grep '^To undo: ' "$case_root/output")
+    # Parse only: never run the printed command (it carries none of the test hooks).
+    (cd "$case_root" && eval "set -- ${line#To undo: }" &&
+        [ "$#" -eq 3 ] && [ "$1" = /bin/bash ] && [ "$2" = "$backup/rollback-fork.sh" ] && [ "$3" = "$backup" ])
+    [ ! -e "$case_root/pwned" ]
+}
+case_15() {
+    # Function-level checks for paths no fixture can reach without launching or faulting.
+    setup 15
+    # Interrupted rollback data swap: the moved-aside data returns to the data path.
+    if unit 'init; swap_data "$2"' "$case_root/missing staged dir"; then return 1; fi
+    unchanged_data
+    [ -z "$(find "$(dirname "$data")" -maxdepth 1 -name 'LearnHarness.fork-*')" ]
+    # The archive check compares extracted contents with the manifest.
+    migrate --dry-run
+    backup=$(backup_path)
+    mkdir "$case_root/tampered"
+    tar -xpf "$backup/data.tar.gz" -C "$case_root/tampered"
+    printf 'torn\n' >> "$case_root/tampered/LearnHarness/data/chats/one.json"
+    tar -czpf "$case_root/tampered.tar.gz" -C "$case_root/tampered" LearnHarness
+    check='init; manifest=$2/manifest.txt; present=yes; mkdir "$tmp/x"; extract_verified "$3" "$tmp/x" LearnHarness'
+    unit "$check" "$backup" "$backup/data.tar.gz"
+    if unit "$check" "$backup" "$case_root/tampered.tar.gz"; then return 1; fi
+    grep -Fq 'Data manifest verification failed.' "$case_root/output"
+    # Checksum failures propagate.
+    printf 'secret\n' > "$case_root/unreadable"
+    chmod 000 "$case_root/unreadable"
+    if unit 'hash_file "$2"' "$case_root/unreadable"; then return 1; fi
+    grep -Fq 'Could not compute the SHA-256 digest' "$case_root/output"
+    chmod 600 "$case_root/unreadable"
+    # The backend alone is not a window process.
+    touch "$case_root/backend-only"
+    unit 'init; wait_for_window'
+    grep -Fxq 'Warning: no window process was seen; the install is complete.' "$case_root/output"
+    rm "$case_root/backend-only"
+    touch "$case_root/launched"
+    unit 'init; wait_for_window'
+    if grep -q Warning "$case_root/output"; then return 1; fi
+    rm "$case_root/launched"
+    # A listing failure after install only warns; before any change it reports nothing changed.
+    touch "$case_root/ps-fail"
+    unit 'init; wait_for_window'
+    grep -Fxq 'Warning: could not read the process listing to confirm the app started.' "$case_root/output"
+    if unit 'init; quit_app'; then return 1; fi
+    grep -Fq 'Could not read the process listing. Nothing was changed.' "$case_root/output"
+}
+for number in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
     # Do not use `if case_N`: it disables errexit inside the entire case.
     set +e
     (set -e; "case_$number") > "$run_logs/case-$number.log" 2>&1
