@@ -9,7 +9,7 @@ const root = path.resolve(import.meta.dirname, "..");
 const loader = path.join(root, "node_modules/tsx/dist/loader.mjs");
 const variable = "LH_CLAUDE_CODE_EXECUTABLE";
 
-function scenario(kind: string) {
+function scenario(kind: string, entry: "catalog" | "chat" = "catalog") {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-cc-catalog-"));
 	try {
 		const stub = path.join(dir, "claude");
@@ -40,27 +40,35 @@ function scenario(kind: string) {
 			} });
 			const warnings = [];
 			console.warn = (...args) => warnings.push(args.join(" "));
-			const m = await import(${JSON.stringify(path.join(root, "src/server/model-catalog.ts"))});
-			const model = { provider: "claude-code", id: "claude-opus-5-5" };
-			const snapshot = () => ({
-				catalog: m.modelCatalog(), providers: m.catalogProviders(),
-				ids: m.modelCatalog().models.filter(x => x.provider === "claude-code").map(x => x.provider + ":" + x.id),
-				limit: m.catalogContextLimits().get("claude-code:claude-opus-5-5") ?? null,
-				chat: m.validateChatSettings({ model }),
-				strong: m.validateModelsSettings({ strong: { model } }),
-			});
-			const first = snapshot();
-			const keys = await import(${JSON.stringify(path.join(root, "src/server/keys.ts"))});
-			if (${JSON.stringify(kind)} === "restore" || ${JSON.stringify(kind)} === "late" || ${JSON.stringify(kind)} === "reject-repeat") {
-				const a = await import(${JSON.stringify(path.join(root, "src/agent/models.ts"))});
-				const b = await import(${JSON.stringify(path.join(root, "src/server/claude-code-boot.ts"))});
-				a.resetClaudeCodeProviderForTests();
-				process.env.LH_CLAUDE_CODE_EXECUTABLE = ${JSON.stringify(stub)};
-				b.bootClaudeCodeProvider();
-				b.bootClaudeCodeProvider();
+			if (${JSON.stringify(entry)} === "chat") {
+				await import(${JSON.stringify(path.join(root, "src/server/chat-handler.ts"))});
+				const { piModels, piEngineForSpec } = await import(${JSON.stringify(path.join(root, "src/agent/models.ts"))});
+				const providerPresent = piModels().getProvider("claude-code") !== undefined;
+				const engine = providerPresent ? piEngineForSpec({ provider: "claude-code", id: "claude-opus-5-5" }) : undefined;
+				console.log(JSON.stringify({ providerPresent, engineModel: engine?.model.id ?? null, warnings }));
+			} else {
+				const m = await import(${JSON.stringify(path.join(root, "src/server/model-catalog.ts"))});
+				const model = { provider: "claude-code", id: "claude-opus-5-5" };
+				const snapshot = () => ({
+					catalog: m.modelCatalog(), providers: m.catalogProviders(),
+					ids: m.modelCatalog().models.filter(x => x.provider === "claude-code").map(x => x.provider + ":" + x.id),
+					limit: m.catalogContextLimits().get("claude-code:claude-opus-5-5") ?? null,
+					chat: m.validateChatSettings({ model }),
+					strong: m.validateModelsSettings({ strong: { model } }),
+				});
+				const first = snapshot();
+				const keys = await import(${JSON.stringify(path.join(root, "src/server/keys.ts"))});
+				if (${JSON.stringify(kind)} === "restore" || ${JSON.stringify(kind)} === "late" || ${JSON.stringify(kind)} === "reject-repeat") {
+					const a = await import(${JSON.stringify(path.join(root, "src/agent/models.ts"))});
+					const b = await import(${JSON.stringify(path.join(root, "src/server/claude-code-boot.ts"))});
+					a.resetClaudeCodeProviderForTests();
+					process.env.LH_CLAUDE_CODE_EXECUTABLE = ${JSON.stringify(stub)};
+					b.bootClaudeCodeProvider();
+					b.bootClaudeCodeProvider();
+				}
+				console.log(JSON.stringify({ first, final: snapshot(), warnings,
+					keyPresent: keys.providerKeyPresent("claude-code"), fillGapped: keys.isFillGapped("LH_CLAUDE_CODE_EXECUTABLE") }));
 			}
-			console.log(JSON.stringify({ first, final: snapshot(), warnings,
-				keyPresent: keys.providerKeyPresent("claude-code"), fillGapped: keys.isFillGapped("LH_CLAUDE_CODE_EXECUTABLE") }));
 		`], { cwd: dir, env, encoding: "utf8", timeout: 30_000 });
 		return { ...JSON.parse(out), stub };
 	} finally {
@@ -121,4 +129,15 @@ it("a rejected decision logs once across repeated boots", () => {
 	assert.deepEqual(result.first.ids, []);
 	assert.deepEqual(result.final, result.first);
 	assert.deepEqual(result.warnings, ["claude-code: LH_CLAUDE_CODE_EXECUTABLE ignored (not executable)"]);
+});
+
+it("chat-handler import boots the provider and engine only with the executable env", () => {
+	const accepted = scenario("accepted", "chat");
+	assert.equal(accepted.providerPresent, true);
+	assert.equal(accepted.engineModel, "claude-opus-5-5");
+	assert.deepEqual(accepted.warnings, []);
+	const unset = scenario("unset", "chat");
+	assert.equal(unset.providerPresent, false);
+	assert.equal(unset.engineModel, null);
+	assert.deepEqual(unset.warnings, []);
 });
