@@ -69,7 +69,8 @@ function scenario(kind: string, entry: "catalog" | "chat" = "catalog") {
 					const { builtinProviders } = await import(${JSON.stringify(import.meta.resolve("@earendil-works/pi-ai/providers/all"))});
 					const { AUTH_PROVIDER_KEYS } = await import(${JSON.stringify(path.join(root, "src/core/auth-keys.ts"))});
 					assert.deepEqual(piModels().getProviders().map(p => p.id), builtinProviders().map(p => p.id));
-					assert.deepEqual(m.catalogProviders(), AUTH_PROVIDER_KEYS.map(p => ({
+					const { isSubscriptionProvider } = await import(${JSON.stringify(path.join(root, "src/agent/subscription-connections.ts"))});
+					assert.deepEqual(m.catalogProviders().filter(p => !isSubscriptionProvider(p.id)), AUTH_PROVIDER_KEYS.map(p => ({
 						id: p.id, envVar: p.envVar, keyPresent: keys.keyValue(p.envVar) !== undefined,
 					})).sort((a, b) => a.id.localeCompare(b.id)));
 					assert.ok(m.catalogProviders().every(p => !("keyless" in p)));

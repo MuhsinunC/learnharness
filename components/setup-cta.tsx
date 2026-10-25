@@ -15,13 +15,11 @@
  * its own save), the same re-read pattern chat.tsx uses for "models".
  */
 
-import { useCallback, useEffect, useState } from "react";
 import { CLAUDE_CODE_OFF_REFUSAL } from "@/src/core";
 import type { AuthKeyStatus } from "@/src/core";
 import { classifyKeys, type ProviderKeyInfo } from "@/components/settings/keys-section";
 import { useModelCatalog } from "@/components/model-picker";
 import type { ModelCatalogResponse } from "@/src/core";
-import { useSettingsSaved } from "@/components/settings-signal";
 
 /** Pure: does a MODEL-PROVIDER key exist among the statuses? Reuses
  *  classifyKeys (the keys section's own classification — no drift):
@@ -35,42 +33,14 @@ export function hasProviderKey(
 	return classifyKeys(statuses, providers).providerRows.some((s) => s.present);
 }
 
-/** Pure: a registered keyless provider can run without an API key. */
-export function hasKeylessProvider(catalog: ModelCatalogResponse | undefined): boolean {
-	return catalog?.providers.some((p) => p.keyless && p.keyPresent) ?? false;
-}
-
-/** Loading is unknown; a failed catalog falls back to the keys answer. */
-export function zeroKeysVerdict(zeroKeys: boolean, catalog: ModelCatalogResponse | undefined, catalogFailed: boolean): boolean {
-	return catalog === undefined ? zeroKeys && catalogFailed : zeroKeys && !hasKeylessProvider(catalog);
-}
-
 /** The zero-keys truth for the calling page: TRUE only after a
  *  successful read says no provider key exists (pending and failed
  *  reads render nothing — the pill must never flash on a gap, and a
  *  failed read claiming "zero keys" would be a lie the CTA flow then
  *  leans on). Re-reads on the keys signal. */
 export function useZeroKeys(): boolean {
-	const [zeroKeys, setZeroKeys] = useState(false);
-	const { catalog, failed, refresh } = useModelCatalog();
-	const read = useCallback(() => {
-		fetch("/api/keys")
-			.then((r) => r.json())
-			.then((body: { keys?: AuthKeyStatus[]; providers?: ProviderKeyInfo[] }) => {
-				setZeroKeys(!hasProviderKey(body.keys ?? [], body.providers));
-			})
-			.catch(() => {});
-	}, []);
-	useEffect(() => {
-		read();
-	}, [read]);
-	useSettingsSaved((section) => {
-		if (section === "keys") {
-			read();
-			refresh();
-		}
-	});
-	return zeroKeysVerdict(zeroKeys, catalog, failed);
+	const { catalog } = useModelCatalog();
+	return catalog ? !catalog.providers.some((provider) => provider.keyPresent) : false;
 }
 
 /** The pill itself — the models CTA's chrome and placement, the keys
@@ -117,14 +87,17 @@ export function ClaudeCodeOffNotice() {
 	);
 }
 
+/** Choose the pre-send remedy from the live provider catalog. */
+export function usePreSendRemedy(zeroKeys: boolean): "setup" | "notice" | null {
+	const { catalog } = useModelCatalog();
+	return preSendRemedy(zeroKeys, catalog);
+}
+
 /** The strong-slot keyless truth for the PRE-SEND guard (home / /chat/new):
  *  the catalog seam with re-reads on BOTH signals that can flip it — "keys"
  *  (a provider key saved or deleted) and "models" (the strong slot
  *  re-pinned). Live-updates with the page, never mid-send. */
-export function usePreSendRemedy(zeroKeys: boolean): "setup" | "notice" | null {
-	const { catalog, refresh } = useModelCatalog();
-	useSettingsSaved((section) => {
-		if (section === "keys" || section === "models") refresh();
-	});
-	return preSendRemedy(zeroKeys, catalog);
+export function useStrongKeyless(): boolean {
+	const { catalog } = useModelCatalog();
+	return strongKeyless(catalog);
 }

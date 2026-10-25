@@ -34,7 +34,7 @@ const { buildAnswer, normalizeOptions, resolveCorrect } = await import("../src/c
 const { createJobRunner } = await import("../src/agent/subagents/runner.ts");
 const { deliverJobResult } = await import("../src/server/jobs.ts");
 const { resolveRoleSpec } = await import("../src/core/settings-resolution.ts");
-const { turnCost, jobCost } = await import("../src/core/prices.ts");
+const { turnCost, jobCost } = await import("../src/server/pricing.ts");
 
 const strong = { provider: "claude-code", id: "claude-opus-5-5" };
 const cheap = { provider: "claude-code", id: "claude-haiku-5-5" };
@@ -306,7 +306,7 @@ test("usage persists with token counts and reads as unpriced null", { timeout: 8
 	assert.equal(saved.turns!.length, 1);
 	const turn = saved.turns![0]!;
 	assert.equal(turn.model, "claude-code:claude-opus-5-5");
-	assert.deepEqual(turn.steps, [{ inputTokens: 11, outputTokens: 7, cacheReadTokens: 13, cacheWriteTokens: 5, reasoningTokens: 0 }]);
+	assert.deepEqual(turn.steps, [{ inputTokens: 11, outputTokens: 7, cacheReadTokens: 13, cacheWriteTokens: 5, cacheWrite1hTokens: 0, reasoningTokens: 0 }]);
 	assert.equal(turnCost(turn), null);
 });
 
