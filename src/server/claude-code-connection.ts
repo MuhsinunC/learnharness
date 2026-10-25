@@ -157,7 +157,6 @@ const statusCache = cacheGlobal[cacheKey] ??= {};
 function invalidateStatusCache(): void { statusCache.entry = undefined; }
 export function invalidateClaudeStatusCacheForTests(): void { invalidateStatusCache(); }
 async function getClaudeCodeStatus(validation?: Validation) {
-	if (validation) invalidateStatusCache();
 	if (!statusCache.entry || statusCache.entry.expires <= Date.now()) {
 		const entry = { expires: Infinity, promise: readSpawnStatus(validation) };
 		statusCache.entry = entry;
