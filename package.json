@@ -86,7 +86,7 @@
 		"@types/turndown": "^5.0.6",
 		"@typescript-eslint/parser": "^8.68.0",
 		"concurrently": "^10.0.5",
-		"electron": "^44.4.1",
+		"electron": "^44.9.3",
 		"electron-builder": "26.16.1",
 		"eslint": "^9.39.5",
 		"eslint-import-resolver-typescript": "^4.4.5",
