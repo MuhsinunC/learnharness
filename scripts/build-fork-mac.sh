@@ -35,6 +35,9 @@ node scripts/smoke-server.mjs --electron
 unset APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID APPLE_KEYCHAIN_PROFILE
 unset APPLE_API_KEY APPLE_API_KEY_ID APPLE_API_ISSUER CSC_LINK CSC_NAME CSC_KEY_PASSWORD
 export CSC_IDENTITY_AUTO_DISCOVERY=false
+# electron-builder skips signing on pull-request CI builds. The fork signs ad-hoc
+# (identity "-", no certificate or secret involved), so signing is always safe here.
+export CSC_FOR_PULL_REQUEST=true
 export DEVELOPER_DIR=${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}
 node_modules/.bin/electron-builder --config electron-builder.fork.yml --mac --arm64 \
   --publish never "-c.extraMetadata.version=$version"
