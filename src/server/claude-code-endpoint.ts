@@ -11,35 +11,47 @@ export function endpointFile(): string {
 	return path.join(path.dirname(AUTH_FILE), "claude-endpoint.json");
 }
 
-export function isAllowedEndpointUrl(value: string): boolean {
-	if (typeof value !== "string" || !value.trim()) return false;
+function normalizeEndpointUrl(value: unknown): string | null {
+	if (typeof value !== "string") return null;
+	const trimmed = value.trim();
+	if (!trimmed || /[?#]/.test(trimmed)) return null;
 	try {
-		const url = new URL(value);
-		return !url.username && !url.password && (url.protocol === "https:" ||
-			(url.protocol === "http:" && (url.hostname === "127.0.0.1" || url.hostname === "localhost")));
-	} catch { return false; }
+		const url = new URL(trimmed);
+		if (url.username || url.password || !(url.protocol === "https:" ||
+			(url.protocol === "http:" && (url.hostname === "127.0.0.1" || url.hostname === "localhost")))) return null;
+		return trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
+	} catch { return null; }
+}
+
+export function isAllowedEndpointUrl(value: string): boolean {
+	return normalizeEndpointUrl(value) !== null;
 }
 
 function validToken(value: unknown): value is string {
-	return typeof value === "string" && value.length > 0 && value.trim() === value && !/[\x00-\x1f\x7f]/.test(value);
+	return typeof value === "string" && value.length > 0 && !/[^\x21-\x7e]/.test(value);
 }
 
-function readStored(): { baseUrl?: unknown; token?: unknown } {
+type Stored = { kind: "absent" | "unreadable" } | { kind: "ok"; url: string | null; token?: string };
+function readStored(): Stored {
+	let raw: string;
+	try { raw = fs.readFileSync(endpointFile(), "utf8"); }
+	catch (error) { return { kind: (error as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "unreadable" }; }
 	try {
-		const value = JSON.parse(fs.readFileSync(endpointFile(), "utf8"));
-		return value && typeof value === "object" && !Array.isArray(value) ? value : {};
-	} catch { return {}; }
+		const value = JSON.parse(raw);
+		if (!value || typeof value !== "object" || Array.isArray(value) ||
+			("token" in value && !validToken(value.token))) return { kind: "unreadable" };
+		return { kind: "ok", url: normalizeEndpointUrl(value.baseUrl), token: value.token };
+	} catch { return { kind: "unreadable" }; }
 }
 
 export function readEndpointConfig(): ClaudeCodeEndpoint | null {
 	const cfg = readStored();
-	return typeof cfg.baseUrl === "string" && isAllowedEndpointUrl(cfg.baseUrl) && validToken(cfg.token)
-		? { baseUrl: cfg.baseUrl, token: cfg.token } : null;
+	return cfg.kind === "ok" && cfg.url && cfg.token ? { baseUrl: cfg.url, token: cfg.token } : null;
 }
 
 export function endpointStatus(): { baseUrl: string | null; tokenSet: boolean } {
 	const cfg = readStored();
-	return { baseUrl: typeof cfg.baseUrl === "string" && isAllowedEndpointUrl(cfg.baseUrl) ? cfg.baseUrl : null, tokenSet: validToken(cfg.token) };
+	return { baseUrl: cfg.kind === "ok" ? cfg.url : null, tokenSet: cfg.kind === "ok" && cfg.token !== undefined };
 }
 
 function saveError(error: unknown): Error {
@@ -48,16 +60,18 @@ function saveError(error: unknown): Error {
 }
 
 export function writeEndpointConfig(cfg: { baseUrl: string; token?: string }): void {
-	if (!isAllowedEndpointUrl(cfg.baseUrl)) throw new Error("claude-code endpoint: invalid base URL");
+	const url = normalizeEndpointUrl(cfg.baseUrl);
+	if (url === null) throw new Error("claude-code endpoint: invalid base URL");
 	if (cfg.token !== undefined && !validToken(cfg.token)) throw new Error("claude-code endpoint: invalid token");
 	const stored = readStored();
-	const token = cfg.token ?? (validToken(stored.token) ? stored.token : undefined);
+	if (cfg.token === undefined && stored.kind === "unreadable") throw new Error("claude-code endpoint: existing endpoint credentials could not be read; re-enter the token");
+	const token = cfg.token ?? (stored.kind === "ok" ? stored.token : undefined);
 	const file = endpointFile(), dir = path.dirname(file);
 	const tmp = path.join(dir, `.claude-endpoint.json.tmp-${process.pid}`);
 	try {
 		fs.mkdirSync(dir, { recursive: true });
 		fs.rmSync(tmp, { force: true });
-		fs.writeFileSync(tmp, JSON.stringify({ baseUrl: cfg.baseUrl, ...(token !== undefined ? { token } : {}) }), { mode: 0o600 });
+		fs.writeFileSync(tmp, JSON.stringify({ baseUrl: url, ...(token !== undefined ? { token } : {}) }), { mode: 0o600 });
 		fs.chmodSync(tmp, 0o600);
 		fs.renameSync(tmp, file);
 	} catch (error) {

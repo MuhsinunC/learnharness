@@ -53,13 +53,22 @@ test("R2: missing, corrupt, invalid and unreadable files fail closed; writes are
 	assert.equal(endpointFile(), join(dir, "claude-endpoint.json"));
 	assert.equal(readEndpointConfig(), null);
 	assert.deepEqual(endpointStatus(), { baseUrl: null, tokenSet: false });
-	for (const raw of [`{"baseUrl":"${B1}","token":"${SENTINEL}"`, `not json ${SENTINEL}`, "null", "[]", '"text"', JSON.stringify({ baseUrl: "ftp://relay.example", token: SENTINEL })]) {
+	for (const raw of [`{"baseUrl":"${B1}","token":"${SENTINEL}"`, `not json ${SENTINEL}`, "null", "[]", '"text"', JSON.stringify({ baseUrl: "ftp://relay.example", token: SENTINEL }), JSON.stringify({ baseUrl: B1, token: "inner space" })]) {
 		fs.writeFileSync(endpointFile(), raw);
 		assert.equal(readEndpointConfig(), null);
 		assert.deepEqual(endpointStatus(), { baseUrl: null, tokenSet: raw.includes("ftp://") });
+		if (!raw.includes("ftp://")) {
+			assert.throws(() => writeEndpointConfig({ baseUrl: B2 }), { message: "claude-code endpoint: existing endpoint credentials could not be read; re-enter the token" });
+			assert.equal(fs.readFileSync(endpointFile(), "utf8"), raw);
+		}
+		writeEndpointConfig({ baseUrl: B2, token: SENTINEL });
+		assert.deepEqual(readEndpointConfig(), { baseUrl: B2, token: SENTINEL });
 	}
 	fs.rmSync(endpointFile()); fs.mkdirSync(endpointFile());
-	assert.equal(readEndpointConfig(), null); assert.doesNotThrow(endpointStatus);
+	assert.equal(readEndpointConfig(), null); assert.deepEqual(endpointStatus(), { baseUrl: null, tokenSet: false });
+	assert.throws(() => writeEndpointConfig({ baseUrl: B2 }), { message: "claude-code endpoint: existing endpoint credentials could not be read; re-enter the token" });
+	assert.equal(fs.statSync(endpointFile()).isDirectory(), true);
+	assert.deepEqual(fs.readdirSync(endpointFile()), []);
 	fs.rmSync(endpointFile(), { recursive: true });
 	writeEndpointConfig({ baseUrl: B1, token: SENTINEL });
 	fs.chmodSync(endpointFile(), 0o644);
@@ -76,24 +85,21 @@ test("R3: omitted token preserves valid credentials or saves URL only; invalid t
 	writeEndpointConfig({ baseUrl: B2 });
 	assert.deepEqual(readEndpointConfig(), { baseUrl: B2, token: SENTINEL });
 	const bytes = fs.readFileSync(endpointFile());
-	for (const token of ["", " leading", "trailing ", "control\x7f", "control\n", 42, null]) {
+	for (const token of ["", " leading", "trailing ", "control\x7f", "control\n", "emoji😀", "inner space", 42, null]) {
 		assert.throws(() => writeEndpointConfig({ baseUrl: B1, token: token as string }), { message: "claude-code endpoint: invalid token" });
 		assert.deepEqual(fs.readFileSync(endpointFile()), bytes);
 	}
 	clearEndpointConfig(); clearEndpointConfig(); assert.equal(fs.existsSync(endpointFile()), false);
-	for (const stored of [undefined, { baseUrl: B1, token: "invalid\n" }]) {
-		if (stored) fs.writeFileSync(endpointFile(), JSON.stringify(stored));
-		writeEndpointConfig({ baseUrl: B2 });
-		assert.equal(readEndpointConfig(), null);
-		assert.deepEqual(endpointStatus(), { baseUrl: B2, tokenSet: false });
-		assert.deepEqual(JSON.parse(fs.readFileSync(endpointFile(), "utf8")), { baseUrl: B2 });
-	}
+	writeEndpointConfig({ baseUrl: B2 });
+	assert.equal(readEndpointConfig(), null);
+	assert.deepEqual(endpointStatus(), { baseUrl: B2, tokenSet: false });
+	assert.deepEqual(JSON.parse(fs.readFileSync(endpointFile(), "utf8")), { baseUrl: B2 });
 });
 
 test("R4: URL validation rejects unsafe destinations without touching stored bytes", () => {
 	writeEndpointConfig({ baseUrl: B1, token: SENTINEL });
 	const bytes = fs.readFileSync(endpointFile());
-	for (const baseUrl of ["ftp://relay.example", "http://example.com", "javascript:alert(1)", "", "   ", "http://localhost.evil.example", "http://127.0.0.1.nip.io", "https://user:pass@relay.example", "file:///etc/passwd", "not a url", "data:text/plain,test"]) {
+	for (const baseUrl of ["ftp://relay.example", "http://example.com", "javascript:alert(1)", "", "   ", "http://localhost.evil.example", "http://127.0.0.1.nip.io", "https://user:pass@relay.example", "file:///etc/passwd", "not a url", "data:text/plain,test", "https://relay.example/#x", "https://relay.example/?a=1", "https://relay.example/?", "https://relay.example/#"]) {
 		assert.equal(isAllowedEndpointUrl(baseUrl), false);
 		assert.throws(() => writeEndpointConfig({ baseUrl, token: SENTINEL }), { message: "claude-code endpoint: invalid base URL" });
 		assert.deepEqual(fs.readFileSync(endpointFile()), bytes);
@@ -115,5 +121,23 @@ test("R5: endpoint overrides poisoned transport vars and adds exactly two child-
 		assert.equal(JSON.stringify(buildChildEnv(process.env, endpoint)), JSON.stringify(buildChildEnv()));
 		assert.deepEqual(buildChildEnv(source, endpoint), { ...allowed, ...CC_CHILD_ENV });
 		assert.deepEqual(buildQueryOptions({ ...required, endpoint }), buildQueryOptions(required));
+	}
+});
+
+
+test("R4: URL normalization preserves input spelling apart from whitespace and one slash", () => {
+	for (const input of ["https://relay.example ", "https://relay.example/", " https://Relay.example/Path/ "]) {
+		writeEndpointConfig({ baseUrl: input, token: SENTINEL });
+		const expected = input.trim().replace(/\/$/, "");
+		assert.equal(JSON.parse(fs.readFileSync(endpointFile(), "utf8")).baseUrl, expected);
+		assert.equal(readEndpointConfig()?.baseUrl, expected);
+		fs.writeFileSync(endpointFile(), JSON.stringify({ baseUrl: input, token: SENTINEL }));
+		assert.equal(readEndpointConfig()?.baseUrl, expected);
+		assert.equal(endpointStatus().baseUrl, expected);
+	}
+	for (const input of ["https://relay.example/?", "https://relay.example/#"]) {
+		fs.writeFileSync(endpointFile(), JSON.stringify({ baseUrl: input, token: SENTINEL }));
+		assert.equal(readEndpointConfig(), null);
+		assert.equal(endpointStatus().baseUrl, null);
 	}
 });

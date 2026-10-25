@@ -14,6 +14,7 @@ dist/
 # dev auth/keys store (auth-keys wave): repo-root auth.json — secrets never committed
 auth.json
 claude-endpoint.json
+.claude-endpoint.json.tmp-*
 
 # dev-fresh launcher scratch (fresh-user sim): disposable per launch
 .fresh-data/
