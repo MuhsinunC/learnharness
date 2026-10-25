@@ -161,8 +161,18 @@ function assertSettledBody(body: string) {
 	const events = body.split("\n").filter(line => line.startsWith("data: ") && line !== "data: [DONE]").map(line => JSON.parse(line.slice(6)));
 	assert.ok(events.some(e => e.type === "agent_end"), body);
 	assert.ok(!events.some(e => e.type === "error"), body);
+	assert.ok(!events.some(e => e.type === "message_end" && (e.message?.stopReason === "error" || e.message?.errorMessage)), body);
 	assert.ok(body.endsWith("data: [DONE]\n\n"));
 }
+
+test("settled SSE rejects provider message errors and accepts clean completion", () => {
+	const terminal = 'data: {"type":"agent_end"}\n\ndata: [DONE]\n\n';
+	for (const message of [{ stopReason: "error", errorMessage: "provider failed" }, { stopReason: "error" }, { stopReason: "stop", errorMessage: "provider failed" }]) {
+		const body = `data: ${JSON.stringify({ type: "message_end", message: { role: "assistant", ...message } })}\n\n${terminal}`;
+		assert.throws(() => assertSettledBody(body), /provider failed|stopReason/);
+	}
+	assert.doesNotThrow(() => assertSettledBody('data: {"type":"message_end","message":{"role":"assistant","stopReason":"stop"}}\n\n' + terminal));
+});
 
 function noSessionFiles() {
 	const files = readdirSync(claudeDir, { recursive: true }) as string[];
@@ -247,7 +257,9 @@ test("a background sub-agent resolves the cheap claude-code slot and leaves no s
 	const job = jobStore.createJob({ kind: "research", chatId: chat.id, toolCallId: "research-1" });
 	const jobRun = jobRunner.runJob(job.id, { question: "Summarize planet order" });
 	try {
-		await started;
+		await Promise.race([started, jobRun.then(() => {
+			assert.fail(`job finished before the wake started: ${JSON.stringify(jobStore.getJob(job.id))}`);
+		})]);
 		const wake = runningTurn(chat.id);
 		assert.ok(wake, "job delivery started the teacher wake turn");
 		const body = new Response(wake.subscribe()).text();
@@ -255,8 +267,9 @@ test("a background sub-agent resolves the cheap claude-code slot and leaves no s
 		assertSettledBody(await body);
 	} finally {
 		releaseWake();
-		await jobRun;
+		await jobRun.catch(() => {});
 	}
+	await jobRun;
 	await tick();
 	const saved = jobStore.getJob(job.id)!;
 	assert.equal(calls.length, 3);
