@@ -13,7 +13,7 @@ export NEXT_TELEMETRY_DISABLED=1
 
 # Next rewrites this generated declaration during production builds.
 # Preserve even a caller's uncommitted version, including on build failure.
-next_env_backup=$(mktemp "${TMPDIR:?}/lh-fork-next-env.XXXXXX")
+next_env_backup=$(mktemp "${TMPDIR:-/tmp}/lh-fork-next-env.XXXXXX")
 cp -p next-env.d.ts "$next_env_backup"
 restore_next_env() {
   cp -p "$next_env_backup" next-env.d.ts
