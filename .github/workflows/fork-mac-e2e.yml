@@ -304,16 +304,21 @@ jobs:
                   import json
                   table = processes()
                   identities = {str(p): table[p][1] for p in owned if p in table}
-                  (base / 'owned.json').write_text(json.dumps(identities))
                   for sig in (signal.SIGTERM, signal.SIGKILL):
                       table = processes()
-                      for p in owned:
-                          if p in table and table[p][1] == identities.get(str(p)):
-                              try:
-                                  os.kill(p, sig)
-                              except ProcessLookupError:
-                                  pass
-                  remaining = set(processes()) & owned
+                      live = {int(p) for p, command in identities.items() if int(p) in table and table[int(p)][1] == command}
+                      # Helpers can appear after the initial launch observation.
+                      for p in list(live):
+                          live |= descendants(p, table)
+                      identities.update({str(p): table[p][1] for p in live})
+                      (base / 'owned.json').write_text(json.dumps(identities))
+                      for p in live:
+                          try:
+                              os.kill(p, sig)
+                          except ProcessLookupError:
+                              pass
+                  table = processes()
+                  remaining = {int(p) for p, command in identities.items() if int(p) in table and table[int(p)][1] == command}
                   print(f'owned PIDs remaining: {sorted(remaining)}', file=log)
                   if mounted:
                       run(['hdiutil', 'detach', str(mount)])

@@ -4,15 +4,23 @@ set -euo pipefail
 python3 - "$@" <<'PY'
 import hashlib
 import json
-import os
 import stat
 import sys
 from pathlib import Path
 
 mode, root, manifest = sys.argv[1:]
 root = Path(root)
+expected = {}
+if mode != 'write':
+    assert mode in ('subset', 'exact'), mode
+    with open(manifest) as src:
+        expected = {row[0]: row[1:] for row in map(json.loads, src)}
+# Enumerate additions by name only: live Chromium cache files can disappear or
+# change between enumeration and hashing. Only seeded entries are compared.
+paths = {str(p.relative_to(root)) for p in root.rglob('*')} | {'.'}
 entries = {}
-for path in [root, *sorted(root.rglob('*'))]:
+for name in sorted(paths if mode == 'write' else expected):
+    path = root / name
     info = path.lstat()
     kind = 'f' if stat.S_ISREG(info.st_mode) else 'd' if stat.S_ISDIR(info.st_mode) else 'l'
     digest = hashlib.sha256(path.read_bytes()).hexdigest() if kind == 'f' else '-'
@@ -22,12 +30,9 @@ if mode == 'write':
         for name, value in sorted(entries.items()):
             out.write(json.dumps([name, *value]) + '\n')
 else:
-    assert mode in ('subset', 'exact'), mode
-    with open(manifest) as src:
-        expected = {row[0]: row[1:] for row in map(json.loads, src)}
     for name, value in expected.items():
         assert entries.get(name) == value, f'Changed seeded entry: {name}'
-    additions = sorted(entries.keys() - expected.keys())
+    additions = sorted(paths - expected.keys())
     if mode == 'exact':
         assert not additions, f'Unexpected entries: {additions}'
     else:

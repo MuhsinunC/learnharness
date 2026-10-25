@@ -7,11 +7,13 @@ if [[ $# -gt 1 || ! ${1:-1} =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 # A scalar plus conditional expansion is safe with Bash 3.2 and set -u.
-case ${LH_FORK_ICON-} in
-  '') fork_icon= ;;
-  icns) fork_icon=-c.mac.icon=build/icon.icns ;;
-  *) echo 'LH_FORK_ICON must be unset or icns' >&2; exit 1 ;;
-esac
+fork_icon=
+if [[ ${LH_FORK_ICON+x} ]]; then
+  case $LH_FORK_ICON in
+    icns) fork_icon=-c.mac.icon=build/icon.icns ;;
+    *) echo 'LH_FORK_ICON must be unset or icns' >&2; exit 1 ;;
+  esac
+fi
 fork_number=${1:-1}
 version="$(node -p 'require("./package.json").version')-fork.${fork_number}"
 # Keep the caller's proxy settings unless asked to build on a direct connection.
