@@ -306,7 +306,7 @@ test("usage persists with token counts and reads as unpriced null", { timeout: 8
 	assert.equal(saved.turns!.length, 1);
 	const turn = saved.turns![0]!;
 	assert.equal(turn.model, "claude-code:claude-opus-5-5");
-	assert.deepEqual(turn.steps, [{ inputTokens: 11, outputTokens: 7, cacheReadTokens: 13, cacheWriteTokens: 5, reasoningTokens: 0 }]);
+	assert.deepEqual(turn.steps, [{ inputTokens: 11, outputTokens: 7, cacheReadTokens: 13, cacheWriteTokens: 5, cacheWrite1hTokens: 0, reasoningTokens: 0 }]);
 	assert.equal(turnCost(turn), null);
 });
 
