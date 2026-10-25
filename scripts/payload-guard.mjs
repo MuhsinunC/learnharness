@@ -28,7 +28,15 @@ export function findForbiddenPayload(rootDir) {
 			if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
 			const relative = [...parts, entry.name];
 			if (scoped && entry.name.startsWith("claude-agent-sdk-")) {
-				forbidden.push(relative.join("/"));
+				// Turbopack gives the ordinary SDK a hashed external alias.
+				let ordinarySdk = false;
+				try {
+					const target = fs.realpathSync(path.join(dir, entry.name));
+					ordinarySdk = fs.statSync(target).isDirectory()
+						&& JSON.parse(fs.readFileSync(path.join(target, "package.json"), "utf8"))?.name === "@anthropic-ai/claude-agent-sdk";
+				} catch { /* Unreadable or invalid package metadata stays forbidden. */ }
+				if (ordinarySdk) walk(relative);
+				else forbidden.push(relative.join("/"));
 			} else if (entry.isDirectory() || (fs.existsSync(path.join(dir, entry.name))
 				&& fs.statSync(path.join(dir, entry.name)).isDirectory())) {
 				walk(relative);
