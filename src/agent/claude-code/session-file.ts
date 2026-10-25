@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { lstatSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
+import { lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { createSession, deleteSession, getProjectDir, normalizeProjectPath, type Message } from "cc-session-io";
 
@@ -42,7 +42,18 @@ export function deleteSessionFile(id: string, cwd: string, claudeDir: string): v
 	deleteSession(id, cwd, claudeDir);
 }
 
-/** Liveness is in-process only: one server owns a data dir; cross-process liveness is out of scope. */
+function recordedCwd(path: string): string | undefined {
+	for (const line of readFileSync(path, "utf8").split("\n")) {
+		try {
+			const record = JSON.parse(line);
+			if (record !== null && typeof record === "object" && typeof record.cwd === "string") return record.cwd;
+		} catch {
+			continue;
+		}
+	}
+}
+
+/** Deletes only sessions whose recorded cwd is this workdir, plus orphaned companion dirs. */
 export function sweepStaleSessions(
 	cwd: string,
 	claudeDir: string,
@@ -58,11 +69,27 @@ export function sweepStaleSessions(
 		throw error;
 	}
 	for (const entry of entries) {
+		if (entry.isDirectory() && SESSION_ID.test(entry.name) && !activeSessions().has(entry.name)) {
+			try {
+				lstatSync(join(projectDir, `${entry.name}.jsonl`));
+				continue;
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			}
+			try {
+				const path = join(projectDir, entry.name);
+				if (lstatSync(path).mtimeMs < now - olderThanMs) rmSync(path, { recursive: true, force: true });
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			}
+			continue;
+		}
 		if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
 		const id = entry.name.slice(0, -".jsonl".length);
 		if (!SESSION_ID.test(id) || activeSessions().has(id)) continue;
 		try {
-			if (lstatSync(join(projectDir, entry.name)).mtimeMs < now - olderThanMs) {
+			const path = join(projectDir, entry.name);
+			if (lstatSync(path).mtimeMs < now - olderThanMs && recordedCwd(path) === normalizeProjectPath(cwd)) {
 				deleteSessionFile(id, cwd, claudeDir);
 			}
 		} catch (error) {
