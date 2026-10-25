@@ -36,3 +36,9 @@ To return to the official build, quit the fork and install the official DMG over
 Publish manually as a GitHub **pre-release** on [MuhsinunC/learnharness](https://github.com/MuhsinunC/learnharness), with tag `lh-<version>` (for example `lh-0.3.7-fork.1`). Attach the DMG and include its SHA-256 in the release notes. Bump N for every new fork build of the same base version. Never use a `v*` tag: upstream's `.github/workflows/release.yml` runs on those tags. The build script never publishes, tags, or contacts GitHub.
 
 The script keeps your proxy environment. If a proxy in your shell blocks npm or Electron downloads, run it as `LH_BUILD_NO_PROXY=1 scripts/build-fork-mac.sh`. After packaging, it checks the app's signature and runs the provider runtime probe under the packaged executable, and under Electron's Node before packaging.
+
+## macOS end-to-end CI
+
+`Fork macOS E2E` runs on pull requests, pushes to `ai-reviewed`, and manual dispatch, exclusively on GitHub-hosted Apple Silicon macOS runners. It builds the DMG, verifies migration from upstream 0.3.6 with fixture data, exercises the real window and local API, records Gatekeeper evidence and screenshots, and verifies rollback. It depends on `scripts/migrate-to-fork.sh`, `scripts/rollback-fork.sh`, and their shared migration helper being present in the stacked branch.
+
+CI sets `LH_FORK_ICON=icns` to use `build/icon.icns`: Xcode 26's `actool` for the Icon Composer document cannot run on macOS 15. Unset keeps the local Icon Composer default; other values are rejected. Logs and screenshots are retained for 14 days; backup archives and credential files are never uploaded.

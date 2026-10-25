@@ -1,0 +1,373 @@
+name: Fork macOS E2E
+
+on:
+  pull_request:
+  push:
+    branches: [ai-reviewed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-mac-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+      LH_FORK_ICON: icns
+    steps:
+      - name: Require a GitHub-hosted Apple Silicon runner
+        run: |
+          set -euo pipefail
+          [[ $GITHUB_ACTIONS == true && $RUNNER_ENVIRONMENT == github-hosted ]]
+          [[ $RUNNER_OS == macOS && $RUNNER_ARCH == ARM64 ]]
+          mkdir -p "$RUNNER_TEMP/e2e-artifacts"
+          echo "ART=$RUNNER_TEMP/e2e-artifacts" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+          cache: npm
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          npm ci
+      - name: Build fork DMG
+        run: |
+          set -euo pipefail
+          DEVELOPER_DIR="$(xcode-select -p)" scripts/build-fork-mac.sh 1
+          version=$(node -p 'require("./package.json").version')-fork.1
+          dmg="$GITHUB_WORKSPACE/dist/LearnHarness-$version-arm64.dmg"
+          test -f "$dmg"
+          {
+            echo "FORK_VERSION=$version"
+            echo "DMG=$dmg"
+            echo "DMG_SHA256=$(shasum -a 256 "$dmg" | cut -d ' ' -f 1)"
+          } >> "$GITHUB_ENV"
+      - name: Record clean baseline
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          folder = Path.home() / 'Library/Logs/DiagnosticReports'
+          names = sorted(p.name for p in folder.iterdir()) if folder.exists() else []
+          Path(os.environ['RUNNER_TEMP'], 'crash-baseline.json').write_text(json.dumps(names))
+          PY
+          test ! -e /Applications/LearnHarness.app
+          if pgrep -x LearnHarness; then exit 1; fi
+      - name: Install verified upstream 0.3.6 without launching
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+            https://api.github.com/repos/amosblomqvist/learnharness/releases/tags/v0.3.6 > "$RUNNER_TEMP/upstream.json"
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          assets = json.loads(Path(os.environ['RUNNER_TEMP'], 'upstream.json').read_text())['assets']
+          matches = [a for a in assets if a['name'] == 'LearnHarness-0.3.6-arm64.dmg']
+          assert len(matches) == 1
+          a = matches[0]
+          assert re.fullmatch(r'sha256:[0-9a-fA-F]{64}', a['digest'])
+          assert '\n' not in a['browser_download_url'] and '\r' not in a['browser_download_url']
+          with open(os.environ['GITHUB_ENV'], 'a') as out:
+              out.write('UPSTREAM_URL=' + a['browser_download_url'] + '\nUPSTREAM_SHA=' + a['digest'][7:].lower() + '\n')
+          PY
+      - name: Verify and mount upstream
+        run: |
+          set -euo pipefail
+          curl -fL "$UPSTREAM_URL" -o "$RUNNER_TEMP/upstream.dmg"
+          [[ $(shasum -a 256 "$RUNNER_TEMP/upstream.dmg" | cut -d ' ' -f 1) == "$UPSTREAM_SHA" ]]
+          mount="$RUNNER_TEMP/upstream-mount"
+          mkdir -p "$mount"
+          hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$mount" "$RUNNER_TEMP/upstream.dmg"
+          trap 'hdiutil detach "$mount"' EXIT
+          ditto "$mount/LearnHarness.app" /Applications/LearnHarness.app
+          [[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' /Applications/LearnHarness.app/Contents/Info.plist) == 0.3.6 ]]
+      - name: Seed golden migration data and manifest
+        run: |
+          set -euo pipefail
+          data="$HOME/Library/Application Support/LearnHarness"
+          test ! -e "$data"
+          mkdir -p "$data/data/chats" "$data/data/graph" "$data/nested dir"
+          # keys.ts fills the server environment from auth.json; model-catalog.ts
+          # selects static pi-ai models by key presence. No OpenRouter network
+          # request occurs at startup or GET /api/models. The connection refreshes
+          # use IPC; no subscription accounts are seeded. This value is only dummy data.
+          printf '{"OPENROUTER_API_KEY":"ci-dummy-not-a-real-key"}\n' > "$data/auth.json"
+          printf '{"fixture":"credential"}\n' > "$data/nested dir/foo-credentials.json"
+          chmod 600 "$data/auth.json" "$data/nested dir/foo-credentials.json"
+          printf '{}\n' > "$data/data/chats/one.json"
+          printf '{"chat":2}\n' > "$data/data/chats/two.json"
+          printf '{}\n' > "$data/data/graph/sources.json"
+          printf '{}\n' > "$data/data/graph/positions.json"
+          printf '{}\n' > "$data/data/settings.json"
+          printf 'fixture bytes\n' > "$data/nested dir/file with space"
+          bash tests/fork-mac-e2e/data-manifest.sh write "$data" "$ART/data-manifest.jsonl"
+      - name: Quarantine downloaded fork
+        run: |
+          set -euo pipefail
+          xattr -w com.apple.quarantine "0081;$(printf %x "$(date +%s)");Safari;" "$DMG"
+          xattr -l "$DMG" > "$ART/dmg-xattrs.txt"
+      - name: Migrate and assert summary
+        run: |
+          set -euo pipefail
+          env -u LH_NO_GUI scripts/migrate-to-fork.sh --dmg "$DMG" --sha256 "$DMG_SHA256" 2>&1 | tee "$ART/migrate-output.txt"
+          for line in 'Chats: 2; graph files: 2; settings: yes' 'Sign-in files (names only):' \
+            '  auth.json' '  nested dir/foo-credentials.json' 'Launching LearnHarness...' 'Done.'; do
+            grep -Fx "$line" "$ART/migrate-output.txt"
+          done
+          if grep -F 'Warning: no window process was seen' "$ART/migrate-output.txt"; then exit 1; fi
+          backup=$(sed -n 's/^Backup: //p' "$ART/migrate-output.txt")
+          test -d "$backup"
+          echo "BACKUP=$backup" >> "$GITHUB_ENV"
+      - name: Check private backup and installed signature
+        run: |
+          set -euo pipefail
+          [[ $(stat -f %Lp "$HOME/LearnHarness-backups") == 700 ]]
+          [[ $(stat -f %Lp "$BACKUP") == 700 ]]
+          for file in data.tar.gz manifest.txt rollback-fork.sh migrate-common.sh; do
+            test -f "$BACKUP/$file"
+            [[ $(stat -f %Lp "$BACKUP/$file") == 600 ]]
+          done
+          [[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$BACKUP/LearnHarness.app/Contents/Info.plist") == 0.3.6 ]]
+          app=/Applications/LearnHarness.app
+          [[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist") == "$FORK_VERSION" ]]
+          xattr -lr "$app" > "$ART/app-xattrs.txt"
+          if grep -F com.apple.quarantine "$ART/app-xattrs.txt"; then exit 1; fi
+          codesign --verify --deep --strict "$app"
+          codesign -dv --verbose=2 "$app" > "$ART/codesign.txt" 2>&1
+          grep -Fx 'Signature=adhoc' "$ART/codesign.txt"
+          if grep -E 'flags=.*runtime' "$ART/codesign.txt"; then exit 1; fi
+          result=0
+          spctl -a -vv "$app" > "$ART/spctl.txt" 2>&1 || result=$?
+          echo "exit=$result" >> "$ART/spctl.txt"
+      - name: Check real process and guarded local API
+        run: |
+          set -euo pipefail
+          pid=$(ps -axo pid=,command= | awk '$2=="/Applications/LearnHarness.app/Contents/MacOS/LearnHarness" && NF==2 {print $1}')
+          [[ $pid =~ ^[0-9]+$ ]]
+          echo "APP_PID=$pid" >> "$GITHUB_ENV"
+          screencapture -x "$ART/after-launch.png" || true
+          for ((i=0; i<30; i++)); do kill -0 "$pid"; sleep 1; done
+          log="$HOME/Library/Application Support/LearnHarness/logs/main.log"
+          port=
+          for ((i=0; i<60; i++)); do
+            port=$(sed -nE 's/.*server up: http:\/\/127\.0\.0\.1:([0-9]+).*/\1/p' "$log" | tail -1)
+            [[ -z $port ]] || break
+            sleep 1
+          done
+          [[ $port =~ ^[0-9]+$ ]]
+          echo "PORT=$port" >> "$GITHUB_ENV"
+          [[ $(curl --max-time 20 -sSL -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/") == 200 ]]
+          [[ $(curl --max-time 20 -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/api/models") == 403 ]]
+          # Inspect only descendants; never log the child's environment or secret.
+          secret=
+          for child in $(pgrep -P "$pid"); do
+            candidate=$(ps eww -o command= -p "$child" | sed -nE 's/.*LH_DESKTOP_API_SECRET=([0-9a-f]{64})( |$).*/\1/p')
+            if [[ $candidate =~ ^[0-9a-f]{64}$ ]]; then secret=$candidate; break; fi
+          done
+          [[ $secret =~ ^[0-9a-f]{64}$ ]]
+          echo "::add-mask::$secret"
+          [[ $(curl --max-time 60 -sS -H "x-learnharness-desktop: $secret" \
+            -o "$RUNNER_TEMP/models.json" -w '%{http_code}' "http://127.0.0.1:$port/api/models") == 200 ]]
+          unset secret candidate
+          python3 - "$RUNNER_TEMP/models.json" <<'PY'
+          import json, sys
+          data = json.load(open(sys.argv[1]))
+          assert isinstance(data['models'], list) and data['models']
+          assert any(m['provider'] == 'openrouter' and m['id'] for m in data['models'])
+          PY
+          screencapture -x "$ART/after-checks.png" || true
+      - name: Verify seeded data survived launch
+        run: |
+          set -euo pipefail
+          # No seeded-file exceptions: settings.ts reads without rewriting;
+          # chats.ts stamps only on writes; graph reads do not write sources or
+          # positions. Startup purges only unseeded legacy graph ledgers.
+          # Logs, Chromium profile and caches may be added and are listed by name.
+          bash tests/fork-mac-e2e/data-manifest.sh subset \
+            "$HOME/Library/Application Support/LearnHarness" "$ART/data-manifest.jsonl" > "$ART/new-data-entries.jsonl"
+      - name: Check new crash reports and preserve main log
+        run: |
+          set -euo pipefail
+          cp "$HOME/Library/Application Support/LearnHarness/logs/main.log" "$ART/main.log"
+          python3 - <<'PY'
+          import json, os, shutil
+          from pathlib import Path
+          folder = Path.home() / 'Library/Logs/DiagnosticReports'
+          baseline = set(json.loads(Path(os.environ['RUNNER_TEMP'], 'crash-baseline.json').read_text()))
+          new = [p for p in folder.iterdir() if p.name not in baseline] if folder.exists() else []
+          crashes = [p for p in new if 'LearnHarness' in p.name or 'Electron' in p.name]
+          for p in new:
+              if p.is_file() and (p.suffix == '.ips' or p in crashes):
+                  shutil.copy2(p, Path(os.environ['ART'], p.name))
+          assert not crashes, 'New LearnHarness/Electron crash report'
+          PY
+      - name: Quit the installed app with bounded fallback
+        run: |
+          set -euo pipefail
+          osascript -e 'quit app "LearnHarness"' > "$ART/quit.txt" 2>&1 &
+          quitter=$!
+          for ((i=0; i<20; i++)); do
+            kill -0 "$quitter" 2>/dev/null || break
+            sleep 1
+          done
+          if kill -0 "$quitter" 2>/dev/null; then
+            kill -TERM "$quitter" 2>/dev/null || true
+            kill -KILL "$quitter" 2>/dev/null || true
+          fi
+          wait "$quitter" || echo 'osascript did not quit cleanly' >> "$ART/quit.txt"
+          app_pids() { ps -axo pid=,command= | awk '$2 ~ /^\/Applications\/LearnHarness.app\/Contents\// {print $1}'; }
+          for ((i=0; i<30; i++)); do
+            [[ -n $(app_pids) ]] || break
+            sleep 1
+          done
+          remaining=$(app_pids)
+          if [[ -n $remaining ]]; then
+            echo 'osascript quit did not stop all app processes; exact-pid fallback used' >> "$ART/quit.txt"
+            for pid in $remaining; do kill -TERM "$pid" 2>/dev/null || true; done
+            for pid in $(app_pids); do kill -KILL "$pid" 2>/dev/null || true; done
+          fi
+          [[ -z $(app_pids) ]]
+      - name: Record quarantined Gatekeeper behavior
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          # Informational even when open, mounting, capture or cleanup fails.
+          python3 - <<'PY' || true
+          import os, signal, subprocess, time
+          from pathlib import Path
+          art = Path(os.environ['ART'])
+          base = Path(os.environ['RUNNER_TEMP'], 'gatekeeper')
+          base.mkdir(exist_ok=True)
+          mount = base / 'mount'
+          mount.mkdir(exist_ok=True)
+          app = base / 'LearnHarness.app'
+          mounted = False
+          owned = set()
+          def processes():
+              output = subprocess.check_output(['ps', '-axo', 'pid=,ppid=,command='], text=True)
+              return {int(p[0]): (int(p[1]), p[2]) for line in output.splitlines() if len(p := line.strip().split(None, 2)) == 3}
+          def descendants(pid, table):
+              result = {pid}
+              while True:
+                  more = {p for p, (parent, _) in table.items() if parent in result}
+                  if more <= result:
+                      return result
+                  result |= more
+          with (art / 'gatekeeper.txt').open('w') as log:
+              def run(args, seconds=20):
+                  result = subprocess.run(args, stdout=log, stderr=log, timeout=seconds, check=False)
+                  print(f'{args[0]} exit={result.returncode}', file=log, flush=True)
+                  return result.returncode
+              try:
+                  subprocess.run(['hdiutil', 'attach', '-nobrowse', '-readonly', '-noautoopen', '-mountpoint', str(mount), os.environ['DMG']], stdout=log, stderr=log, timeout=60, check=True)
+                  mounted = True
+                  subprocess.run(['ditto', str(mount / 'LearnHarness.app'), str(app)], stdout=log, stderr=log, timeout=60, check=True)
+                  run(['hdiutil', 'detach', str(mount)])
+                  mounted = False
+                  quarantine = f'0081;{int(time.time()):x};Safari;'
+                  subprocess.run(['xattr', '-w', 'com.apple.quarantine', quarantine, str(app)], stdout=log, stderr=log, check=True)
+                  run(['xattr', '-l', str(app)])
+                  run(['spctl', '-a', '-vv', str(app)])
+                  before = set(processes())
+                  try:
+                      run(['open', str(app)])
+                  except subprocess.TimeoutExpired:
+                      print('open timed out after 20 seconds', file=log)
+                  deadline = time.monotonic() + 20
+                  while time.monotonic() < deadline:
+                      table = processes()
+                      candidates = {p for p, (_, command) in table.items() if p not in before and command.endswith('/LearnHarness.app/Contents/MacOS/LearnHarness')}
+                      if candidates:
+                          for pid in candidates:
+                              owned |= descendants(pid, table)
+                          break
+                      time.sleep(1)
+                  print('started' if owned else 'blocked or no process observed', file=log, flush=True)
+                  run(['screencapture', '-x', str(art / 'gatekeeper.png')])
+              except Exception as error:
+                  print(f'Informational probe error: {error}', file=log, flush=True)
+              finally:
+                  # Persist only PID identities/commands, never environment, for always cleanup.
+                  import json
+                  table = processes()
+                  identities = {str(p): table[p][1] for p in owned if p in table}
+                  (base / 'owned.json').write_text(json.dumps(identities))
+                  for sig in (signal.SIGTERM, signal.SIGKILL):
+                      table = processes()
+                      for p in owned:
+                          if p in table and table[p][1] == identities.get(str(p)):
+                              try:
+                                  os.kill(p, sig)
+                              except ProcessLookupError:
+                                  pass
+                  remaining = set(processes()) & owned
+                  print(f'owned PIDs remaining: {sorted(remaining)}', file=log)
+                  if mounted:
+                      run(['hdiutil', 'detach', str(mount)])
+          PY
+          true
+      - name: Roll back and compare exact original data
+        run: |
+          set -euo pipefail
+          scripts/rollback-fork.sh "$BACKUP" 2>&1 | tee "$ART/rollback-output.txt"
+          grep -F 'Rollback complete. Preserved current data: ' "$ART/rollback-output.txt"
+          [[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' /Applications/LearnHarness.app/Contents/Info.plist) == 0.3.6 ]]
+          bash tests/fork-mac-e2e/data-manifest.sh exact \
+            "$HOME/Library/Application Support/LearnHarness" "$ART/data-manifest.jsonl"
+          preserved=$(sed -n 's/^Rollback complete. Preserved current data: //p' "$ART/rollback-output.txt")
+          test -d "$preserved"
+      - name: Best-effort cleanup and failure evidence
+        if: ${{ always() && runner.environment == 'github-hosted' && runner.os == 'macOS' && runner.arch == 'ARM64' }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, shutil, signal, subprocess
+          from pathlib import Path
+          art = Path(os.environ['RUNNER_TEMP'], 'e2e-artifacts')
+          art.mkdir(exist_ok=True)
+          source = Path.home() / 'Library/Application Support/LearnHarness/logs/main.log'
+          if source.is_file():
+              shutil.copy2(source, art / 'main.log')
+          folder = Path.home() / 'Library/Logs/DiagnosticReports'
+          baseline_path = Path(os.environ['RUNNER_TEMP'], 'crash-baseline.json')
+          baseline = set(json.loads(baseline_path.read_text())) if baseline_path.exists() else set()
+          if folder.exists():
+              for p in folder.iterdir():
+                  if p.is_file() and p.name not in baseline and p.suffix == '.ips':
+                      shutil.copy2(p, art / p.name)
+          identities_path = Path(os.environ['RUNNER_TEMP'], 'gatekeeper/owned.json')
+          identities = json.loads(identities_path.read_text()) if identities_path.exists() else {}
+          copy_prefix = str(Path(os.environ['RUNNER_TEMP'], 'gatekeeper/LearnHarness.app/Contents/'))
+          for sig in (signal.SIGTERM, signal.SIGKILL):
+              output = subprocess.check_output(['ps', '-axo', 'pid=,command='], text=True)
+              for line in output.splitlines():
+                  parts = line.strip().split(None, 1)
+                  if len(parts) != 2:
+                      continue
+                  pid, command = parts
+                  if command.startswith(('/Applications/LearnHarness.app/Contents/', copy_prefix)) or identities.get(pid) == command:
+                      try:
+                          os.kill(int(pid), sig)
+                      except ProcessLookupError:
+                          pass
+          PY
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: fork-mac-e2e
+          path: ${{ runner.temp }}/e2e-artifacts
+          if-no-files-found: warn
+          retention-days: 14
