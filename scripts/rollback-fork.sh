@@ -59,9 +59,11 @@ if [ "$present" = yes ]; then
     mkdir -p "$(dirname "$data")"
     stage=$(mktemp -d "$(dirname "$data")/.lh-restore.XXXXXX")
     archive_name=$(basename "$manifest_data")
-    tar -tzf "$backup/data.tar.gz" > "$tmp/archive-list"
-    awk -v prefix="$archive_name" 'index($0,"/")==1 || $0 ~ /(^|\/)\.\.(\/|$)/ || ($0!=prefix && index($0,prefix "/")!=1){bad=1}END{exit bad}' "$tmp/archive-list" || fail 'Unsafe archive paths.'
+    # BSD tar protects extraction paths; inspect actual names, not its escaped listing.
     tar -xpf "$backup/data.tar.gz" -C "$stage"
+    (shopt -s dotglob nullglob; set -- "$stage"/*
+        [ "$#" -eq 1 ] && [ "$1" = "$stage/$archive_name" ]
+    ) || fail 'Unexpected archive contents.'
     verify_data "$stage/$archive_name"
 fi
 if [ "$old_path" != none ]; then
