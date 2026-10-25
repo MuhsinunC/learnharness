@@ -27,7 +27,7 @@ The app keeps the same bundle identifier (`com.learnharness.LearnHarness`) and p
 2. Choose a fork whose base version is at or above the installed official version. Older code reading data migrated by a newer version is a downgrade risk.
 3. Mount the DMG, drag LearnHarness to Applications, and replace the existing app.
 4. A downloaded, non-notarized app is blocked by Gatekeeper on first launch. Use System Settings > Privacy & Security > **Open Anyway**; recent macOS does not offer the right-click bypass.
-5. Expect one keychain prompt for **LearnHarness Safe Storage** because the signature changed. Choose **Always Allow**. The app itself does not use Electron `safeStorage`; this item stores Chromium's cookie key.
+5. Because the signature changed, macOS may ask once for access to the keychain item **LearnHarness Safe Storage**. Choose **Always Allow**. The app itself does not use Electron `safeStorage`; this item stores Chromium's cookie key.
 
 To return to the official build, quit the fork and install the official DMG over it the same way, observing the same base-version downgrade precaution. Keep the Application Support directory to preserve data.
 
