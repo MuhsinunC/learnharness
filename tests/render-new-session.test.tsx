@@ -211,6 +211,6 @@ it("the draft setup slot renders the subscription-off notice without a key butto
 		<DraftShell busy={false} text="keep this draft" onChange={() => {}} onSend={() => {}} setupCta={<ClaudeCodeOffNotice />} />,
 	);
 	assert.ok(html.includes('data-testid="claude-code-off-notice"'));
-	assert.ok(html.includes(CLAUDE_CODE_OFF_REFUSAL));
+	assert.ok(html.includes(CLAUDE_CODE_OFF_REFUSAL.replaceAll("'", "&#x27;")));
 	assert.ok(!html.includes("Add a key"));
 });

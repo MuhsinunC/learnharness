@@ -152,7 +152,7 @@ describe("DispatchCard — the BYOK refusal tone (owner, 2026-09-22)", () => {
 	it("a Claude Code refusal shows restart instructions with no key setup action", () => {
 		const html = renderToStaticMarkup(inJobs([job({ error: CLAUDE_CODE_OFF_REFUSAL })]));
 		assert.ok(html.includes('data-testid="dispatch-refused"'));
-		assert.ok(html.includes(CLAUDE_CODE_OFF_REFUSAL));
+		assert.ok(html.includes(CLAUDE_CODE_OFF_REFUSAL.replaceAll("'", "&#x27;")));
 		assert.ok(!html.includes("dispatch-setup-link"));
 		assert.ok(!html.includes("Add a key"));
 	});
