@@ -27,6 +27,7 @@ import { providerEventNote } from "../agent/provider-events.ts";
 import { effectiveSettings, stores } from "./stores.ts";
 import { searchAvailable, searchProvider } from "./search.ts";
 import { providerKeyPresent } from "./keys.ts";
+import { bootClaudeCodeProvider } from "./claude-code-boot.ts";
 import {
 	extractionEnabled,
 	graphToolsEnabled,
@@ -72,6 +73,8 @@ import type {CallUsage, SteerMessage} from "../core/contracts.ts";
  * wake pipeline's server-side steers (src/server/jobs.ts) — one code path
  * for write-ahead persistence, turn liveness, and the turn services.
  */
+
+bootClaudeCodeProvider();
 
 const jobRunner = createJobRunner({
 	chatStore: stores.chatStore,
