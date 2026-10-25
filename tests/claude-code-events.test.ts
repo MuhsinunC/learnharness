@@ -530,3 +530,13 @@ test("R2-F3 review: superseding the last fallback tool preserves a later continu
  assert.deepEqual(h.mapper.output.content, [{ type: "text", text: "intro" }, { type: "text", text: "replacement" }, { type: "text", text: "answer" }]);
  assertDone(h, "stop"); assert.equal(hooks, 0);
 });
+
+test("hasOpenBlocks tracks tool argument streaming", () => {
+ const h = harness();
+ assert.equal(h.mapper.hasOpenBlocks, false);
+ h.send(start(), block(0, { type: "tool_use", id: "open", name: "mcp__custom-tools__bash", input: {} }), delta(0, { type: "input_json_delta", partial_json: "{}" }));
+ assert.equal(h.mapper.hasOpenBlocks, true);
+ h.send(stop(0));
+ assert.equal(h.mapper.hasOpenBlocks, false);
+ h.mapper.fail("error", "test cleanup");
+});
