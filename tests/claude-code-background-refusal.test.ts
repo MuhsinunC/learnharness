@@ -42,9 +42,7 @@ it("production job respawn finalizes a disabled Claude Code pin as a provider-ke
 		// Only replace the teacher wake, leaving chat-handler's real job respawn wired.
 		setTurnRunner(async () => 200);
 		recoverStaleJobs();
-		for (let i = 0; i < 100 && stores.jobStore.getJob(job.id)?.status === "running"; i++) {
-			await new Promise((resolve) => setTimeout(resolve, 10));
-		}
+		await waitFor(() => stores.jobStore.getJob(job.id)?.status !== "running");
 		const done = stores.jobStore.getJob(job.id)!;
 		assert.equal(done.error, providerKeyMissing("claude-code", ["cheap"]).error);
 		assert.equal(isProviderKeyRefusal(done.error), true);
