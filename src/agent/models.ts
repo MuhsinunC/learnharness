@@ -14,6 +14,7 @@ import { OpenRouterRoutingSchema } from "@earendil-works/pi-ai/providers/compat-
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { Value } from "typebox/value";
 import { type ModelRole } from "../../config.ts";
+import { claudeCodeProvider, type ClaudeCodeProviderDeps } from "./claude-code/provider.ts";
 import { DEFAULT_THINKING_ORDER } from "../core/settings.ts";
 import packageMetadata from "../../package.json" with { type: "json" };
 
@@ -49,6 +50,18 @@ export type { ThinkingLevel };
 
 let collection: ReturnType<typeof createModels> | undefined;
 
+let claudeCodeRegistration: { executable: string; deps?: ClaudeCodeProviderDeps } | undefined;
+
+export function enableClaudeCodeProvider(executable: string, deps?: ClaudeCodeProviderDeps): void {
+	claudeCodeRegistration = { executable, deps };
+	if (collection) collection.setProvider(claudeCodeProvider(executable, collection.getModels("anthropic"), deps));
+}
+
+export function resetClaudeCodeProviderForTests(): void {
+	claudeCodeRegistration = undefined;
+	collection?.deleteProvider("claude-code");
+}
+
 /** The process-wide pi-ai Models collection — EVERY builtin provider's
  *  catalog (model slots wave, 2026-09-20): engines and the picker resolve
  *  against all of pi-ai's per-provider catalogs, so a settings slot can pin
@@ -61,6 +74,10 @@ export function piModels() {
 	if (!collection) {
 		collection = createModels({ identity: APP_IDENTITY });
 		for (const provider of builtinProviders()) collection.setProvider(provider);
+		if (claudeCodeRegistration) {
+			const { executable, deps } = claudeCodeRegistration;
+			collection.setProvider(claudeCodeProvider(executable, collection.getModels("anthropic"), deps));
+		}
 	}
 	return collection;
 }
