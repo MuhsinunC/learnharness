@@ -4,10 +4,11 @@ import { afterEach, beforeEach, test } from "node:test";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { createAssistantMessageEventStream, type AssistantMessageEvent, type Model } from "@earendil-works/pi-ai";
 import { EventMapper, OVERAGE_REFUSAL, overageLatched, resetOverageLatchForTests,
- resultErrorText, describeRateLimitFailure, mapStopReason, parsePartialJson } from "../src/agent/claude-code/events";
+ resultErrorText, describeRateLimitFailure, mapStopReason } from "../src/agent/claude-code/events";
+import { MCP_TOOL_PREFIX } from "../src/agent/claude-code/query-options.ts";
 
 const model = { id: "test-model", api: "claude-agent-sdk", provider: "claude-code" } as Model<any>;
-const names = new Map(["bash", "edit", "read", "write"].map(name => [`mcp__custom-tools__${name}`, name]));
+const names = new Map(["bash", "edit", "read", "write"].map(name => [`${MCP_TOOL_PREFIX}${name}`, name]));
 const sdk = (message: unknown) => message as SDKMessage;
 const success = sdk({ type: "result", subtype: "success", is_error: false });
 const event = (type: string, fields: object = {}) => sdk({ type: "stream_event", event: { type, ...fields } });
@@ -118,7 +119,7 @@ for (const name of ["single-tool", "parallel-tools"]) test(`${name} fixture emit
 for (const [reason, expected] of [["end_turn", "stop"], ["max_tokens", "length"], ["tool_use", "toolUse"]] as const) test(`stop reason ${reason}`, () => {
  const h = harness();
  h.send(start());
- if (reason === "tool_use") h.send(block(0, { type: "tool_use", id: "tool", name: "mcp__custom-tools__bash", input: {} }), stop(0));
+ if (reason === "tool_use") h.send(block(0, { type: "tool_use", id: "tool", name: `${MCP_TOOL_PREFIX}bash`, input: {} }), stop(0));
  h.send(event("message_delta", { delta: { stop_reason: reason } }), event("message_stop"));
  if (reason !== "tool_use") { assert.equal(h.mapper.ended, false); h.mapper.finish(success); }
  assert.equal(h.mapper.output.stopReason, expected);
@@ -138,12 +139,13 @@ test("non-streaming fallback emits text thinking and mapped tools with original 
  const h = harness(); let callbacks = 0;
  h.mapper.onToolTurnEnded = () => { callbacks++; assert.equal(h.actions.at(-1), "end"); };
  h.send(assistant("fallback", [{ type: "text", text: "answer" }, { type: "thinking", thinking: "reason", signature: "sig" },
-  { type: "tool_use", id: "t", name: "MCP__CUSTOM-TOOLS__BASH", input: { command: "pwd", file_path: "keep" } }], { input_tokens: 7 }));
+  { type: "tool_use", id: "t", name: `${MCP_TOOL_PREFIX}bash`.toUpperCase(), input: { command: "pwd", file_path: "keep" } }], { input_tokens: 7 }));
  assert.deepEqual(h.mapper.output.content, [{ type: "text", text: "answer" }, { type: "thinking", thinking: "reason", thinkingSignature: "sig" },
   { type: "toolCall", id: "t", name: "bash", arguments: { command: "pwd", file_path: "keep" } }]);
  assert.equal(h.mapper.output.usage.input, 7);
- assert.equal(callbacks, 1);
+ assert.equal(callbacks, 0);
  h.send(success);
+ assert.equal(callbacks, 1);
 });
 
 test("different-id fallback replaces a stalled stream", () => {
@@ -190,10 +192,6 @@ test("pure helper cases preserve ported behavior", () => {
  ] as const) assert.equal(resultErrorText(sdk({ type: "result", ...fields })), expected);
  assert.equal(describeRateLimitFailure({}, "bad"), "Claude rate limit: bad");
  assert.equal(mapStopReason(undefined), "stop");
- const fallback = { keep: true };
- assert.equal(parsePartialJson("", fallback), fallback);
- assert.equal(parsePartialJson('{"a":', fallback), fallback);
- assert.deepEqual(parsePartialJson('{"a":1}', fallback), { a: 1 });
 });
 
 for (const flag of ["isUsingOverage", "overageInUse"]) test(`${flag} latches across mappers and refuses before tool completion`, () => {
@@ -218,7 +216,7 @@ for (const flag of ["isUsingOverage", "overageInUse"]) test(`${flag} latches acr
 
 for (const fallback of [false, true]) test(`unmapped Bash keeps name and arguments (${fallback ? "fallback" : "stream"})`, () => {
  const h = harness(); const input = { command: "pwd", file_path: "unchanged" };
- if (fallback) h.send(assistant("fallback", [{ type: "tool_use", id: "t", name: "Bash", input }]));
+ if (fallback) h.send(assistant("fallback", [{ type: "tool_use", id: "t", name: "Bash", input }]), success);
  else h.send(start(), block(0, { type: "tool_use", id: "t", name: "Bash", input: {} }),
   delta(0, { type: "input_json_delta", partial_json: '{"command":' }), delta(0, { type: "input_json_delta", partial_json: '"pwd","file_path":"unchanged"}' }), stop(0), event("message_stop"));
  assert.deepEqual(h.mapper.output.content, [{ type: "toolCall", id: "t", name: "Bash", arguments: input }]);
@@ -243,7 +241,7 @@ test("empty fail error emits start first", () => {
 });
 
 test("tool-turn guard warns without pushes; overage still latches after done", () => {
- const h = harness(); h.send(assistant("one", [{ type: "tool_use", id: "t", name: "Bash" }]));
+ const h = harness(); h.send(assistant("one", [{ type: "tool_use", id: "t", name: "Bash" }]), success);
  const snapshot = structuredClone(h.mapper.output); const count = h.events.length;
  h.send(start("late"), rate({ status: "rejected", overageInUse: true }));
  h.mapper.fail("error", "late"); h.mapper.finish(success);
@@ -273,4 +271,132 @@ test("rate warnings dedupe by five-percent step and threshold and rearm on reset
  h.send(rate({ status: "allowed" }), warning(0.81)); assert.equal(h.warns.length, 4);
  h.send(rate({ status: "rejected" }), warning(0.81)); assert.equal(h.warns.length, 6);
  h.send(success);
+});
+
+const toolFrame = (id: string, toolId: string, stop_reason: string | null = null) => sdk({
+ type: "assistant", parent_tool_use_id: null,
+ message: { id, stop_reason, content: [{ type: "tool_use", id: toolId, name: "Bash", input: { command: toolId } }] },
+});
+const result = (fields: object = {}) => sdk({ type: "result", subtype: "success", is_error: false, ...fields });
+function assertDone(h: ReturnType<typeof harness>, reason: "stop" | "length" | "toolUse") {
+ const last = h.events.at(-1);
+ assert.ok(last?.type === "done");
+ assert.equal(last.reason, reason);
+ assert.equal(h.mapper.output.stopReason, reason);
+}
+
+test("F1: streamed truncated tool turn ends length and fires its hook once", () => {
+ const h = harness(); let hooks = 0;
+ h.mapper.onToolTurnEnded = () => { hooks++; assert.equal(h.actions.at(-1), "end"); };
+ h.send(start(), block(0, { type: "tool_use", id: "truncated", name: "Bash" }),
+  delta(0, { type: "input_json_delta", partial_json: '{"command":' }), stop(0),
+  event("message_delta", { delta: { stop_reason: "max_tokens" } }), event("message_stop"), success);
+ assertDone(h, "length");
+ assert.equal(hooks, 1);
+ assert.equal(h.mapper.output.content[0]?.type, "toolCall");
+});
+
+for (const boundary of ["result", "user", "different-id", "stop-reason"] as const) test(`F2: fallback collects all same-id tool frames until ${boundary}`, () => {
+ const h = harness(); let hooks = 0;
+ h.mapper.onToolTurnEnded = () => {
+  hooks++; assert.equal(h.actions.at(-1), "end");
+  assert.deepEqual(h.mapper.output.content.filter(b => b.type === "toolCall").map(b => b.id), ["first", "second"]);
+ };
+ h.send(toolFrame("one", "first"));
+ assert.equal(h.mapper.ended, false); assert.equal(hooks, 0);
+ h.send(sdk({ ...toolFrame("nested", "ignored"), parent_tool_use_id: "subagent" }),
+  sdk({ type: "user", parent_tool_use_id: "subagent" }));
+ assert.equal(h.mapper.ended, false);
+ if (boundary === "stop-reason") h.send(toolFrame("one", "second", "tool_use"));
+ else {
+  h.send(toolFrame("one", "second"));
+  assert.equal(h.mapper.ended, false); assert.equal(hooks, 0);
+  if (boundary === "result") h.send(success);
+  else if (boundary === "user") h.send(sdk({ type: "user", parent_tool_use_id: null, message: { content: [{ type: "tool_result", tool_use_id: "first" }] } }));
+  else h.send(assistant("two", [{ type: "text", text: "ignored" }]));
+ }
+ assertDone(h, "toolUse"); assert.equal(hooks, 1);
+ const count = h.events.length;
+ h.send(toolFrame("one", "late"), success);
+ assert.equal(h.events.length, count); assert.equal(hooks, 1);
+});
+
+test("F3: nested stream assistant and user frames cannot alter the main text turn", () => {
+ const main = [start(), block(0, { type: "text" }), delta(0, { type: "text_delta", text: "main" }), stop(0), event("message_stop"), success];
+ const control = harness(); control.send(...main);
+ const h = harness();
+ const nested = (...messages: SDKMessage[]) => messages.map(m => sdk({ ...m, parent_tool_use_id: "parent" }));
+ h.send(...nested(start("nested"), block(0, { type: "tool_use", id: "t", name: "Bash" }), event("message_stop")), main[0]!, main[1]!,
+  ...nested(assistant("nested", [{ type: "text", text: "bad" }]), toolFrame("nested", "tool"), sdk({ type: "user" })),
+  main[2]!, ...nested(delta(0, { type: "text_delta", text: "bad" }), stop(0), event("message_stop")), ...main.slice(3));
+ assert.deepEqual(h.mapper.output.content, control.mapper.output.content);
+ assert.deepEqual(h.events.map(e => e.type), control.events.map(e => e.type));
+ assert.ok(h.debugs.some(m => /nested|subagent/.test(m)));
+});
+
+for (const [label, input, json, expected, malformed] of [
+ ["no args", {}, undefined, {}, false],
+ ["start input", { a: 2 }, undefined, { a: 2 }, false],
+ ["valid", {}, '{"a":1}', { a: 1 }, false],
+ ["trailing garbage", {}, '{"a":1}x', {}, true],
+ ["truncated", {}, '{"a":', {}, true],
+] as const) test(`F4: validates complete tool arguments (${label})`, () => {
+ const h = harness(); h.send(start(), block(0, { type: "tool_use", id: "t", name: "Bash", input }));
+ if (json !== undefined) h.send(delta(0, { type: "input_json_delta", partial_json: json }));
+ h.send(stop(0), event("message_stop"));
+ const tool = h.mapper.output.content[0]; assert.ok(tool?.type === "toolCall");
+ assert.deepEqual(tool.arguments, expected);
+ if (malformed) assert.ok(tool.argumentsError);
+ else assert.equal(tool.argumentsError, undefined);
+});
+
+for (const source of ["frame", "result"] as const) for (const tool of [false, true]) test(`F5: fallback ${tool ? "tool" : "text"} honors max_tokens from ${source}`, () => {
+ const h = harness(); let hooks = 0; h.mapper.onToolTurnEnded = () => { hooks++; };
+ const message = tool ? toolFrame("fallback", "t", source === "frame" ? "max_tokens" : null) : sdk({
+  type: "assistant", message: { id: "fallback", content: [{ type: "text", text: "partial" }], stop_reason: source === "frame" ? "max_tokens" : null },
+ });
+ h.send(message, result({ stop_reason: source === "result" ? "max_tokens" : null }));
+ assertDone(h, "length"); assert.equal(hooks, tool ? 1 : 0);
+});
+
+test("F6: result usage replaces provisional fallback usage", () => {
+ const h = harness(); h.send(assistant("fallback", [{ type: "text", text: "answer" }], { input_tokens: 1, output_tokens: 2 }),
+  result({ usage: { input_tokens: 11, output_tokens: 22, cache_read_input_tokens: 3, cache_creation_input_tokens: 4, cache_creation: { ephemeral_1h_input_tokens: 4 } } }));
+ assert.deepEqual(h.mapper.output.usage, { input: 11, output: 22, cacheRead: 3, cacheWrite: 4, cacheWrite1h: 4, totalTokens: 40,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
+});
+
+test("F6: result usage never overwrites final streamed usage", () => {
+ const h = harness(); h.send(start("one", { input_tokens: 7 }), block(0, { type: "text" }), stop(0),
+  event("message_delta", { usage: { input_tokens: 13, output_tokens: 17 } }), event("message_stop"),
+  result({ usage: { input_tokens: 999, output_tokens: 999 } }));
+ assert.equal(h.mapper.output.usage.input, 13); assert.equal(h.mapper.output.usage.output, 17);
+});
+
+test("F7: text fixture reports nested thinking tokens as reasoning", () => {
+ const h = harness(); h.send(...fixture("text")); assert.equal(h.mapper.output.usage.reasoning, 39);
+});
+
+for (const prelude of ["ping", "empty-start", "nested-content"] as const) test(`F8: ${prelude} does not suppress a non-streamed answer`, () => {
+ const h = harness();
+ if (prelude === "ping") h.send(event("ping"));
+ else if (prelude === "empty-start") h.send(start("fallback"));
+ else h.send(sdk({ ...start("fallback"), parent_tool_use_id: "nested" }), sdk({ ...block(0, { type: "text" }), parent_tool_use_id: "nested" }));
+ h.send(assistant("fallback", [{ type: "text", text: "answer" }]), success);
+ assert.deepEqual(h.mapper.output.content, [{ type: "text", text: "answer" }]); assertDone(h, "stop");
+});
+
+for (const status of ["allowed", "allowed_warning"]) test(`F9: ${status} clears a stale rejection`, () => {
+ const h = harness(); h.send(rate({ status: "rejected" }), rate({ status }), sdk({ type: "result", subtype: "error_during_execution", errors: ["unrelated"] }));
+ assert.equal(h.mapper.output.errorMessage, "unrelated");
+ assert.equal(h.mapper.output.errorMessage.startsWith("Claude rate limit"), false);
+});
+
+test("F10: partial tool fields are available during input_json_delta", () => {
+ const h = harness(); h.send(start(), block(0, { type: "tool_use", id: "t", name: "Bash", input: {} }),
+  delta(0, { type: "input_json_delta", partial_json: '{"command":"ls' }));
+ const e = h.events.at(-1); assert.ok(e?.type === "toolcall_delta");
+ const partial = e.partial.content[e.contentIndex]; assert.ok(partial?.type === "toolCall");
+ assert.equal(partial.arguments.command, "ls");
+ h.send(delta(0, { type: "input_json_delta", partial_json: '"}' }), stop(0), event("message_stop"));
 });
