@@ -450,3 +450,40 @@ test("R6: missing endpoint config fails without loading or querying the SDK", as
 	if (last?.type === "error") assert.equal(last.error.errorMessage, "claude-code: endpoint not configured");
 	assert.equal(reads, 1); assert.equal(loads, 0); assert.equal(h.calls.length, 0); noFiles(h);
 });
+
+for (const scenario of ["errors", "result", "iterator", "cleanup", "rate-limit"] as const) test(`endpoint secrets are redacted from ${scenario} reporting`, async t => {
+	const sentinel = "sentinel-secret-27";
+	const logs: unknown[][] = [];
+	for (const method of ["log", "info", "warn", "error", "debug"] as const) t.mock.method(console, method, (...args: unknown[]) => { logs.push(args); });
+	const h = fake(async function* () {
+		if (scenario === "iterator") throw new Error(`failure ${sentinel}`);
+		if (scenario === "errors") yield sdk({ type: "result", subtype: "error_during_execution", errors: [`failure ${sentinel}`] });
+		else if (scenario === "result") yield sdk({ type: "result", subtype: "success", is_error: true, result: `failure ${sentinel}` });
+		else {
+			if (scenario === "rate-limit") yield sdk({ type: "rate_limit_event", rate_limit_info: { status: "allowed", rateLimitType: sentinel } });
+			yield* turn();
+		}
+	});
+	const load = h.deps.loadQuery;
+	if (scenario === "cleanup") h.deps.loadQuery = async () => {
+		const queryFn = await load();
+		return ((params: Parameters<typeof query>[0]) => {
+			const child = queryFn(params);
+			child.return = async () => { throw new Error(`cleanup ${sentinel}`); };
+			return child;
+		}) as typeof query;
+	};
+	const deps = { ...h.deps, endpoint: () => ({ baseUrl: "https://relay.example", token: sentinel }), logger: {
+		warn: (text: string) => { h.deps.logger.warn(text); console.warn(text); },
+		debug: (text: string) => { h.deps.logger.debug(text); console.debug(text); },
+	} };
+	const stream = streamClaudeCode(model, transcript(), undefined, deps);
+	const events = await collect(stream);
+	const output = await stream.result();
+	assert.ok(!JSON.stringify(events).includes(sentinel));
+	assert.ok(!output.errorMessage?.includes(sentinel));
+	assert.ok(!JSON.stringify([h.warnings, h.debugs, logs]).includes(sentinel));
+	if (scenario === "cleanup") assert.ok(h.warnings.some(text => text.includes("cleanup [redacted]")));
+	else if (scenario === "rate-limit") assert.ok(h.debugs.some(text => text.includes("[redacted]")));
+	else assert.ok(output.errorMessage?.includes("[redacted]"));
+});
