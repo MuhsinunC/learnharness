@@ -37,7 +37,7 @@ END{
 [ "$(field format)" = 1 ] || fail 'Unsupported manifest format.'
 present=$(field data_present)
 case "$present" in yes|no) ;; *) fail 'Invalid data presence field.';; esac
-manifest_data=$(field data_path)
+manifest_data=$(trim_slashes "$(field data_path)")
 case "$manifest_data" in /*) ;; *) fail 'Invalid data path.';; esac
 export LH_MIGRATE_DATA_DIR=${LH_MIGRATE_DATA_DIR:-"$manifest_data"}
 old_path=$(field old_app_path); old_version=$(field old_app_version)
@@ -67,12 +67,14 @@ if [ "$old_path" != none ]; then
     printf 'Restoring the app...\n'
     prepare_app "$backup/LearnHarness.app"
 fi
+ensure_still_quit
 if [ "$present" = yes ]; then
     swap_data "$stage/$archive_name"
     rmdir "$stage"
     stage=
 else swap_data ''; fi
 if [ "$old_path" != none ]; then
+    ensure_still_quit
     swap_app
     [ "$(version "$app")" = "$old_version" ] || fail 'Restored app version mismatch.'
 else printf '%s\n' 'Backup contains no old app; leaving the installed app in place.'; fi
