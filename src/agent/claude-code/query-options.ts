@@ -1,4 +1,3 @@
-import type { ClaudeCodeEndpoint } from "../../core/claude-code-endpoint.ts";
 /**
  * Query options for the personal macOS/Linux provider.
  * The child env allowlist is the safety contract; Windows needs USERPROFILE/SystemRoot/APPDATA, which is out of scope.
@@ -6,6 +5,7 @@ import type { ClaudeCodeEndpoint } from "../../core/claude-code-endpoint.ts";
 import { isAbsolute } from "node:path";
 import type { Options, EffortLevel, McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import type { ModelThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
+import type { ClaudeCodeEndpoint } from "../../core/claude-code-endpoint.ts";
 import { buildChildEnv } from "./child-env.ts";
 
 export const CONTINUE_TEXT = "[Continue from the tool result above.]";
