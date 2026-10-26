@@ -96,6 +96,14 @@ export function classifyKeys(
 	};
 }
 
+/** A key row names its credential, not whichever provider sorts first.
+ * Pi exposes Zen and Go separately but both read OPENCODE_API_KEY. */
+export function providerKeyLabel(id: string, providers: readonly ProviderKeyInfo[] | undefined): string | undefined {
+	const matches = providers?.filter((p) => p.envVar === id);
+	if (matches?.some((p) => p.id === "opencode") && matches.some((p) => p.id === "opencode-go")) return "OpenCode (Zen / Go)";
+	return matches?.[0]?.label;
+}
+
 /** The minimal status line, e.g. "…ab12 · 64 chars" (" · env" marks an
  *  environment-owned value — the row itself is read-only then). Pure. */
 export function keyStatusLine(status: AuthKeyStatus): string {
@@ -417,7 +425,7 @@ export function KeysSection({
 				{providerRows.map((status) => (
 					<KeyTableRow
 						key={status.id}
-						label={providers?.find((p) => p.envVar === status.id)?.label ?? status.info?.label ?? status.id}
+						label={providerKeyLabel(status.id, providers) ?? status.info?.label ?? status.id}
 						docsUrl={status.info?.docsUrl}
 						status={status}
 						expanded={openRow === status.id}

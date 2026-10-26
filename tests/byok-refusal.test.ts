@@ -133,9 +133,9 @@ describe("prefillFromSlots — the SetupDialog prefill (BYOK wave)", () => {
 		assert.deepEqual(pre, {});
 	});
 
-	it("a pin whose model left the federated catalog does not prefill (lapsed key)", () => {
+	it("a disconnected saved identity still prefills without selectable metadata", () => {
 		const pre = prefillFromSlots(catalog, { strong: { model: { provider: "gone", id: "vanished" } }, cheap: null, vision: null });
-		assert.deepEqual(pre, {});
+		assert.deepEqual(pre, { strong: { provider: "gone", id: "vanished" } });
 	});
 
 	it("provider collisions never cross-pollute (same id, different provider)", () => {
@@ -168,9 +168,9 @@ describe("prefillLevelFromPin — the setup dialog's level prefill (chunk 2)", (
 	});
 });
 
-describe("setupStage — unchanged by the BYOK wave", () => {
+describe("setupStage — unknown is not keyless", () => {
 	it("keys first (owner ordering), pickers when a provider is keyed", () => {
-		assert.equal(setupStage(null), "keys");
+		assert.equal(setupStage(null), "loading");
 		assert.equal(setupStage([{ id: "x", keyPresent: false }]), "keys");
 		assert.equal(setupStage([{ id: "x", keyPresent: true }]), "pickers");
 	});

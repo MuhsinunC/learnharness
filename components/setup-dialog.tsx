@@ -13,7 +13,8 @@
  * STAGED BY DEPENDENCY (owner, 2026-09-20: "first keys, then models —
  * there's no point presenting the model picker before the user has set a
  * key because there are no models to pick then"):
- *   Stage 1 — no keyed provider: a SELF-CONTAINED first-key screen
+ *   Unknown catalog — neutral loading (or error/Retry), never a key screen.
+ *   Stage 1 — no keyed provider or saved selection: a SELF-CONTAINED first-key screen
  *     (zero-keys wave, owner 2026-09-25): provider picker + one key
  *     input + save via PUT /api/keys/:id. The dialog STAYS MOUNTED —
  *     saving dispatches the "keys" signal, the fetch effect re-runs on
@@ -23,6 +24,8 @@
  *   Stage 2 — Strong → Cheap → Vision pickers over the FEDERATED catalog
  *     (keyed providers only), the vision slot filtered to image-capable
  *     models, in the app's shared dropdown language (ModelMenuList).
+ *     Saved disconnected selections stay visible; Add provider opens the
+ *     connection body when no provider remains. Refreshes preserve edits.
  *     All three required (owner: no skip, no defaults); Save PUTs the
  *     models section and reports onDone(models).
  *
@@ -41,6 +44,7 @@ import { prettyModel } from "@/components/usage-format";
 import { ModelMenuList } from "@/components/settings/model-menu";
 import { MenuShell } from "@/components/menu-shell";
 import { notifySettingsSaved, useSettingsSaved } from "@/components/settings-signal";
+import { useModelCatalog } from "@/components/model-catalog";
 import { Hint } from "@/components/ui/hint";
 import { type ProviderKeyInfo } from "@/components/settings/keys-section";
 import { ProviderMenuList } from "@/components/settings/model-menu";
@@ -73,27 +77,26 @@ interface ModelsBody {
  *  (owner's dependency ordering). Exported for tests. */
 export function setupStage(
 	providers: { id: string; keyPresent: boolean }[] | null,
-): "keys" | "pickers" {
-	if (providers === null) return "keys"; // fetch failed → the honest fallback
+): "loading" | "keys" | "pickers" {
+	if (providers === null) return "loading";
 	return providers.some((p) => p.keyPresent) ? "pickers" : "keys";
 }
 
-/** Prefill (owner, BYOK wave 2026-09-22): each pinned tier opens with its
- *  pick — matched in the FEDERATED catalog (a lapsed key's pin does not
- *  prefill); unpinned tiers stay empty and carry the "needed" mark.
- *  First-run = nothing pinned → all three empty + marked. Exported pure
- *  for tests. */
+type ModelSelection = Pick<ModelCatalogEntry, "provider" | "id">;
+
+/** Saved identity is independent of selectable metadata. A disconnected
+ * pin still prefills; only the menu is restricted to the live catalog. */
 export function prefillFromSlots(
 	models: ModelCatalogEntry[],
 	slots: Record<ModelSlotName, { model: { provider: string; id: string } } | null> | undefined,
-): Partial<Record<ModelSlotName, ModelCatalogEntry>> {
-	const pre: Partial<Record<ModelSlotName, ModelCatalogEntry>> = {};
+): Partial<Record<ModelSlotName, ModelSelection>> {
+	const pre: Partial<Record<ModelSlotName, ModelSelection>> = {};
 	for (const slot of SLOT_ORDER) {
 		const pin = slots?.[slot];
 		const entry = pin?.model
 			? models.find((m) => m.provider === pin.model!.provider && m.id === pin.model!.id)
 			: undefined;
-		if (entry) pre[slot] = entry;
+		if (pin?.model) pre[slot] = entry ?? pin.model;
 	}
 	return pre;
 }
@@ -217,24 +220,39 @@ export function SetupKeysBody({
 	);
 }
 
-export function SetupDialog({
-	open,
-	onClose,
-	/** Saved: the models section landed; the caller marks configured (the
-	 *  draft stays put — save never sends). */
-	onDone,
-}: {
+function prefillLevels(body: ModelsBody | undefined): Partial<Record<ModelSlotName, ThinkingLevel>> {
+	const levels: Partial<Record<ModelSlotName, ThinkingLevel>> = {};
+	for (const slot of SLOT_ORDER) {
+		const pin = body?.slots?.[slot];
+		const entry = body?.models.find((m) => m.provider === pin?.model.provider && m.id === pin.model.id);
+		if (pin?.thinkingLevel !== undefined) levels[slot] = pin.thinkingLevel;
+		else if (entry) levels[slot] = prefillLevelFromPin(entry, pin);
+	}
+	return levels;
+}
+
+interface SetupDialogProps {
 	open: boolean;
 	onClose: () => void;
+	/** Saving never sends the caller's draft. */
 	onDone: (models: ModelsSettings) => void;
-}) {
+}
+
+export function SetupDialog(props: SetupDialogProps) {
+	// An open owns its draft. Mount-time cache seeding avoids a key-screen
+	// first frame, and reopening cannot reuse a previous open's edits.
+	return props.open ? <OpenSetupDialog {...props} /> : null;
+}
+
+function OpenSetupDialog({ onClose, onDone }: SetupDialogProps) {
 	const backdropDismiss = useBackdropDismiss(onClose);
-	const [body, setBody] = useState<ModelsBody | null>(null);
-	const [failed, setFailed] = useState(false);
-	const [picked, setPicked] = useState<Partial<Record<ModelSlotName, ModelCatalogEntry>>>({});
-	/** Per-slot thinking level (chunk 2): populated from the ordering on
-	 *  every fresh model pick, editable — an explicit pick always wins. */
-	const [levels, setLevels] = useState<Partial<Record<ModelSlotName, ThinkingLevel>>>({});
+	const { catalog, failed, refresh } = useModelCatalog();
+	const [lastBody, setLastBody] = useState<ModelsBody | undefined>(catalog);
+	const body = catalog ?? lastBody;
+	const [picked, setPicked] = useState(() => prefillFromSlots(catalog?.models ?? [], catalog?.slots));
+	const [levels, setLevels] = useState(() => prefillLevels(catalog));
+	const editedSlots = useRef(new Set<ModelSlotName>());
+	const [showKeys, setShowKeys] = useState(false);
 	const [saving, setSaving] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [openMenu, setOpenMenu] = useState<{ slot: ModelSlotName; kind: "model" | "thinking" } | null>(null);
@@ -249,9 +267,8 @@ export function SetupDialog({
 	const [keyError, setKeyError] = useState<string | null>(null);
 	const [keyMenuOpen, setKeyMenuOpen] = useState(false);
 	// Stage 1's provider-picker trigger wrapper — the shared shell's anchor.
-	// Declared with the other hooks: the early `if (!open) return null` sits
-	// below them all. (Stage 2's slot menus anchor by anchorTestid instead —
-	// see the slot MenuShell below for why a ref cannot work there.)
+	// Stage 2's slot menus anchor by anchorTestid instead — see the slot
+	// MenuShell below for why a freshly attached ref cannot work there.
 	const keyTriggerRef = useRef<HTMLDivElement>(null);
 
 	// The keys signal (zero-keys wave): keys-section saves/deletes AND
@@ -263,50 +280,44 @@ export function SetupDialog({
 		if (section === "keys") setKeysTick((t) => t + 1);
 	});
 
-	// Fresh /api/models per open AND per keys change — a key saved a
-	// moment ago (stage 1's own screen) widens the pickers immediately.
 	useEffect(() => {
-		if (!open) return;
 		let cancelled = false;
-		setBody(null);
-		setPicked({});
-		setLevels({});
-		setError(null);
 		fetch("/api/keys")
 			.then((r) => r.json())
 			.then((b: { providers?: ProviderKeyInfo[] }) => { if (!cancelled) setKeyProviders(b.providers ?? []); })
 			.catch(() => { if (!cancelled) setKeyProviders([]); });
-		fetch("/api/models")
-			.then((r) => { if (!r.ok) throw new Error("Catalog unavailable"); return r.json(); })
-			.then((b: ModelsBody) => {
-				if (cancelled) return;
-				setBody(b);
-				setFailed(false);
-				// Prefill (owner, 2026-09-22): each pinned tier opens with its
-				// pick (matched in the FEDERATED catalog — a lapsed key's pin
-				// does not prefill); unpinned tiers stay empty and carry the
-				// "needed" mark. First-run = nothing pinned → all three marked.
-				const pre = prefillFromSlots(b.models, b.slots);
-				setPicked(pre);
-				// Levels prefill with the pins (chunk 2): stored level if still
-				// supported, else the ordering's level for the pinned model.
-				const preLevels: Partial<Record<ModelSlotName, ThinkingLevel>> = {};
-				for (const slot of SLOT_ORDER) {
-					const entry = pre[slot];
-					if (entry) preLevels[slot] = prefillLevelFromPin(entry, b.slots?.[slot]);
-				}
-				setLevels(preLevels);
-			})
-			.catch(() => { if (!cancelled) setFailed(true); });
 		return () => { cancelled = true; };
-	}, [open, keysTick]);
+	}, [keysTick]);
+
+	useEffect(() => {
+		if (!catalog) return;
+		setLastBody(catalog);
+		const pre = prefillFromSlots(catalog.models, catalog.slots);
+		const preLevels = prefillLevels(catalog);
+		// Fresh metadata is always used, but a response cannot reset an
+		// edited slot, including a level chosen while the request was pending.
+		setPicked((prev) => {
+			const next = { ...prev };
+			for (const slot of SLOT_ORDER) if (!editedSlots.current.has(slot)) {
+				if (pre[slot]) next[slot] = pre[slot]; else delete next[slot];
+			}
+			return next;
+		});
+		setLevels((prev) => {
+			const next = { ...prev };
+			for (const slot of SLOT_ORDER) if (!editedSlots.current.has(slot)) {
+				if (preLevels[slot] !== undefined) next[slot] = preLevels[slot]; else delete next[slot];
+			}
+			return next;
+		});
+		if (catalog.providers.some((p) => p.keyPresent)) setShowKeys(false);
+	}, [catalog]);
 
 	// Esc + outside-click — layered dismissal, closable WITHOUT
 	// configuring (browsing stays possible; the gate is the send
 	// interception, not this dialog). An open slot menu eats Esc first
 	// (and any click outside it); only a bare Esc closes the dialog.
 	useEffect(() => {
-		if (!open) return;
 		const onKey = (e: KeyboardEvent) => {
 			if (e.key !== "Escape") return;
 			// THE ONE-ESC LAW (owner, keyboard round 2026-10-06): claim at
@@ -341,11 +352,10 @@ export function SetupDialog({
 			document.removeEventListener("keydown", onKey);
 			document.removeEventListener("pointerdown", onPointerDown);
 		};
-	}, [open, onClose, openMenu, keyMenuOpen]);
+	}, [onClose, openMenu, keyMenuOpen]);
 
-	if (!open) return null;
-
-	const stage = failed ? "keys" : setupStage(body ? body.providers : null);
+	const hasSelections = Object.keys(picked).length > 0 || SLOT_ORDER.some((slot) => body?.slots?.[slot]?.model);
+	const stage = hasSelections ? "pickers" : setupStage(body ? body.providers : null);
 	const allPicked = SLOT_ORDER.every((s) => picked[s]);
 
 	/** Stage 1's save: PUT the pasted key, dispatch the keys signal, and
@@ -398,6 +408,20 @@ export function SetupDialog({
 		onDone(models);
 	}
 
+	const keysBody = <SetupKeysBody
+		providers={keyProviders}
+		provider={keyProvider}
+		value={keyValue}
+		saving={keySaving}
+		error={keyError}
+		menuOpen={keyMenuOpen}
+		menuAnchor={keyTriggerRef}
+		onToggleMenu={() => setKeyMenuOpen((v) => !v)}
+		onPick={(p) => { setKeyProvider(p); setKeyMenuOpen(false); setKeyError(null); }}
+		onValue={setKeyValue}
+		onSave={() => void saveKey()}
+	/>;
+
 	return createPortal(
 		<div
 			className="fixed inset-0 z-50 flex items-center justify-center bg-background/80"
@@ -427,43 +451,32 @@ export function SetupDialog({
 </Hint>
 				</header>
 
-				{stage === "keys" ? (
-					<div className="flex flex-col px-6 py-5">
-						{failed ? (
-							<p className="text-sm text-foreground">
-								Model catalog could not be loaded. Check the connection and retry.
-							</p>
-						) : (
-							<SetupKeysBody
-								providers={keyProviders}
-								provider={keyProvider}
-								value={keyValue}
-								saving={keySaving}
-								error={keyError}
-								menuOpen={keyMenuOpen}
-								menuAnchor={keyTriggerRef}
-								onToggleMenu={() => setKeyMenuOpen((v) => !v)}
-								onPick={(p) => {
-									setKeyProvider(p);
-									setKeyMenuOpen(false);
-									setKeyError(null);
-								}}
-								onValue={setKeyValue}
-								onSave={() => void saveKey()}
-							/>
-						)}
-					</div>
+				{failed && (
+					<p role="alert" data-testid="setup-catalog-error" className="px-6 py-3 text-sm text-foreground">
+						Model catalog could not be loaded. Check the connection and retry. <button type="button" data-testid="setup-retry" className="underline" onClick={refresh}>Retry</button>
+					</p>
+				)}
+				{stage === "loading" ? (
+					!failed && <p data-testid="setup-stage-loading" role="status" className="px-6 py-5 text-xs text-muted-foreground">Loading models…</p>
+				) : stage === "keys" ? (
+					<div className="flex flex-col px-6 py-5">{keysBody}</div>
 				) : (
 					<div className="flex flex-col gap-4 overflow-y-auto px-6 py-5" data-testid="setup-stage-pickers">
 						<p className="text-xs text-muted-foreground">
 							Pick the model for each tier. All three are required before chats can start.
 						</p>
+						{!body?.providers.some((p) => p.keyPresent) && <>
+							<button type="button" data-testid="setup-add-provider" aria-expanded={showKeys} className="self-start text-xs underline" onClick={() => setShowKeys((v) => !v)}>Add provider</button>
+							{showKeys && keysBody}
+						</>}
 						{SLOT_ORDER.map((slot) => {
 							const entry = picked[slot];
 							const level = levels[slot];
-							const levelsForEntry = entry?.supportedLevels ?? [];
-							const catalog =
-								slot === "vision" ? body?.models.filter((m) => m.input.includes("image")) : body?.models;
+							const metadata = catalog?.models.find((m) => m.id === entry?.id && m.provider === entry.provider);
+							// Unavailable metadata cannot erase or clamp a saved preference.
+							const levelsForEntry = metadata?.supportedLevels ?? (entry ? Object.keys(THINKING_LABEL) : []);
+							const available = catalog?.models ?? (failed ? [] : undefined);
+							const slotCatalog = slot === "vision" ? available?.filter((m) => m.input.includes("image")) : available;
 							return (
 								<div key={slot} data-testid={`setup-slot-${slot}`} className="flex flex-col gap-1.5">
 									<span className="flex items-center gap-1.5">
@@ -481,6 +494,7 @@ export function SetupDialog({
 									{slot !== "strong" && <><ChatGPTBackgroundAccess provider={entry?.provider} /><NativeSubscriptionBackgroundAccess provider={entry?.provider} /></>}
 									<div className="flex items-center gap-2">
 										<div className="relative flex-1">
+											<Hint label={entry ? `${entry.provider}:${entry.id}` : "Pick a model…"}>
 											<button
 												type="button"
 												aria-label={`${SLOT_META[slot].label} model`}
@@ -494,6 +508,7 @@ export function SetupDialog({
 													▾
 												</span>
 											</button>
+											</Hint>
 											{/* Anchor by TESTID, not a ref (the settings-section pattern):
 											    React attaches a host element's ref AFTER its descendants'
 											    layout effects run, so a ref freshly attached in this same
@@ -512,10 +527,11 @@ export function SetupDialog({
 													menuClass="flex w-[22rem] flex-col rounded-xl border border-border bg-card p-2 text-xs shadow-xl"
 												>
 													<ModelMenuList
-														models={catalog}
+														models={slotCatalog}
 														effectiveId={entry?.id}
 														effectiveProvider={entry?.provider}
 														onPick={(m) => {
+															editedSlots.current.add(slot);
 															setPicked((prev) => ({ ...prev, [slot]: m }));
 															// Auto-populate (chunk 2, owner: "populate
 															// everywhere"): no explicit level → the
@@ -527,7 +543,7 @@ export function SetupDialog({
 															}));
 															setOpenMenu(null);
 														}}
-														footer={catalog && catalog.length === 0 ? "No image-capable models. Add a provider key with access to a vision model." : undefined}
+														footer={slotCatalog && slotCatalog.length === 0 && slot === "vision" ? "No image-capable models. Add a provider key with access to a vision model." : undefined}
 													/>
 												</MenuShell>
 											)}
@@ -563,6 +579,7 @@ export function SetupDialog({
 														levels={levelsForEntry.map(String)}
 														effectiveLevel={level}
 														onPick={(lv) => {
+															editedSlots.current.add(slot);
 															setLevels((prev) => ({ ...prev, [slot]: lv as ThinkingLevel }));
 															setOpenMenu(null);
 														}}
