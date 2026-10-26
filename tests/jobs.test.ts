@@ -801,6 +801,7 @@ describe("pdf runner (sources v0)", () => {
 			const toolCallId = `call-pdf-relative-${mode}`;
 			const input = { ...PDF_INPUT, path: relativePath };
 			const messages = nativeToolMessages("read this pdf", "pdf", toolCallId, input);
+			const before = structuredClone(messages);
 			chatStore.saveMessages(chat.id, messages);
 			const job = jobStore.createJob({ kind: "pdf", chatId: chat.id, toolCallId });
 			trackJob(job.id);
@@ -813,15 +814,31 @@ describe("pdf runner (sources v0)", () => {
 				pdfModelOverride.current = undefined;
 			}
 
+			// Worker completion is not the delivery barrier: wait for canonical
+			// acceptance before asserting the history prefix and appended result.
+			await waitFor(() => jobStore.getJob(job.id)?.delivery?.status === "delivered", 8000, "canonical PDF delivery acknowledgement");
 			const done = jobStore.getJob(job.id)!;
 			assert.equal(done.status, "done");
+			assert.deepEqual(done.delivery, { kind: "result", status: "delivered" });
 			const result = done.result as PdfResult;
 			assert.equal(result.path, path.join(home, relativePath));
 			assert.match(result.brief, /integral rule/);
 			assert.deepEqual(result.pagesRead, [1, 2]);
 			assert.deepEqual(result.pagesConsulted, [1, 2]);
 			assert.equal(delivery.steers.length, 1);
-			assert.deepEqual(chatStore.getChat(chat.id)!.messages, messages, "tool-call arguments remain as supplied");
+			assert.equal(input.path, relativePath, "dispatch input remains relative");
+			const persisted = chatStore.getChat(chat.id)!.messages;
+			assert.deepEqual(persisted.slice(0, before.length), before, "original history and tool-call arguments remain as supplied");
+			const steer = delivery.steers[0]!;
+			assert.equal(steer.id, `steer_${job.id}`);
+			assert.equal(steer.role, "custom");
+			assert.equal(steer.customType, "subagent-steer");
+			const details = steer.details as { jobId: string; kind: string; toolCallId: string; result: PdfResult };
+			assert.equal(details.jobId, job.id);
+			assert.equal(details.kind, "pdf");
+			assert.equal(details.toolCallId, toolCallId);
+			assert.deepEqual(details.result, result, "the canonical steer carries the resolved PDF result");
+			assert.deepEqual(persisted.slice(before.length), [steer], "exactly one captured result is appended after the unchanged history");
 		});
 	}
 
