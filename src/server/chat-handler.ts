@@ -56,6 +56,7 @@ import {
 	ChatInputError,
 	inputAppends,
 	parseChatInput,
+	retryDrops,
 	type TurnInput,
 } from "../core/input-events.ts";
 import { steerDelivered } from "../core/contracts.ts";
@@ -229,6 +230,18 @@ export async function handleChatInput(
 		return Response.json(envelope, { status: 503 });
 	}
 
+	// THE RETRY GATE (issue #110): a retry with no failure to retry
+	// refuses here, BEFORE compaction and beginTurn — no effects. The
+	// trim itself re-validates on the record compaction re-reads below.
+	if (input.type === "retry") {
+		try {
+			retryDrops(record.messages);
+		} catch (err) {
+			if (err instanceof ChatInputError) return Response.json({ error: err.message }, { status: 400 });
+			throw err;
+		}
+	}
+
 	// THE COMPACTION GATE (owner round 14, 2026-10-05 — the structural
 	// ruling: NOTHING model-facing for this chat interleaves with a
 	// running compaction): await any in-flight compaction (the settle
@@ -267,6 +280,19 @@ export async function handleChatInput(
 	const compactedRecord = stores.chatStore.getChat(chatId);
 	if (!compactedRecord) return Response.json({ error: "Unknown chat" }, { status: 404 });
 	record = compactedRecord;
+	// THE RETRY TRIM: recomputed on the current record (the awaits above
+	// let other writers land), still before beginTurn. The trimmed record
+	// reaches disk through the write-ahead.
+	if (input.type === "retry") {
+		let drop: Set<string>;
+		try {
+			drop = retryDrops(record.messages);
+		} catch (err) {
+			if (err instanceof ChatInputError) return Response.json({ error: err.message }, { status: 400 });
+			throw err;
+		}
+		record = { ...record, messages: record.messages.filter((m) => !drop.has(m.id)) };
+	}
 
 	// The input's native appends (pure; the honest 400 for an answer with no
 	// pending question call). Computed BEFORE beginTurn so a refused input

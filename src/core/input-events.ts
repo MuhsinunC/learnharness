@@ -16,6 +16,9 @@
  *   continue — run the next turn on the current record (mount
  *             continuations, job-settle re-syncs: the record ends at an
  *             answered question with no teacher reaction yet).
+ *   retry   — re-run a turn whose model call failed (issue #110): the
+ *             trailing failed assistant message(s) leave the record and
+ *             the turn re-runs from the input that preceded them.
  *
  * (The plan verdict input died 2026-09-26 with the verdict itself — the
  * learner's post-plan reply is a natural text message.)
@@ -45,6 +48,8 @@ export type ChatInput =
 	| { type: "text"; text: string }
 	| { type: "answer"; toolCallId: string; answer: QuestionAnswerData }
 	| { type: "continue" }
+	/** The failed-turn retry (issue #110): the banner's Retry button. */
+	| { type: "retry" }
 	/** The practice dock's two buttons (owner, 2026-10-04): the learner's
 	 *  thinking on the ACTIVE problem — one lane (owner 2026-10-05):
 	 *  whether it claims an answer is read from the text. One
@@ -170,6 +175,8 @@ export function parseChatInput(input: unknown): ChatInput {
 			return { type: "answer", toolCallId: i.toolCallId, answer: i.answer as QuestionAnswerData };
 		case "continue":
 			return { type: "continue" };
+		case "retry":
+			return { type: "retry" };
 		case "thinking":
 			if (typeof i.problemCallId !== "string" || i.problemCallId.length === 0) {
 				throw new ChatInputError("thinking input requires problemCallId");
@@ -210,6 +217,10 @@ export function inputAppends(
 		}
 		case "continue":
 			return dismissalConclusion(record);
+		case "retry":
+			// The failed turn's own input already landed write-ahead; the
+			// handler trims the failure (retryDrops) — nothing new appends.
+			return [];
 		case "thinking": {
 			const active = activeProblemOf(record.messages);
 			if (!active || active.toolCallId !== input.problemCallId) {
@@ -231,6 +242,44 @@ export function inputAppends(
 			return [...dismissalConclusion(record), newNextMessage()];
 		}
 	}
+}
+
+/** Does the record end in a failed model call (a retryable turn)? */
+export function endsInFailedTurn(messages: readonly LhMessage[]): boolean {
+	return failedTail(messages).ids.size > 0;
+}
+
+/** The ids a retry drops (issue #110, pure): the failed assistant
+ *  message(s) ending the record. A provider failure persists as an
+ *  assistant message with stopReason "error", and pi refuses to continue
+ *  from an assistant — so neither re-answering (the question is no longer
+ *  dangling) nor `continue` can resume the turn. Ids, not a cut index:
+ *  UI-only markers may follow the failure, and they stay. Honest 400s
+ *  when there is no failure to retry, or when dropping it leaves nothing
+ *  to continue from. */
+export function retryDrops(messages: readonly LhMessage[]): Set<string> {
+	const { ids, before } = failedTail(messages);
+	if (ids.size === 0) throw new ChatInputError("retry input requires a failed turn to retry");
+	if (!before || before.role === "assistant") throw new ChatInputError("retry input leaves no input to continue from");
+	return ids;
+}
+
+/** Markers that can land AFTER a failed call and are never model input:
+ *  persistTurn's plan block (plan_init succeeded, the next call failed)
+ *  and the settle kick's compaction marker. */
+const TRAILING_MARKERS: readonly string[] = ["plan-block", "compaction"];
+
+/** Walk back from the end over failed assistants and trailing markers:
+ *  the failures' ids, and the message the run stops at. */
+function failedTail(messages: readonly LhMessage[]): { ids: Set<string>; before: LhMessage | undefined } {
+	const ids = new Set<string>();
+	let i = messages.length - 1;
+	for (; i >= 0; i--) {
+		const m = messages[i]!;
+		if (m.role === "assistant" && m.stopReason === "error") ids.add(m.id);
+		else if (!(m.role === "custom" && TRAILING_MARKERS.includes(m.customType))) break;
+	}
+	return { ids, before: messages[i] };
 }
 
 /** The deferred conclude synthesis (owner ruling, 2026-10-04): a
