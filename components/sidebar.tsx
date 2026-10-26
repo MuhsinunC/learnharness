@@ -61,6 +61,9 @@ declare global {
 		lh?: {
 			/** Read-only host OS; determines the native-control gutter. */
 			platform?: string;
+			/** External Next desktop-dev uses the server's web connections. */
+			subscriptionTransport?: "desktop" | "web";
+			openSubscriptionBrowser?: (action: string) => Promise<void>;
 			chatgpt?: ChatGPTControlBridge;
 			subscriptions?: NativeSubscriptionControlBridge;
 			expandWindow: () => void;

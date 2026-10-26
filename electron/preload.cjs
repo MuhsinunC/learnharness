@@ -40,6 +40,10 @@ ipcRenderer.on("lh:open-settings", (_event, section) => {
 
 contextBridge.exposeInMainWorld("lh", {
 	platform: process.platform,
+	...(process.argv?.includes("--lh-web-subscriptions") ? {
+		subscriptionTransport: "web",
+		openSubscriptionBrowser: (action) => ipcRenderer.invoke("lh:subscriptions:web-browser", action),
+	} : {}),
 	chatgpt: {
 		status: () => ipcRenderer.invoke("lh:chatgpt:control", { op: "status" }),
 		login: (id) => ipcRenderer.invoke("lh:chatgpt:control", { op: "login", id }),

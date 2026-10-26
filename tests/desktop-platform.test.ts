@@ -15,7 +15,7 @@ const mainRequire = createRequire(mainFile);
 /** Decline the single-instance lock so normal boot never spawns a server.
  * Then call the REAL createWindow with a stub Electron API and inspect its
  * constructor options. No rewritten copy of the production logic. */
-function windowOptions(platform: string) {
+function windowOptions(platform: string, env: Record<string, string> = {}) {
 	class FakeWindow {
 		constructor(readonly options: unknown) {}
 		webContents = { on() {}, setWindowOpenHandler() {} };
@@ -23,13 +23,13 @@ function windowOptions(platform: string) {
 		once() {}
 	}
 	const electron = {
-		app: { setName() {}, requestSingleInstanceLock: () => false, quit() {} },
+		app: { setName() {}, getPath: () => "/fixture/LearnHarness", setPath() {}, requestSingleInstanceLock: () => false, quit() {} },
 		BrowserWindow: FakeWindow,
 		session: { defaultSession: { setPermissionRequestHandler() {}, setPermissionCheckHandler() {} } },
 	};
 	const context = {
 		require: (id: string) => id === "electron" ? electron : mainRequire(id),
-		process: { platform, argv: [], env: {}, on() {} },
+		process: { platform, argv: [], env, on() {} },
 		__dirname: dirname(mainFile),
 	};
 	runInNewContext(mainSource, context, { filename: mainFile });
@@ -60,6 +60,24 @@ describe("desktop window chrome", () => {
 			assert.equal(options.webPreferences.nodeIntegration, false);
 		});
 	}
+
+	it("only the external dev shell receives the web subscription transport marker", () => {
+		assert.equal(windowOptions("darwin").webPreferences.additionalArguments, undefined);
+		assert.deepEqual(windowOptions("darwin", { LH_DEV_URL: "http://localhost:3000" }).webPreferences.additionalArguments, ["--lh-web-subscriptions"]);
+	});
+
+	it("dev preload routes opaque sign-in actions through its narrow external-browser channel", async () => {
+		let bridge!: { subscriptionTransport: string; openSubscriptionBrowser(action: string): Promise<void> };
+		const invoked: unknown[][] = [];
+		runInNewContext(readFileSync(new URL("../electron/preload.cjs", import.meta.url), "utf8"), {
+			process: { platform: "darwin", argv: ["--lh-web-subscriptions"] },
+			require: () => ({ contextBridge: { exposeInMainWorld: (_: string, value: typeof bridge) => { bridge = value; } }, ipcRenderer: { on() {}, invoke: async (...args: unknown[]) => { invoked.push(args); } } }),
+		});
+		assert.equal(bridge.subscriptionTransport, "web");
+		const action = "/api/subscriptions/browser?id=00000000-0000-4000-8000-000000000001";
+		await bridge.openSubscriptionBrowser(action);
+		assert.deepEqual(invoked, [["lh:subscriptions:web-browser", action]]);
+	});
 
 	it("preload exposes OS identity without exposing Node/Electron to the renderer", () => {
 		let bridge: Record<string, unknown> = {};

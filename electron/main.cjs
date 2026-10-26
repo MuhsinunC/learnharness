@@ -30,6 +30,7 @@ const { attachChatGPTChild, trustedSender, chatGPTControl } = require("./chatgpt
 const { createSubscriptions, loadSubscriptionSDK } = require("./subscriptions.cjs");
 const { attachSubscriptionChild, subscriptionControl } = require("./subscription-ipc.cjs");
 const { desktopAPIHeaders } = require("./desktop-api.cjs");
+const { openWebSubscriptionBrowser } = require("./web-subscription-browser.cjs");
 const { randomBytes } = require("node:crypto");
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
@@ -315,6 +316,7 @@ function createWindow(url) {
 			contextIsolation: true,
 			sandbox: true,
 			nodeIntegration: false,
+			...(process.env.LH_DEV_URL ? { additionalArguments: ["--lh-web-subscriptions"] } : {}),
 			preload: path.join(__dirname, "preload.cjs"),
 		},
 		// Live-resize + first-paint flash (owner, 2026-09-17): during a resize
@@ -698,6 +700,13 @@ async function main() {
 			throw new Error("Subscription sign-in requires the desktop app's private server connection.");
 		}
 		return subscriptionControl(command, subscriptions);
+	});
+
+	// The dev shell has no browser tabs. Only a one-use action on its own
+	// Next server may be resolved here; never accept an arbitrary external URL.
+	ipcMain.handle("lh:subscriptions:web-browser", async (event, action) => {
+		if (!devUrl || !trustedAppWindows.has(BrowserWindow.fromWebContents(event.sender)) || !trustedSender(event, new URL(url).origin, BrowserWindow)) throw new Error("Untrusted development request.");
+		await openWebSubscriptionBrowser(action, new URL(url).origin, { openExternal: (target) => shell.openExternal(target) });
 	});
 
 	installMenu();
