@@ -88,6 +88,9 @@ interface QueuedSteer {
 	promise: Promise<void>;
 	/** Wake cargo remains owned here, but must not steer into its own run. */
 	waking?: boolean;
+	/** The constructed vehicle, once startup claims a turn. Until then only
+	 * the pump owns waking: an unrelated foreground settlement cannot free it. */
+	wakeAgent?: Agent;
 	/** A failed start waits for a learner run or process restart, not a timer. */
 	deferred?: boolean;
 	resolve: () => void;
@@ -286,10 +289,13 @@ function handOffEligible(chatId: string, agent: Agent): void {
  *  markers are steered into the run right here. The settle seam cannot
  *  beat the registration: settlement needs a streamed response, which
  *  never happens inside the constructor call. */
-export function registerLiveAgent(chatId: string, agent: Agent, allowDeferred = true): void {
+export function registerLiveAgent(chatId: string, agent: Agent, allowDeferred = true, wakeSteerIds?: ReadonlySet<string>): void {
 	state().liveAgents.set(chatId, agent);
 	restorePendingDeliveries(chatId);
-	if (allowDeferred) for (const entry of state().queues.get(chatId) ?? []) entry.deferred = false;
+	for (const entry of state().queues.get(chatId) ?? []) {
+		if (allowDeferred) entry.deferred = false;
+		if (entry.waking && wakeSteerIds?.has(entry.steer.id)) entry.wakeAgent = agent;
+	}
 	handOffEligible(chatId, agent);
 }
 
@@ -369,7 +375,7 @@ export function restoreUncommittedAutomatic(chatId: string, agent: Agent, automa
  * This is what makes the live hand-off safe: pi owns no retry for a marker
  * stranded in a settled agent's queue, so the registry stays the truth and
  * the dead agent's copy is simply abandoned (GC'd with the agent). */
-export function settleSteers(chatId: string, persisted: { id?: string }[], failed = false): void {
+export function settleSteers(chatId: string, persisted: { id?: string }[], failed = false, settledAgent?: Agent): void {
 	const queue = state().queues.get(chatId);
 	if (!queue || queue.length === 0) return;
 	const deliveredIds = new Set(persisted.map((m) => m.id).filter(Boolean));
@@ -379,9 +385,11 @@ export function settleSteers(chatId: string, persisted: { id?: string }[], faile
 			finalizeSteer(entry.steer);
 			entry.resolve();
 		} else {
-			entry.handedTo = undefined;
-			entry.waking = false;
-			if (failed && jobIdOf(entry.steer)) entry.deferred = true;
+			const handedHere = entry.handedTo !== undefined && (!settledAgent || entry.handedTo === settledAgent);
+			const wakeHere = settledAgent !== undefined && entry.wakeAgent === settledAgent;
+			if (handedHere) entry.handedTo = undefined;
+			if (wakeHere) { entry.waking = false; entry.wakeAgent = undefined; }
+			if (failed && (handedHere || wakeHere) && jobIdOf(entry.steer)) entry.deferred = true;
 			remaining.push(entry);
 		}
 	}
@@ -577,7 +585,7 @@ async function pump(chatId: string): Promise<void> {
 			if (saved) noteSteersDurable(chatId, saved.messages);
 			const owned = fire.filter((entry) => s.queues.get(chatId)?.includes(entry));
 			if (status === 403 || status === 409) {
-				for (const entry of owned) entry.waking = false;
+				for (const entry of owned) { entry.waking = false; entry.wakeAgent = undefined; }
 				if (status === 403) { parked = true; return; }
 				await delay(RETRY_BACKOFF_MS[Math.min(attempt++, RETRY_BACKOFF_MS.length - 1)]!);
 				continue;
@@ -627,6 +635,7 @@ state().stopConnectionWatch = onSubscriptionChange(() => {
 
 function deferOrReject(chatId: string, entry: QueuedSteer, error: Error): void {
 	entry.waking = false;
+	entry.wakeAgent = undefined;
 	if (jobIdOf(entry.steer)) {
 		entry.deferred = true;
 		console.error(`[steer ${entry.steer.id}] delivery remains pending:`, error.message);

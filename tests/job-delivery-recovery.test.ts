@@ -3,9 +3,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { Agent } from "@earendil-works/pi-agent-core";
 import { after, afterEach, test } from "node:test";
 import { createFauxCore, fauxAssistantMessage } from "@earendil-works/pi-ai";
-import type { LhMessage } from "../src/core/native-messages.ts";
+import { toLlmMessages, type LhMessage } from "../src/core/native-messages.ts";
 import { buildSubagentSteer, type JobKind, type SteerMessage } from "../src/core/contracts.ts";
 
 // Install isolation before importing any storage/configuration composition.
@@ -186,14 +187,57 @@ test("failed start stays quiet across sweeps, then joins a learner run", async (
 test("HTTP acceptance without a saved marker is not delivery completion or a retry trigger", async () => {
 	const owner = chat(); const { job, steer } = pending(owner.id);
 	let attempts = 0;
-	setTurnRunner(async () => { attempts++; assert(beginTurn(owner.id)); return 200; });
+	const accepted = agent();
+	setTurnRunner(async () => {
+		attempts++; assert(beginTurn(owner.id));
+		registerLiveAgent(owner.id, accepted.value, false, new Set([steer.id]));
+		return 200;
+	});
 	const delivery = deliverJobResult(steer); await until(() => attempts === 1); await delay(30);
 	assert.equal(stores.jobStore.getJob(job.id)!.delivery?.status, "pending");
-	unregisterLiveAgent(owner.id); endTurn(owner.id); settleSteers(owner.id, [], true);
+	unregisterLiveAgent(owner.id); endTurn(owner.id); settleSteers(owner.id, [], true, accepted.value);
 	sweep(); await delay(900); assert.equal(attempts, 1);
 	const next = agent(); assert(beginTurn(owner.id)); registerLiveAgent(owner.id, next.value);
 	assert.equal(next.handed.length, 1);
 	persist(owner.id, next.handed); unregisterLiveAgent(owner.id); endTurn(owner.id); await delivery;
+});
+
+test("a racing foreground settlement cannot release an outstanding staged wake", async () => {
+	const owner = chat(); const { steer } = pending(owner.id);
+	let started = false;
+	let release!: () => void;
+	const startup = new Promise<void>((resolve) => { release = resolve; });
+	let modelCopies = 0;
+	let nativeCopies = 0;
+	setTurnRunner(async (id, input) => {
+		assert.equal(input.type, "steers"); if (input.type !== "steers") return 500;
+		started = true;
+		// Subscription wake startup can await catalog refresh before claiming
+		// the session. Its cargo is not yet a durable input prefix.
+		await startup;
+		const faux = createFauxCore({});
+		faux.setResponses([(context) => {
+			modelCopies = JSON.stringify(context.messages).split(result.brief).length - 1;
+			return fauxAssistantMessage("Fixture wake response");
+		}]);
+		const wake = new Agent({ initialState: { model: faux.getModel(), messages: input.steers }, convertToLlm: toLlmMessages, streamFn: faux.streamSimple });
+		assert(beginTurn(id));
+		registerLiveAgent(id, wake, false, new Set(input.steers.map((message) => message.id)));
+		await wake.continue();
+		nativeCopies = wake.state.messages.filter((message) => (message as LhMessage).id === steer.id).length;
+		persist(id, wake.state.messages.filter((message) => message.role !== "system") as LhMessage[]);
+		unregisterLiveAgent(id); endTurn(id); settleSteers(id, stores.chatStore.getChat(id)!.messages, false, wake);
+		return 200;
+	});
+	const delivery = deliverJobResult(steer);
+	await until(() => started);
+	const foreground = agent(); assert(beginTurn(owner.id)); registerLiveAgent(owner.id, foreground.value);
+	assert.equal(foreground.handed.length, 0, "outstanding wake owns the marker");
+	unregisterLiveAgent(owner.id); endTurn(owner.id); settleSteers(owner.id, [], false, foreground.value);
+	release(); await delivery;
+	assert.equal(modelCopies, 1, "one result in the model's initial context");
+	assert.equal(nativeCopies, 1, "no self-steering of staged wake cargo");
+	assert.equal(stores.chatStore.getChat(owner.id)!.messages.filter((message) => message.id === steer.id).length, 1);
 });
 
 test("canonical save wins even if delivery bookkeeping fails; no marker replay", async () => {
@@ -250,6 +294,28 @@ test("fresh process restores a pending delivery on registration without a jobs p
 	assert.deepEqual(JSON.parse(child.stdout.trim()), [steer.id]);
 	assert.equal(stores.jobStore.getJob(job.id)!.delivery?.status, "delivered");
 	assert.equal(stores.chatStore.getChat(owner.id)!.messages.filter((message) => message.id === steer.id).length, 1);
+});
+
+test("deleting legacy completed work needs no preceding recovery poll", async () => {
+	const owner = chat(true);
+	const old = stores.jobStore.createJob({ kind: "research", chatId: owner.id, toolCallId: "legacy-delete" });
+	stores.jobStore.updateJob(old.id, { result });
+	const outcome = await deleteChatSession(owner.id, "preserve-graph");
+	assert(outcome.ok);
+	assert.equal(stores.jobStore.getJob(old.id), null);
+	assert.equal(stores.chatStore.getChat(owner.id), null);
+});
+
+test("deletion still refuses a computing worker or a live turn", async () => {
+	const owner = chat();
+	const computing = stores.jobStore.createJob({ kind: "research", chatId: owner.id, toolCallId: "computing-delete" });
+	const blocked = await deleteChatSession(owner.id, "preserve-graph");
+	assert(!blocked.ok && blocked.code === "jobs_running");
+	stores.jobStore.updateJob(computing.id, { status: "done" });
+	assert(beginTurn(owner.id));
+	const live = await deleteChatSession(owner.id, "preserve-graph");
+	assert(!live.ok && live.code === "turn_in_flight");
+	endTurn(owner.id);
 });
 
 test("deleting a session discards its pending deliveries without starting a turn", async () => {

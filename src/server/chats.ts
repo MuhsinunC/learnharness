@@ -1,4 +1,5 @@
 import { abortExtraction, extractionStatuses } from "../agent/subagents/extraction.ts";
+import { isJobLive } from "../agent/subagents/aborts.ts";
 import { coverageOf } from "../core/coverage.ts";
 import { deleteChatTraces, type ChatDeleteMode, type ChatDeletionStats } from "../core/graph-deletion.ts";
 import { titleFromPrompt } from "../core/contracts.ts";
@@ -77,7 +78,11 @@ function runningWorkBlocker(chatId: string): Extract<ChatDeleteOutcome, { status
 			jobIds: [],
 		};
 	}
-	const runningJobs = stores.jobStore.listJobs(chatId).filter((job) => job.status === "running");
+	// Legacy records kept completed workers running until delivery. A saved
+	// result without a live loop is pending session data, not computing work;
+	// deletion must not depend on a prior recovery poll to recognize it.
+	const runningJobs = stores.jobStore.listJobs(chatId).filter((job) =>
+		job.status === "running" && (!job.result || isJobLive(job.id)));
 	if (runningJobs.length > 0) {
 		return {
 			ok: false,

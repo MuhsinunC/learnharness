@@ -490,7 +490,8 @@ export async function handleChatInput(
 		// run's first LLM call (the native replacement for continuation
 		// coalescing). Settlement still cannot beat the flow below: it needs
 		// a streamed response, which never happens inside the constructor.
-		registerLiveAgent(chatId, constructed, input.type !== "steers" && input.type !== "continue");
+		registerLiveAgent(chatId, constructed, input.type !== "steers" && input.type !== "continue",
+			input.type === "steers" ? new Set(appends.map((message) => message.id)) : undefined);
 		// Debug recorder run marker (owner, 2026-10-04): correlates the
 		// JSONL event stream with the record's turns; no-op unless
 		// LH_PROVIDER_EVENTS=1.
@@ -531,7 +532,7 @@ export async function handleChatInput(
 				// merely because usage/extraction/other settlement work failed.
 				const persisted = stores.chatStore.getChat(chatId)?.messages ?? [];
 				reconcileUserSteers(chatId, persisted);
-				settleSteers(chatId, persisted, true);
+				settleSteers(chatId, persisted, true, constructed);
 			},
 			onFinish: (turnMessages, isAborted) => {
 				// Wave B: the record write is the agent's own final state —
@@ -583,7 +584,7 @@ export async function handleChatInput(
 				// resolve; stranded markers return to pending), then let
 				// the pump take any stragglers down the idle wake.
 				unregisterLiveAgent(chatId);
-				settleSteers(chatId, stamped);
+				settleSteers(chatId, stamped, false, constructed);
 				// Composer steers (2026-10-03): delivered ids dropped, stranded
 				// ones stay parked for the chat's next run (the registry is the
 				// stranding safety net — the agent's undrained copy died above).
