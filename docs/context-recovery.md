@@ -75,7 +75,9 @@ Pi's shape, with Codex's clipping and option 2 as the fallback
   fails, comes back empty, or still doesn't fit, a deterministic marker
   follows. It holds the lesson topic, the prior summary verbatim (trimmed
   from its middle only if it alone exceeds the share), the plan tree, and the
-  learner's dropped lines, and shorter tails are tried until it fits. Every
+  learner's dropped lines, each with its attached images' references (so
+  `view_image` can still load them), and shorter tails are tried until it
+  fits. Every
   marker starts with "Current lesson topic: …".
 - **Retry once per episode.** The retry is a `continue` turn. The guard is
   read from the record: a recovery marker (`details.notice`) after the last
