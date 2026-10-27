@@ -25,6 +25,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ModelRole } from "../../../config.ts";
 import { ProviderKeyMissingError, ROLE_SLOT, modelsNotConfigured, type ModelSlotName, type ProviderKeyMissing } from "../../core/settings.ts";
+import { AUTH_PROVIDER_KEYS } from "../../core/auth-keys.ts";
 import type { ChatStore, JobStore } from "../../core/ports.ts";
 import { runDemoBuilder } from "./demo-builder.ts";
 import { runPdfReaderAgent } from "./pdf-reader.ts";
@@ -92,6 +93,10 @@ export interface JobRunnerDeps {
 	 *  Injected because the agent layer may not read the key store; absent
 	 *  in tests that inject engines directly (test engines never owe a key). */
 	providerKeyMissing?: (provider: string, tier: ModelSlotName) => ProviderKeyMissing | null;
+	/** Background-use consent for a subscription provider (true for plain
+	 *  API providers). The auth fallback never runs a job on a sign-in whose
+	 *  background use is off. Absent = allowed (engine-injecting tests). */
+	backgroundAllowed?: (provider: string) => boolean;
 }
 
 export interface JobRunner {
@@ -106,8 +111,9 @@ export interface JobRunner {
  * semantics) and the usage tap (money channel — every model call folds into
  * JobRecord.usage as it completes). */
 interface LoopContext {
-	/** Fires when abortJob kills the run; abortSignal is passed into every
-	 * model call so the spend stops mid-call, not at the next loop check. */
+	/** Fires when abortJob kills the run (or the time limit passes);
+	 * abortSignal is passed into every model call so the spend stops
+	 * mid-call, not at the next loop check. */
 	abortSignal: AbortSignal;
 	/** The job's chat (debug: raw provider-event recording under
 	 * LH_PROVIDER_EVENTS=1 — forwarded into every subagent run). */
@@ -125,6 +131,23 @@ const KIND_ROLE: Record<JobKind, ModelRole> = {
 	pdf: "pdfReader",
 };
 
+/** Wall-clock limit per job (LH-37): past it the loop is aborted and the
+ *  job fails visibly, so no card or Background agents row spins forever. */
+const JOB_TIME_LIMIT_MS: Record<JobKind, number> = {
+	research: 20 * 60_000,
+	demo: 15 * 60_000,
+	visual: 15 * 60_000,
+	pdf: 15 * 60_000,
+};
+
+/** e2e runs (LH_E2E=1) may shorten the limit to prove the timeout path. */
+function jobTimeLimitMs(kind: JobKind): number {
+	const override = process.env.LH_E2E === "1" ? Number(process.env.LH_E2E_JOB_TIME_LIMIT_MS) : NaN;
+	return override > 0 ? override : JOB_TIME_LIMIT_MS[kind];
+}
+
+type JobResult = ResearchResult | DemoResult | VisualResult | PdfResult;
+
 export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 	const { chatStore, jobStore, deliver } = deps;
 
@@ -132,18 +155,13 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 	 * then writes through the job store so the poll sees progress). */
 	const usageTotals = new Map<string, JobUsage>();
 
-	function makeLoopContext(jobId: string, engine: PiEngine): LoopContext {
+	function makeLoopContext(jobId: string, engine: PiEngine, abortSignal: AbortSignal): LoopContext {
 		const chatId = jobStore.getJob(jobId)?.chatId;
 		// Provider-qualified stamp: the engine's actual model — the only
 		// thing that ran (BYOK: no config-pin fallback stamps exist).
 		const model = `${engine.model.provider}:${engine.model.id}`;
-		// Real-kill wiring (2026-09 abort semantics): the controller is what
-		// the abort endpoint fires (agent/subagents/aborts.ts registry); the
-		// signal rides into every model call of the loop.
-		const controller = new AbortController();
-		registerJobAbort(jobId, controller);
 		return {
-			abortSignal: controller.signal,
+			abortSignal,
 			chatId,
 			onUsage: (step) => {
 				const next = accumulateJobUsage(usageTotals.get(jobId), model, step);
@@ -178,9 +196,30 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 		return testOverride[KIND_ROLE[kind]]?.current ?? deps.engineFor?.(KIND_ROLE[kind]);
 	}
 
+	/** The strong slot's engine as the auth fallback for a cheap or vision
+	 *  job (LH-37): the teacher's model, usually a subscription that needs
+	 *  no API key. A string is why it can't take over (learner-readable). */
+	function fallbackEngine(kind: JobKind, failed: PiEngine): PiEngine | string {
+		const tier = ROLE_SLOT[KIND_ROLE[kind]];
+		let strong: PiEngine | undefined;
+		try {
+			strong = deps.engineFor?.("teacher");
+		} catch {
+			return ""; // the strong slot names a model the catalog lacks
+		}
+		if (tier === "strong" || !strong) return "";
+		if (strong.model.provider === failed.model.provider && strong.model.id === failed.model.id) return "";
+		if (tier === "vision" && !strong.model.input.includes("image"))
+			return `Your Strong model (${modelLabel(strong)}) can't read images, so it can't take over.`;
+		if (deps.providerKeyMissing?.(strong.model.provider, "strong")) return "";
+		if (deps.backgroundAllowed && !deps.backgroundAllowed(strong.model.provider))
+			return `Your Strong model (${modelLabel(strong)}) could run this job instead, but background use is off for that sign-in. Turn on background use for it in Settings → Providers, or pick another ${SLOT_LABEL[tier]} model.`;
+		return strong;
+	}
+
 	const KIND_RUNNERS: Record<
 		JobKind,
-		(jobId: string, engine: PiEngine, input: JobToolInput | undefined, loop: LoopContext) => Promise<void>
+		(jobId: string, engine: PiEngine, input: JobToolInput | undefined, loop: LoopContext) => Promise<JobResult | undefined>
 	> = {
 		research: (jobId, engine, input, loop) => runResearchJob(jobId, engine, input, loop),
 		demo: (jobId, engine, input, loop) => runDemoJob(jobId, engine, input, loop),
@@ -209,7 +248,9 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 		// then steer the kind's failure shape through finishJob so the wake
 		// pipeline resumes the lesson and the teacher reads the refusal
 		// instead of waiting forever on a job it already dispatched.
-		const refuse = async (reason: string): Promise<void> => {
+		// LH-37: needsSettingsFix marks failures only a settings change can
+		// fix, so the steer tells the teacher not to re-dispatch.
+		const refuse = async (reason: string, needsSettingsFix = false): Promise<void> => {
 			registerJobAbort(jobId, new AbortController());
 			try {
 				if (stillRunning(jobId)) jobStore.updateJob(jobId, { error: reason });
@@ -220,24 +261,27 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 					| PdfToolInput
 					| undefined;
 				const pdf = resolved as PdfToolInput | undefined;
-				const failure: ResearchResult | DemoResult | VisualResult | PdfResult =
+				const flag = needsSettingsFix ? { needsSettingsFix: true as const } : {};
+				const failure: JobResult =
 					job.kind === "research"
-						? { brief: `Research failed: ${reason}`, sources: [] }
+						? { brief: `Research failed: ${reason}`, sources: [], ...flag }
 						: job.kind === "demo"
 							? {
 									title: typeof (resolved as DemoToolInput | undefined)?.title === "string" && (resolved as DemoToolInput).title.trim() ? (resolved as DemoToolInput).title : "Interactive demo",
 									html: "",
 									tested: true,
 									notes: `FAILED: ${reason}`,
+									...flag,
 								}
 							: job.kind === "visual"
-								? { svg: "", notes: `FAILED: ${reason}` }
+								? { svg: "", notes: `FAILED: ${reason}`, ...flag }
 								: {
 										path: typeof pdf?.path === "string" ? pdf.path : "",
 										question: typeof pdf?.question === "string" ? pdf.question : "",
 										brief: `PDF failed: ${reason}`,
 										pagesRead: [],
 										pagesConsulted: [],
+										...flag,
 									};
 				await finishJob(jobId, failure);
 			} finally {
@@ -250,34 +294,84 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 		} catch (err) {
 			if (err instanceof ProviderKeyMissingError) {
 				console.info(`[job ${jobId}] refused — ${JSON.stringify(err.envelope)}`);
-				await refuse(err.envelope.error);
+				await refuse(err.envelope.error, true);
 			} else {
 				console.error(`[job ${jobId}] engine resolution failed:`, err);
 				await refuse(err instanceof Error ? err.message : String(err));
 			}
 			return;
 		}
+		const tier = ROLE_SLOT[KIND_ROLE[job.kind]];
 		if (!engine) {
-			const tier = ROLE_SLOT[KIND_ROLE[job.kind]];
 			const envelope = modelsNotConfigured([tier]);
 			console.info(`[job ${jobId}] refused — ${JSON.stringify(envelope)}`);
-			await refuse(`${envelope.error} (missing: ${tier})`);
+			await refuse(`${envelope.error} (missing: ${tier})`, true);
 			return;
 		}
 		// Key presence (2026-09-25): the engine exists, but its provider's
 		// key may be gone — refuse the spawn BEFORE the loop, same
 		// convention (the injected check reads the key store; absent in
 		// engine-injecting tests).
-		const keyRefusal =
-			deps.providerKeyMissing?.(engine.model.provider, ROLE_SLOT[KIND_ROLE[job.kind]]) ?? null;
+		const keyRefusal = deps.providerKeyMissing?.(engine.model.provider, tier) ?? null;
 		if (keyRefusal) {
 			console.info(`[job ${jobId}] refused — ${JSON.stringify(keyRefusal)}`);
-			await refuse(keyRefusal.error);
+			await refuse(keyRefusal.error, true);
 			return;
 		}
+		// Real-kill wiring (2026-09 abort semantics): one controller spans the
+		// job's attempts. The abort endpoint fires it (aborts.ts registry), and
+		// so does the time limit; its signal rides into every model call.
+		const controller = new AbortController();
+		registerJobAbort(jobId, controller);
+		const limitMs = jobTimeLimitMs(job.kind);
+		let timedOut = false;
+		const timer = setTimeout(() => {
+			timedOut = true;
+			controller.abort();
+		}, limitMs);
+		// One run on one engine. Its model calls are watched for a provider
+		// auth rejection (401/403, "invalid api key"), the one failure a
+		// different model can get past.
+		const attempt = async (attemptEngine: PiEngine): Promise<{ result?: JobResult; authError?: ProviderAuthError }> => {
+			let authError: ProviderAuthError | undefined;
+			const watched: PiEngine = {
+				...attemptEngine,
+				streamFn: (model, context, options) => {
+					const stream = attemptEngine.streamFn(model, context, options);
+					void Promise.resolve(stream)
+						.then((s) => s.result())
+						.then((message) => {
+							if (message.stopReason === "error") authError ??= providerAuthError(message.errorMessage);
+						}, () => {});
+					return stream;
+				},
+			};
+			const result = await run(jobId, watched, input, makeLoopContext(jobId, attemptEngine, controller.signal));
+			// Let the watchers of already-settled calls run before reading.
+			await new Promise((resolve) => setImmediate(resolve));
+			return { result, authError };
+		};
 		try {
-			await run(jobId, engine, input, makeLoopContext(jobId, engine));
+			let outcome = await attempt(engine);
+			let authFailure: string | undefined;
+			if (outcome.authError && !timedOut && stillRunning(jobId)) {
+				const fallback = fallbackEngine(job.kind, engine);
+				if (typeof fallback === "string") {
+					authFailure = authFailureText(tier, engine, outcome.authError, fallback);
+				} else {
+					console.info(`[job ${jobId}] ${engine.model.provider}:${engine.model.id} rejected — retrying on ${fallback.model.provider}:${fallback.model.id}`);
+					jobStore.updateJob(jobId, { error: undefined, activity: `retrying on ${modelLabel(fallback)}` });
+					const retry = await attempt(fallback);
+					if (retry.authError)
+						authFailure = authFailureText(tier, engine, outcome.authError, `Retrying on your Strong model (${modelLabel(fallback)}) was rejected too: ${describeAuthError(retry.authError)}.`);
+					outcome = retry;
+				}
+			}
+			if (timedOut) await refuse(`The ${job.kind} job timed out after ${formatLimit(limitMs)} and was stopped.`);
+			else if (authFailure) await refuse(authFailure, true);
+			else if (outcome.result) await finishJob(jobId, outcome.result);
 		} finally {
+			clearTimeout(timer);
 			unregisterJobAbort(jobId);
 			// The last usage write may have been mid-flight when the loop died;
 			// persist what was folded (the abort path patches only status, so
@@ -357,7 +451,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 		model: PiEngine | undefined,
 		passedInput: JobToolInput | undefined,
 		loop: LoopContext,
-	): Promise<void> {
+	): Promise<JobResult | undefined> {
 		const ctx = jobContext(jobId);
 		if (!ctx) return;
 		const { job } = ctx;
@@ -365,8 +459,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 		const input = (passedInput ?? resolveInput(job, passedInput)) as ResearchToolInput | undefined;
 		if (!(typeof input?.question === "string" && input.question.trim())) {
 			jobStore.updateJob(jobId, { error: "research question unavailable" });
-			await finishJob(jobId, { brief: "Research failed: the research question is unavailable.", sources: [] });
-			return;
+			return { brief: "Research failed: the research question is unavailable.", sources: [] };
 		}
 		const question = input.question;
 		const context = typeof input?.context === "string" && input.context.trim() ? input.context : undefined;
@@ -406,15 +499,16 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 			});
 			if (!brief.trim()) throw new Error("the researcher produced no text");
 			const research: ResearchResult = { brief: brief.trim(), sources: parseSources(brief.trim(), fetchedUrls) };
-			await finishJob(jobId, research);
+			return research;
 		} catch (err) {
 			// Real-kill abort (2026-09): the abort path flipped the record and
-			// queued the abort steer — unwind silently, keep the usage
-			// folded so far (flushed by runJob's finally).
+			// queued the abort steer (or runJob's time limit fired and fails
+			// the job itself) — unwind silently, keep the usage folded so
+			// far (flushed by runJob's finally).
 			if (loop.abortSignal.aborted) return;
 			const reason = err instanceof Error ? err.message : String(err);
 			if (stillRunning(jobId)) jobStore.updateJob(jobId, { error: reason });
-			await finishJob(jobId, { brief: `Research failed: ${reason}`, sources: [] });
+			return { brief: `Research failed: ${reason}`, sources: [] };
 		} finally {
 			await fs.rm(pdfDir, { recursive: true, force: true });
 		}
@@ -427,7 +521,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 		model: PiEngine | undefined,
 		passedInput: JobToolInput | undefined,
 		loop: LoopContext,
-	): Promise<void> {
+	): Promise<JobResult | undefined> {
 		const ctx = jobContext(jobId);
 		if (!ctx) return;
 		const { job } = ctx;
@@ -450,12 +544,12 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 			);
 			if (isDemoFailure(result) && stillRunning(jobId))
 				jobStore.updateJob(jobId, { error: result.notes ?? "demo build failed" });
-			await finishJob(jobId, result);
+			return result;
 		} catch (err) {
 			if (loop.abortSignal.aborted) return;
 			const reason = err instanceof Error ? err.message : String(err);
 			if (stillRunning(jobId)) jobStore.updateJob(jobId, { error: reason });
-			await finishJob(jobId, { title, html: "", tested: true, notes: `FAILED: ${reason}` });
+			return { title, html: "", tested: true, notes: `FAILED: ${reason}` };
 		}
 	}
 
@@ -464,7 +558,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 		model: PiEngine | undefined,
 		passedInput: JobToolInput | undefined,
 		loop: LoopContext,
-	): Promise<void> {
+	): Promise<JobResult | undefined> {
 		const ctx = jobContext(jobId);
 		if (!ctx) return;
 		const { job } = ctx;
@@ -486,12 +580,12 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 			);
 			if (isVisualFailure(result) && stillRunning(jobId))
 				jobStore.updateJob(jobId, { error: result.notes ?? "visual build failed" });
-			await finishJob(jobId, result);
+			return result;
 		} catch (err) {
 			if (loop.abortSignal.aborted) return;
 			const reason = err instanceof Error ? err.message : String(err);
 			if (stillRunning(jobId)) jobStore.updateJob(jobId, { error: reason });
-			await finishJob(jobId, { svg: "", notes: `FAILED: ${reason}` });
+			return { svg: "", notes: `FAILED: ${reason}` };
 		}
 	}
 
@@ -502,7 +596,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 		model: PiEngine | undefined,
 		passedInput: JobToolInput | undefined,
 		loop: LoopContext,
-	): Promise<void> {
+	): Promise<JobResult | undefined> {
 		const ctx = jobContext(jobId);
 		if (!ctx) return;
 		const { job } = ctx;
@@ -525,12 +619,12 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 			);
 			if (isPdfFailure(result) && stillRunning(jobId))
 				jobStore.updateJob(jobId, { error: result.brief.replace(/^PDF failed:\s*/i, "") });
-			await finishJob(jobId, result);
+			return result;
 		} catch (err) {
 			if (loop.abortSignal.aborted) return;
 			const reason = err instanceof Error ? err.message : String(err);
 			if (stillRunning(jobId)) jobStore.updateJob(jobId, { error: reason });
-			await finishJob(jobId, { path, question, brief: `PDF failed: ${reason}`, pagesRead: [], pagesConsulted: [] });
+			return { path, question, brief: `PDF failed: ${reason}`, pagesRead: [], pagesConsulted: [] };
 		}
 	}
 
@@ -551,6 +645,73 @@ function isVisualFailure(result: VisualResult): boolean {
 /** The pdf-reader's failure brief (mirrors the research failure shape). */
 function isPdfFailure(result: PdfResult): boolean {
 	return /^PDF failed:/i.test(result.brief);
+}
+
+// ─── provider auth failures (LH-37) ─────────────────────────────────────────
+
+/** A model call the provider refused on credentials. */
+interface ProviderAuthError {
+	status?: number;
+	/** The provider's own message, unwrapped from its JSON body. */
+	detail: string;
+}
+
+const AUTH_TEXT = /invalid[ _-]?api[ _-]?key|incorrect api key|check the api[ _-]?key|authentication_error|unauthori[sz]ed/i;
+
+/**
+ * Classify a failed call's errorMessage. pi-ai formats HTTP failures as
+ * `<status> <sdk message>` or `<status>: <body>` (utils/error-body.js), e.g.
+ * Baseten's bad key: `403 "please check the api-key you provided"`. The
+ * status survives only inside that string.
+ */
+function providerAuthError(message: string | undefined): ProviderAuthError | undefined {
+	if (!message) return undefined;
+	const match = /^(\d{3})(?::\s*|\s+)/.exec(message);
+	const status = match ? Number(match[1]) : undefined;
+	if (status !== 401 && status !== 403 && !AUTH_TEXT.test(message)) return undefined;
+	const rest = match ? message.slice(match[0].length) : message;
+	let detail = rest;
+	try {
+		const body = JSON.parse(rest) as unknown;
+		const inner = typeof body === "object" && body !== null ? (body as { message?: unknown; error?: unknown }) : undefined;
+		const text = typeof body === "string" ? body : inner?.message ?? (inner?.error as { message?: unknown } | undefined)?.message ?? inner?.error;
+		if (typeof text === "string") detail = text;
+	} catch {
+		// Not JSON: keep the text as the provider sent it.
+	}
+	return { status, detail: detail.slice(0, 300) };
+}
+
+function describeAuthError(error: ProviderAuthError): string {
+	return `${error.status ? `HTTP ${error.status}, ` : ""}"${error.detail}"`;
+}
+
+const SLOT_LABEL: Record<ModelSlotName, string> = { strong: "Strong", cheap: "Cheap", vision: "Vision" };
+
+function providerLabel(provider: string): string {
+	if (provider === "chatgpt") return "ChatGPT";
+	return AUTH_PROVIDER_KEYS.find((p) => p.id === provider)?.label ?? provider;
+}
+
+function modelLabel(engine: PiEngine): string {
+	return `${providerLabel(engine.model.provider)} · ${engine.model.name || engine.model.id}`;
+}
+
+/** The learner-readable failure: which slot and model, what the provider
+ *  said, and where to fix it. `extra` reports the fallback's outcome. */
+function authFailureText(tier: ModelSlotName, engine: PiEngine, error: ProviderAuthError, extra: string): string {
+	const slot = SLOT_LABEL[tier];
+	return [
+		`The ${slot} model (${modelLabel(engine)}) was rejected by ${providerLabel(engine.model.provider)}: ${describeAuthError(error)}.`,
+		extra,
+		`Go to Settings → Providers to fix the key, or Settings → Agent → Models to switch the ${slot} model to your ChatGPT/Claude sign-in.`,
+	]
+		.filter(Boolean)
+		.join(" ");
+}
+
+function formatLimit(ms: number): string {
+	return ms % 60_000 === 0 ? `${ms / 60_000} minutes` : `${Math.round(ms / 1000)} seconds`;
 }
 
 /** The activity line shown in the UI: `web_search: "query"` / `web_fetch: host`. */
