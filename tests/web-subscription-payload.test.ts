@@ -12,6 +12,7 @@ for (const name of ["chatgpt-credentials.json", "github-copilot-credentials.json
 		try {
 			mkdirSync(path.join(root, "scripts")); mkdirSync(path.join(root, ".next", "standalone"), { recursive: true }); mkdirSync(path.join(root, ".next", "static"));
 			copyFileSync(new URL("../scripts/build-server.mjs", import.meta.url), path.join(root, "scripts", "build-server.mjs"));
+			copyFileSync(new URL("../scripts/payload-guard.mjs", import.meta.url), path.join(root, "scripts", "payload-guard.mjs"));
 			writeFileSync(path.join(root, ".next", "standalone", "server.js"), "// fixture");
 			writeFileSync(path.join(root, ".next", "standalone", secret), "fixture-not-real-credentials", { mode: 0o600 });
 			const result = spawnSync(process.execPath, [path.join(root, "scripts", "build-server.mjs")], { encoding: "utf8", env: process.env });
