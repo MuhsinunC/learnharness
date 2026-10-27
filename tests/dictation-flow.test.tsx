@@ -53,6 +53,7 @@ async function fixture(language: "pl" | "en" = "pl", delayedRead?: Promise<Respo
 		nextWrite: undefined as Promise<Response> | undefined,
 		nextMic: undefined as Promise<{ getTracks: () => { stop: () => void }[] }> | undefined,
 		readFails: false,
+		reads: 0,
 		active: false,
 		captures: 0,
 		stops: 0,
@@ -72,6 +73,7 @@ async function fixture(language: "pl" | "en" = "pl", delayedRead?: Promise<Respo
 		fetch: async (url: string, init?: RequestInit) => {
 			if (url === "/api/stt/token") return Response.json({ token: "test-token" });
 			if (url === "/api/settings") {
+				state.reads++;
 				if (state.nextRead) { const response = state.nextRead; state.nextRead = undefined; return response; }
 				return state.readFails ? Response.json({}, { status: 500 }) : Response.json({ settings: state.record });
 			}
@@ -101,7 +103,16 @@ async function fixture(language: "pl" | "en" = "pl", delayedRead?: Promise<Respo
 		return null;
 	}
 	let root = createRoot(document.getElementById("root")!);
-	const mount = async () => { await act(async () => { root.render(<Harness />); }); };
+	let firstMount = true;
+	const mount = async () => {
+		await act(async () => { root.render(<Harness />); });
+		// Each fixture is a new server record. Explicitly invalidate a prior
+		// fixture's window-lifetime cache, but do not refetch on remounts.
+		if (firstMount && setting.language !== undefined) {
+			await act(async () => { notifySettingsSaved("dictation"); });
+		}
+		firstMount = false;
+	};
 	dispose = async () => { await act(async () => { root.unmount(); }); };
 	return {
 		state,
@@ -170,14 +181,16 @@ test("a failed save keeps the previous language, including a shortcut pressed wh
 	assert.equal(Socket.all[0]!.language, "pl");
 });
 
-test("successful choices survive unmount/remount and failed reads never start capture", async () => {
+test("confirmed choices stay cached across navigation; failed explicit refreshes block capture", async () => {
 	const f = await fixture();
 	await f.mount();
 	await act(async () => { assert.equal(await f.setting.save("multi"), true); });
-	await f.remount();
-	assert.equal(f.setting.language, "multi");
+	const reads = f.state.reads;
 	f.state.readFails = true;
 	await f.remount();
+	assert.equal(f.setting.language, "multi");
+	assert.equal(f.state.reads, reads, "navigation must not reread a confirmed preference");
+	await act(async () => { notifySettingsSaved("dictation"); });
 	await act(async () => { f.dictation.toggle(); });
 	assert.match(f.dictation.error!, /Could not load/);
 	assert.equal(f.state.captures, 0);

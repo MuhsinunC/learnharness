@@ -24,6 +24,23 @@ test("all readers immediately receive the confirmed write without another GET", 
 	off();
 });
 
+test("ordinary loads and repeated recordings reuse the initial confirmed value", async () => {
+	let reads = 0;
+	const store = createDictationLanguageStore(async () => {
+		reads++;
+		if (reads > 1) throw new Error("should not reread");
+		return Response.json({ settings: { version: 1, dictation: { language: "fr" } } });
+	});
+	assert.deepEqual(await Promise.all([store.getLanguage(), store.load()]), ["fr", "fr"]);
+	for (let i = 0; i < 3; i++) {
+		const unsubscribe = store.subscribe(() => {});
+		assert.equal(await store.getLanguage(), "fr");
+		assert.equal(await store.load(), "fr");
+		unsubscribe();
+	}
+	assert.equal(reads, 1);
+});
+
 test("a failed external refresh invalidates the cache until a successful retry", async () => {
 	let fail = false;
 	const store = createDictationLanguageStore(async () => fail

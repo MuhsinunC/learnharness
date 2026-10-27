@@ -12,7 +12,7 @@ describe("Nova-3 dictation language contract", () => {
 	it("offers monolingual languages/locales and a distinct multilingual mode", () => {
 		assert.equal(DICTATION_LANGUAGES[0]?.code, "multi");
 		assert.equal(new Set(DICTATION_LANGUAGES.map((item) => item.code)).size, DICTATION_LANGUAGES.length);
-		for (const code of ["en", "pl", "en-GB", "pt-BR", "zh-Hant", "ar-EG", "multi"]) {
+		for (const code of ["en", "fr", "ru", "sv", "pl", "en-GB", "pt-BR", "zh-Hant", "ar-EG", "multi"]) {
 			assert.ok(isDictationLanguage(code), code);
 		}
 		// Xhosa and Zulu are documented for multi, not monolingual Nova-3.
@@ -24,7 +24,7 @@ describe("Nova-3 dictation language contract", () => {
 	});
 
 	it("only language varies in the streaming URL; all tuned parameters survive", () => {
-		for (const language of ["en", "pl", "multi", "en-GB"] as const) {
+		for (const { code: language } of DICTATION_LANGUAGES) {
 			const url = new URL(deepgramListenUrl(language));
 			assert.equal(url.origin + url.pathname, "wss://api.deepgram.com/v1/listen");
 			assert.deepEqual(Object.fromEntries(url.searchParams), {
@@ -74,4 +74,9 @@ it("the section route persists language independently and rejects unsupported va
 	assert.deepEqual(readSettings(), saved);
 	assert.equal((await put("unsupported")).status, 400);
 	assert.deepEqual(readSettings(), saved);
+	const general = await PUT(new Request("http://localhost/api/settings/general", {
+		method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ autoUpdate: true }),
+	}), { params: Promise.resolve({ section: "general" }) });
+	assert.equal(general.status, 200);
+	assert.deepEqual(readSettings(), { ...saved, general: { autoUpdate: true } }, "auto-update cannot erase dictation language");
 });

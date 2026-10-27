@@ -4,7 +4,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2Icon, MicIcon } from "lucide-react";
 import { useSettingsDialog } from "@/components/settings/settings-dialog";
 import { Hint } from "@/components/ui/hint";
-import { Button } from "@/components/ui/button";
 import { deepgramListenUrl, type DictationLanguage } from "@/src/core";
 import { useDictationLanguage } from "@/components/dictation-preference";
 import { setDictationActive } from "@/components/dictation-state";
@@ -676,11 +675,14 @@ export function DictationBar({ dictation }: { dictation: Dictation }) {
 
 	if (!active) {
 		return (
-			<Hint label={error ?? "Dictate"} action={error ? undefined : "toggle-dictation"} side="top">
-				<Button
+			<Hint
+				// The error line truncates in the button; its tooltip reveals it.
+				label={error ?? "Dictate"}
+				action={error ? undefined : "toggle-dictation"}
+				side="top"
+			>
+				<button
 					type="button"
-					variant="outline"
-					size="xs"
 					onClick={() => {
 						if (keyless) {
 							clearError();
@@ -691,11 +693,11 @@ export function DictationBar({ dictation }: { dictation: Dictation }) {
 					}}
 					aria-label={error ? `Dictation failed: ${error}` : "Start dictation"}
 					data-testid="dictation-toggle"
-					className="h-7 w-full min-w-0 gap-1.5 overflow-hidden border-border/50 bg-card/50 font-normal text-muted-foreground/70 shadow-lg backdrop-blur hover:border-border hover:bg-card/50 hover:text-muted-foreground dark:bg-card/50 dark:hover:bg-card/50"
+					className="flex h-7 w-full items-center justify-center gap-1.5 rounded-md border border-border/50 bg-card/50 text-xs text-muted-foreground/70 shadow-lg backdrop-blur transition-colors hover:border-border hover:text-muted-foreground"
 				>
 					<MicIcon className="size-3.5" />
 					<span className="max-w-full truncate">{error ?? "Dictate"}</span>
-				</Button>
+				</button>
 			</Hint>
 		);
 	}
@@ -703,19 +705,17 @@ export function DictationBar({ dictation }: { dictation: Dictation }) {
 	return (
 		<div className="flex w-full min-w-0 items-center gap-2" data-testid="dictation-bar">
 			<Hint label="Stop dictation (Esc)" side="top">
-				<Button
+				<button
 					type="button"
-					variant="ghost"
-					size="xs"
 					onClick={toggle}
 					disabled={phase === "stopping"}
 					aria-label="Stop dictation"
 					data-testid="dictation-toggle"
-					className="h-7 gap-1.5 bg-destructive/10 text-destructive hover:bg-destructive/20"
+					className="flex h-7 shrink-0 items-center gap-1.5 rounded-md bg-destructive/10 px-2 text-xs font-medium text-destructive transition-colors hover:bg-destructive/20"
 				>
 					{phase === "stopping" ? <Loader2Icon className="size-3.5 animate-spin" /> : <MicIcon className="size-3.5" />}
 					Stop
-				</Button>
+				</button>
 			</Hint>
 			<span className="size-1.5 shrink-0 animate-pulse rounded-full bg-destructive" aria-hidden />
 			<div ref={meterRef} className="flex h-4 min-w-0 flex-1 items-center gap-[2px]" data-testid="dictation-meter">

@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import { parseHTML } from "linkedom";
 import { setDictationActive } from "../components/dictation-state.ts";
-import { DICTATION_LANGUAGES, type UserSettings } from "../src/core/index.ts";
+import { notifySettingsSaved } from "../components/settings-signal.ts";
+import { AUTH_KEYS, DICTATION_LANGUAGES, type AuthKeyStatus, type ModelCatalogEntry, type UserSettings } from "../src/core/index.ts";
+import { ModelMenuList } from "../components/settings/model-menu.tsx";
 
 let dispose: (() => Promise<void>) | undefined;
 let restore: (() => void) | undefined;
@@ -19,9 +21,8 @@ async function key(element: HTMLElement, value: string) {
 		element.dispatchEvent(event);
 	});
 }
-async function search(value: string) {
+async function search(value: string, element = input()) {
 	await act(async () => {
-		const element = input();
 		Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!.call(element, value);
 		element.dispatchEvent(new window.Event("input", { bubbles: true }));
 	});
@@ -40,6 +41,7 @@ async function fixture(failRead = false) {
 		record: { version: 1, dictation: { language: "en" } } as UserSettings,
 		writes: [] as string[], failWrite: false, outerEscapes: 0,
 		failRead,
+		keys: [] as AuthKeyStatus[],
 		nextWrite: undefined as Promise<Response> | undefined,
 	};
 	const previous = new Map<string, PropertyDescriptor | undefined>();
@@ -51,6 +53,7 @@ async function fixture(failRead = false) {
 		requestAnimationFrame: (callback: FrameRequestCallback) => setTimeout(() => callback(0), 0),
 		cancelAnimationFrame: clearTimeout,
 		fetch: async (url: string, init?: RequestInit) => {
+			if (url === "/api/keys") return Response.json({ keys: state.keys, providers: [] });
 			if (url === "/api/settings") return state.failRead ? Response.json({}, { status: 500 }) : Response.json({ settings: state.record });
 			assert.equal(url, "/api/settings/dictation");
 			const body = JSON.parse(init!.body as string);
@@ -79,7 +82,14 @@ async function fixture(failRead = false) {
 	const mount = async () => { await act(async () => { root.render(<DictationLanguageSetting />); }); };
 	dispose = async () => { await act(async () => { setDictationActive(false); root.unmount(); }); };
 	await mount();
-	return { state, remount: async () => { await dispose!(); root = createRoot(doc.getElementById("root")!); await mount(); } };
+	// Fixtures represent distinct server records; remounts within a fixture
+	// deliberately keep the window-lifetime confirmed preference.
+	await act(async () => { notifySettingsSaved("dictation"); });
+	return {
+		state,
+		render: async (element: React.ReactNode) => { await act(async () => { root.render(element); }); },
+		remount: async () => { await dispose!(); root = createRoot(doc.getElementById("root")!); await mount(); },
+	};
 }
 
 afterEach(async () => { await dispose?.(); restore?.(); dispose = undefined; restore = undefined; });
@@ -102,12 +112,11 @@ test("the real picker searches by language, chooses with Arrow/Enter, and restor
 	assert.match(trigger().textContent!, /English/);
 	assert.equal(trigger().getAttribute("data-variant"), "outline");
 	await click(trigger());
-	assert.equal(input().getAttribute("data-slot"), "input");
-	assert.equal(input().getAttribute("role"), "combobox");
+	assert.match(input().className, /lh-input/);
 	assert.equal(document.activeElement, input());
-	assert.equal(document.querySelector("[cmdk-item]")!.textContent, "Multilingual");
+	assert.equal(document.querySelector('[data-testid="dictation-language-list"] button')!.textContent, "Multilingual");
 	await search("Polish");
-	assert.equal(document.querySelectorAll("[cmdk-item]").length, 1);
+	assert.equal(document.querySelectorAll('[data-testid="dictation-language-list"] button').length, 1);
 	await key(input(), "ArrowDown");
 	await key(input(), "Enter");
 	assert.deepEqual(f.state.writes, ["pl"]);
@@ -122,7 +131,7 @@ test("empty results cannot save; Escape and outside click close the menu without
 	const f = await fixture();
 	await click(trigger());
 	await search("zzzz-no-language");
-	assert.match(document.querySelector("[cmdk-empty]")!.textContent!, /No languages match/);
+	assert.match(menu()!.textContent!, /No languages match/);
 	await key(input(), "Enter");
 	assert.deepEqual(f.state.writes, []);
 	await key(input(), "Escape");
@@ -183,10 +192,73 @@ test("capture locks the row and dismisses an open language menu until capture en
 	assert(menu());
 });
 
+for (const source of ["none", "file", "env"] as const) test(`Language is below the full key row for ${source}-owned keys, including editing`, async () => {
+	const f = await fixture();
+	f.state.keys = [{
+		id: "DEEPGRAM_API_KEY", info: AUTH_KEYS.find((key) => key.id === "DEEPGRAM_API_KEY")!,
+		present: source !== "none", masked: source === "none" ? null : "…test (32 chars)",
+		source, shadowedByEnv: false,
+	}];
+	const { KeysSection } = await import("../components/settings/keys-section.tsx");
+	await f.render(<KeysSection />);
+	const group = byTest("group-dictation");
+	const rows = group.lastElementChild!.children;
+	assert.equal(rows[0]!.getAttribute("data-testid"), "key-deepgram_api_key");
+	assert.equal(rows[1]!.getAttribute("data-testid"), "row-dictation-language");
+	assert.equal(trigger().disabled, false, "language is independent of key ownership");
+	await click(byTest("key-deepgram_api_key-row"));
+	if (source !== "env") assert.ok(byTest("key-deepgram_api_key-editor"));
+	await click(trigger());
+	assert(menu());
+	await key(input(), "Escape");
+	assert.equal(menu(), null);
+	assert.equal(f.state.outerEscapes, 0);
+	if (source !== "env") assert.ok(byTest("key-deepgram_api_key-editor"), "first Escape closes only the menu");
+});
+
+test("the shared model menu preserves ranking, provider identity, keyboard clamping, and row content", async () => {
+	const f = await fixture();
+	const model = (id: string, provider: string): ModelCatalogEntry => ({
+		id, provider, name: `Model ${id}`, contextWindow: 32000, maxTokens: 4096,
+		cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+		input: ["text"], reasoning: false, supportedLevels: [],
+	});
+	const models = [model("beta", "p1"), model("alpha", "p1"), model("alpha", "p2")];
+	const picked: ModelCatalogEntry[] = [];
+	await f.render(<ModelMenuList models={models} effectiveId="alpha" effectiveProvider="p2" onPick={(m) => picked.push(m)} footer="Model footer" />);
+	const modelInput = document.querySelector<HTMLInputElement>('[data-testid="model-search"]')!;
+	const options = () => [...document.querySelectorAll<HTMLButtonElement>('[data-testid="model-list"] button')];
+	assert.equal(document.activeElement, modelInput);
+	assert.match(options()[0]!.textContent!, /p1 · alpha/);
+	assert.match(options()[1]!.textContent!, /p2 · alpha/);
+	assert.ok(!options()[0]!.className.includes("bg-muted/60"));
+	assert.ok(options()[1]!.className.includes("bg-muted/60"));
+	assert.match(options()[0]!.textContent!, /\$1\.00\/\$2\.00/);
+	assert.match(options()[0]!.textContent!, /32k/);
+	assert.match(document.body.textContent!, /Model footer/);
+	await key(modelInput, "Enter");
+	assert.equal(picked[0], models[1], "Enter without walking selects the first ranked result");
+	await key(modelInput, "ArrowUp");
+	await key(modelInput, "Enter");
+	assert.equal(picked[1], models[0], "ArrowUp enters at the last result");
+	await key(modelInput, "ArrowDown");
+	await key(modelInput, "ArrowDown");
+	await key(modelInput, "Enter");
+	assert.equal(picked[2], models[0], "ArrowDown clamps at the last result");
+	await search("p2", modelInput);
+	assert.equal(options().length, 1);
+	await key(modelInput, "Enter");
+	assert.equal(picked[3], models[2], "search resets the walked index and includes provider identity");
+	await search("no-model-matches", modelInput);
+	await key(modelInput, "Enter");
+	assert.equal(picked.length, 4);
+	assert.match(document.body.textContent!, /No models match/);
+});
+
 test("clearing each search restores the complete catalog order with Multilingual first", async () => {
 	await fixture();
 	await click(trigger());
-	const order = () => [...document.querySelectorAll("[cmdk-item]")].map((item) => item.getAttribute("data-value"));
+	const order = () => [...document.querySelectorAll('[data-testid="dictation-language-list"] button')].map((item) => item.getAttribute("data-testid")!.replace("dictation-language-", ""));
 	const expected = DICTATION_LANGUAGES.map((item) => item.code);
 	assert.deepEqual(order(), expected);
 	for (const query of ["en", "multi", "Polish", "zzzzz"]) {

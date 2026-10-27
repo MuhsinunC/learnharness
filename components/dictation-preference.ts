@@ -27,6 +27,7 @@ export function createDictationLanguageStore(request: typeof fetch, saved: () =>
 	function load(refresh = false): Promise<DictationLanguage> {
 		if (writing) return getLanguage();
 		if (reading && !refresh) return reading;
+		if (!refresh && !needsRead && snapshot.language !== undefined) return Promise.resolve(snapshot.language);
 		const version = ++revision;
 		needsRead = true;
 		reading = Promise.resolve().then(async () => {
@@ -118,7 +119,9 @@ function subscribe(listener: () => void) {
 		stopSignals = onSettingsSaved((section) => {
 			if (section === "dictation" && !announcingSave) void store.load(true).catch(() => {});
 		});
-		if (!store.getSnapshot().saving) void store.load(true).catch(() => {});
+		// A confirmed preference lives for the window, not the page. Navigation
+		// and reopening Settings must not add a new network failure point.
+		void store.getLanguage().catch(() => {});
 	}
 	return () => { off(); if (--readers === 0) { stopSignals?.(); stopSignals = undefined; } };
 }
