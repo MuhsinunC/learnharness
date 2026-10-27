@@ -14,8 +14,8 @@ export function contextWindowCaption(entry: ModelCatalogEntry): string {
 
 /**
  * One (provider, model) pair's context window (LH-38, owner 2026-10-27).
- * Commits on Enter or blur (CommitInput: the field always shows what is
- * stored); an empty field, or the Default itself, resets to the catalog
+ * Commits on Enter, Save or blur (CommitInput: the field always shows what
+ * is stored); an empty field, or the Default itself, resets to the catalog
  * Default. A value below the pair's Minimum is refused in place. A value
  * above the known Maximum opens a confirm modal first — Confirm stays
  * disabled until "I know what I'm doing" is checked; Cancel keeps the
@@ -71,14 +71,26 @@ export function ContextWindowField({ entry }: { entry: ModelCatalogEntry }) {
 
 	return (
 		<span className="flex flex-col items-end gap-1">
-			<CommitInput
-				type="number"
-				value={stored}
-				placeholder={String(entry.defaultContextWindow)}
-				ariaLabel={`${entry.id} context window`}
-				testid="input-context-window"
-				onCommit={commit}
-			/>
+			<span className="flex items-center gap-2">
+				<CommitInput
+					type="number"
+					value={stored}
+					placeholder={String(entry.defaultContextWindow)}
+					ariaLabel={`${entry.id} context window`}
+					testid="input-context-window"
+					onCommit={commit}
+				/>
+				{/* The visible commit: pressing it moves focus off the input,
+				    and CommitInput commits on that blur — one path for Enter,
+				    Save and clicking away. */}
+				<button
+					type="button"
+					data-testid="save-context-window"
+					className="rounded-sm border border-border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
+				>
+					Save
+				</button>
+			</span>
 			{error && <span className="text-xs text-destructive" data-testid="context-window-error">{error}</span>}
 			{pending !== null && (
 				<AboveMaximumDialog

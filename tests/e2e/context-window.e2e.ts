@@ -139,19 +139,21 @@ async function waitInput(pair: string, value: string): Promise<void> {
 	await until(async () => (await inputValue(pair)) === value, `${pair} input to read "${value}"`);
 }
 
-async function typeWindow(pair: string, value: string, commit: "enter" | "blur"): Promise<void> {
+async function typeWindow(pair: string, value: string, commit: "enter" | "save" | "blur"): Promise<void> {
 	await typeIn(rowSel(pair), value, commit);
 }
 
-/** Replace the field's text inside `container`, then commit: Enter, or a
- *  click on the Context group's corner (the field commits on blur). */
-async function typeIn(container: string, value: string, commit: "enter" | "blur"): Promise<void> {
+/** Replace the field's text inside `container`, then commit: Enter, the
+ *  Save button, or a click on the Context group's corner (the field
+ *  commits on blur). */
+async function typeIn(container: string, value: string, commit: "enter" | "save" | "blur"): Promise<void> {
 	const input = `${container} [data-testid="input-context-window"]`;
 	await click(input);
 	await page.keyboard.press("End");
 	for (let i = 0; i < 12; i++) await page.keyboard.press("Backspace");
 	await page.type(input, value);
 	if (commit === "enter") await page.keyboard.press("Enter");
+	else if (commit === "save") await click(`${container} [data-testid="save-context-window"]`);
 	else {
 		const box = await (await page.$('[data-testid="group-context"]'))!.boundingBox();
 		await page.mouse.click(box!.x + 4, box!.y + 4);
@@ -200,7 +202,7 @@ test("(a) a value at or below the maximum saves directly and shows", async () =>
 	const hint = await rowText(A);
 	assert.match(hint, /Default: 100k · Maximum: 100k/);
 	assert.equal(await inputValue(A), "");
-	await typeWindow(A, "80000", "enter");
+	await typeWindow(A, "80000", "save");
 	await until(() => diskWindows()?.[A] === 80_000, "80000 on disk");
 	assert.equal(await page.$(dialogSel), null, "no modal at or below the maximum");
 	await waitInput(A, "80000");
@@ -260,7 +262,7 @@ test("(a3) below the minimum is refused in the field and by the server", async (
 
 test("(b) above the maximum: the modal gates the save behind the checkbox", async () => {
 	await openAgentSettings();
-	await typeWindow(A, "150000", "enter");
+	await typeWindow(A, "150000", "save");
 	await page.waitForSelector(dialogSel);
 	assert.match(await page.$eval(dialogSel, (el) => el.textContent ?? ""), /it may stop compacting/);
 	assert.equal(await page.$eval('[data-testid="context-window-confirm"]', (el) => (el as HTMLButtonElement).disabled), true);
@@ -446,7 +448,7 @@ test("(g) the composer's model picker edits a model that is in no slot", async (
 
 	// The same modal and guard as Settings; clicking inside the modal must
 	// not close the menu (and the field) underneath it.
-	await typeIn(field, "250000", "enter");
+	await typeIn(field, "250000", "save");
 	await page.waitForSelector(dialogSel);
 	assert.equal(await page.$eval('[data-testid="context-window-confirm"]', (el) => (el as HTMLButtonElement).disabled), true);
 	await page.click('[data-testid="context-window-understood"]');
