@@ -22,6 +22,7 @@ import { useServerEvent, useServerResync } from "@/components/server-events";
 import type { ChatListItem } from "@/src/core";
 import { kbdEventForAction } from "@/src/core";
 import { notifySettingsSaved } from "@/components/settings-signal";
+import { repairChatRequest } from "@/components/repair-chat";
 
 /**
  * Toggleable sidebar — NOT a modal drawer: no backdrop, no focus theft. It
@@ -544,6 +545,7 @@ function SessionsSidebar() {
 	   right-clicked — assigned into a ref before the state flip so the
 	   shell measures it on its first (hidden) pass. */
 	const [ctxChatId, setCtxChatId] = useState<string | null>(null);
+	const [ctxRepair, setCtxRepair] = useState<{ chatId: string; busy: boolean; error?: string } | null>(null);
 	const ctxAnchorRef = useRef<HTMLElement | null>(null);
 	const [renamingId, setRenamingId] = useState<string | null>(null);
 	const [deleting, setDeleting] = useState<ChatListItem | null>(null);
@@ -911,21 +913,33 @@ function SessionsSidebar() {
 						>
 							Export as Markdown…
 						</button>
-						{/* Repair (LH-40): compacts a chat that outgrew its model's
-						    real context window; the open chat adopts the result
-						    through record-changed. */}
-						<button
-							type="button"
-							data-testid="ctx-repair"
-							onClick={() => {
-								const chatId = ctxChatId;
-								setCtxChatId(null);
-								void fetch(`/api/chats/${chatId}/repair`, { method: "POST" }).catch(() => undefined);
-							}}
-							className="flex items-center rounded-lg px-2.5 py-1.5 text-left text-foreground transition-colors hover:bg-accent"
-						>
-							Repair this chat
-						</button>
+						{/* Repair (LH-40): only for a chat whose last reply failed for
+						    length (the server-shared classification). The menu stays
+						    open until the server answers, to show a refusal's reason;
+						    the open chat adopts a repair through record-changed. */}
+						{chats?.find((c) => c.id === ctxChatId)?.repairable && (
+							<>
+								<button
+									type="button"
+									data-testid="ctx-repair"
+									disabled={ctxRepair?.chatId === ctxChatId && ctxRepair.busy}
+									onClick={() => {
+										const chatId = ctxChatId;
+										setCtxRepair({ chatId, busy: true });
+										void repairChatRequest(chatId).then((refusal) => {
+											if (refusal === null) setCtxChatId(null);
+											setCtxRepair(refusal === null ? null : { chatId, busy: false, error: refusal });
+										});
+									}}
+									className="flex items-center rounded-lg px-2.5 py-1.5 text-left text-foreground transition-colors hover:bg-accent disabled:opacity-50"
+								>
+									Repair this chat
+								</button>
+								{ctxRepair?.chatId === ctxChatId && ctxRepair.error && (
+									<p data-testid="ctx-repair-error" className="px-2.5 pb-1 text-muted-foreground">{ctxRepair.error}</p>
+								)}
+							</>
+						)}
 						<button
 							type="button"
 							data-testid="ctx-delete"

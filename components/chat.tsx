@@ -31,9 +31,9 @@ import { DictationBar, finishDictation, joinDictation, useDictation } from "@/co
 import { useFieldCycle } from "@/components/field-cycle";
 import { JobsContext } from "@/components/jobs-context";
 import { StatsBar } from "@/components/stats-bar";
+import { repairChatRequest } from "@/components/repair-chat";
 import { useServerEvent, useServerResync } from "@/components/server-events";
 import {
-	isContextOverflowText,
 	isProviderKeyRefusal,
 	firstSourceTextParts,
 	messageAnchorId,
@@ -746,16 +746,18 @@ export function Chat({
 
 	// "Repair this chat" (LH-40): a context-length failure gets the
 	// overflow recovery's compaction on demand; the record sync drops the
-	// banner (the recovery marker now ends the record).
+	// banner (the recovery marker now ends the record). A refusal shows
+	// the server's reason.
 	const [repairing, setRepairing] = useState(false);
-	const repairChat = useCallback(async () => {
+	// Keyed by the banner it answers, so a later failure never shows a stale reason.
+	const [repairError, setRepairError] = useState<{ banner: string; text: string } | null>(null);
+	const repairChat = useCallback(async (banner: string) => {
 		setRepairing(true);
-		try {
-			const res = await fetch(`/api/chats/${chatId}/repair`, { method: "POST" });
-			if (res.ok) await syncFromServer();
-		} finally {
-			setRepairing(false);
-		}
+		setRepairError(null);
+		const refusal = await repairChatRequest(chatId);
+		if (refusal === null) await syncFromServer().catch(() => undefined);
+		else setRepairError({ banner, text: refusal });
+		setRepairing(false);
 	}, [chatId, syncFromServer]);
 
 	// The settled terminal's other half (stream-reattach wave): the
@@ -1603,12 +1605,15 @@ export function Chat({
 							{error && (
 								<div data-testid="chat-error" className="flex items-center gap-3 rounded-lg border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm">
 									<span className="min-w-0 flex-1">Something went wrong: {refusalBannerText(error.message)}</span>
-									{isContextOverflowText(error.message) && (
+									{repairError?.banner === error.message && (
+										<span data-testid="repair-error" className="shrink-0 text-xs text-muted-foreground">{repairError.text}</span>
+									)}
+									{error.repairable && (
 										<button
 											type="button"
 											data-testid="repair-chat"
 											disabled={repairing}
-											onClick={() => void repairChat()}
+											onClick={() => void repairChat(error.message)}
 											className="shrink-0 rounded-md border border-border px-2 py-1 text-xs font-medium transition-colors hover:bg-accent disabled:opacity-50"
 										>
 											{repairing ? "Repairing…" : "Repair this chat"}

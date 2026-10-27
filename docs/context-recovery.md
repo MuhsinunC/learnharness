@@ -52,54 +52,76 @@ that is rejected for length, and the chat is broken.
 Pi's shape, with Codex's clipping and option 2 as the fallback
 (`src/server/context-recovery.ts`):
 
-- **Detect.** A turn's last message is an assistant error that
-  `isContextOverflow` matches (pi-ai), or one that
-  `src/core/context-overflow.ts` matches. The second covers "maximum context
-  length" and "input is too long" without pi's extra qualifiers, plus a 413.
+- **Detect.** One classification, `contextOverflowState` in
+  `src/core/context-overflow.ts`, serves the server, the session list and the
+  error banner. It is pi-ai's `isContextOverflow` (its pure `utils/overflow`
+  module, so the client can use it too), plus "maximum context length" and
+  "input is too long" without pi's extra qualifiers. A rejection the server
+  has rewritten carries a `contextOverflow` mark (the provider's own text,
+  and `unrecoverable` once Repair can no longer help), and the mark rules.
 - **Target.** Use the limit the error states ("maximum context length is N",
-  Anthropic's "… > N maximum", and others). Otherwise use the known window
-  from `contextWindowFor`, but never more than half the request that failed,
-  because the known window is exactly what may be wrong. A recovered request
-  may fill 60% of the target. The rest is left for tool declarations, the
-  reply's `max_tokens`, and the error in the chars/4 estimate. Fit is measured
-  by chars/4 over the projection. The usage anchor is not used, because it
-  describes the last request that succeeded.
+  Anthropic's "… > N maximum", and others). Otherwise use the window from
+  `contextWindowFor`, but never more than half the request that failed,
+  because that window is exactly what may be wrong. A recovered request may
+  fill 60% of the target. The rest is left for tool declarations, the reply's
+  `max_tokens`, and the error in the chars/4 estimate. Fit is chars/4 of the
+  system prompt, the new marker and the kept tail; the failed request is
+  measured once. The usage anchor is not used, because it describes the last
+  request that succeeded.
 - **Compact.** First, one model summary: half the budget for the kept tail,
-  half for the summary, which carries a word cap. The summarizer's own input
-  is clipped to the target, oldest text first, as in Codex. If the summary
+  half for the summary, which carries a word cap. The summarizer's input is
+  clipped to the target: the prior summary always rides whole, and only the
+  raw transcript is trimmed, oldest text first, as in Codex. If the summary
   fails, comes back empty, or still doesn't fit, a deterministic marker
-  follows. It holds the lesson topic, the plan tree verbatim, and the
+  follows. It holds the lesson topic, the prior summary verbatim (trimmed
+  from its middle only if it alone exceeds the share), the plan tree, and the
   learner's dropped lines, and shorter tails are tried until it fits. Every
   marker starts with "Current lesson topic: …".
-- **Retry once.** The retry is a `continue` turn. The guard is read from the
-  record: the active marker is a recovery marker (`details.notice`) and no
-  reply has succeeded since it. A second overflow, or a chat with nothing to
-  drop, turns the provider error into a plain explanation. Nothing runs
-  after that.
+- **Retry once per episode.** The retry is a `continue` turn. The guard is
+  read from the record: a recovery marker (`details.notice`) after the last
+  successful reply means this episode already had its compact-and-retry,
+  whatever threshold markers landed since. A second overflow, or a chat with
+  nothing to drop, becomes "This chat is still too long for \<model\>…", built
+  from the provider's text every time (never nested), and marked
+  unrecoverable, so Repair is no longer offered.
+- **Never silent.** When recovery cannot run, the rejection becomes a plain
+  explanation that keeps Repair offered: background use off for the
+  connection ("turn background use on, or press Repair this chat"), no
+  engine, or a compaction still holding the gate after a 30-second wait.
 - **Notice.** `details.notice` is shown in the transcript in place of
   "Context compacted": "This chat had grown too long for \<model\>; I condensed
   the older part and continued."
-- **Manual repair.** "Repair this chat" sits in the error banner for a
-  length error and in the session menu. It calls
+- **Manual repair.** "Repair this chat" sits in the error banner and in the
+  session menu, only for a repairable rejection. It calls
   `POST /api/chats/[id]/repair`, which runs the same compaction toward the
   limit stated in the chat's length error. It refuses (409) unless the
-  chat's last message is that error, so it never compacts a working chat
-  and a second click is a no-op.
+  chat's last message is a repairable rejection, so it never compacts a
+  working chat and a second click is a no-op. Both surfaces show the
+  route's reason when it refuses (409, 422, 503) or cannot be reached. A
+  422 (nothing older to condense) also marks the chat unrecoverable.
 - **Learning state.** Nothing is deleted. The rejected reply stays in the
   record; pi drops errored replies on the wire. Full history stays behind
   the marker, which keeps the transcript-derived plan progress and
   extraction coverage intact. The plan tree, graph and job stores are not
   touched. The recovery holds the compaction gate, so no turn interleaves.
 
+## The learned limit
+
+The limit a rejection states is saved per `provider:id` in settings, under
+`learnedContextLimits`, its own key: the user's `contextWindows` value and
+the context-window modal are untouched. `contextWindowFor` returns
+min(window, learned limit), and the threshold compaction reads it there, so
+after one recovery the threshold fires before the provider rejects again.
+For small windows the threshold's 16k reserve and 20k kept tail scale down
+to a quarter of the window, since both can exceed a learned 8k limit. The
+threshold also estimates each kind's own system prompt (the prober's is about 40%
+of the teacher's). The settings UI does not show the learned limit.
+
 ## The window seam (LH-38)
 
-Recovery reads the window only through `contextWindowFor(engine)` in
-`src/server/context-recovery.ts`, which returns `engine.model.contextWindow`.
-`piEngineForSpec` applies LH-38's per-(provider, model) custom window there,
-so it is the user's value when set and the catalog default otherwise. It
-also covers providers with no key, which `catalogContextLimits()` skips.
-Recovery still trusts the provider's stated limit over it. The threshold
-compaction keeps reading the same custom window, so until the user corrects
-it, an over-window chat hits the limit and recovers again every few turns.
-Persisting the limit a rejection states, per model, would stop that; it is
-not done here.
+Recovery and the threshold compaction read the window only through
+`contextWindowFor(engine)` in `src/server/context-recovery.ts`. It starts
+from `engine.model.contextWindow`, where `piEngineForSpec` applies LH-38's
+per-(provider, model) custom window (the user's value when set, else the
+catalog default; this also covers providers with no key, which
+`catalogContextLimits()` skips), and caps it at the learned limit.

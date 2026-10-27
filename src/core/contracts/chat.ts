@@ -271,6 +271,9 @@ export interface ChatSummary {
 	/** Practice sessions (2026-10-04): a posed problem with no conclude —
 	 *  the sidebar meta's "Problem waiting". Absent on teaching sessions. */
 	pendingProblem: boolean;
+	/** The last reply is a length rejection Repair can act on (LH-40,
+	 *  core/context-overflow.ts) — the session menu's Repair item. */
+	repairable?: boolean;
 	/** The record's model-control settings — rides the list payload via the
 	 *  summary spread (the picker never needs it from here; the full record
 	 *  is its source). */

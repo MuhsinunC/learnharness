@@ -5,6 +5,7 @@ import path from "node:path";
 import { after, before, test } from "node:test";
 import { bootServer, until, type LhServer } from "./harness/server.ts";
 import { launchChrome, type HeadlessChrome } from "./harness/chrome.ts";
+import type { Page } from "puppeteer-core";
 import { reply, startStubProvider, type StubProvider, type StubRequest, type StubResponder } from "./harness/stub-provider.ts";
 
 // LH-40: a chat that outgrows the model's REAL window recovers. The stub
@@ -12,7 +13,9 @@ import { reply, startStubProvider, type StubProvider, type StubRequest, type Stu
 // window for it (LH-38's setting, the owner's "1.5M by mistake"), so the
 // threshold compaction never fires; the stub enforces the real limit on
 // the serialized messages and answers past it with pi-ai's real
-// context-length 400, stating LIMIT_CHARS / 4 tokens.
+// context-length 400, stating LIMIT_CHARS / 4 tokens. Its usage reports
+// the request's real size (chars/4), so the threshold compaction's usage
+// anchor behaves as with a real provider.
 
 const LIMIT_CHARS = 38_000;
 const FILLER = "Limits describe what a function approaches. ".repeat(115);
@@ -47,7 +50,16 @@ const GRAPH_NODE = {
 	provenance: [],
 };
 
-type Msg = { id: string; role: string; content?: unknown; stopReason?: string; errorMessage?: string; customType?: string; details?: { notice?: string; firstKeptMessageId?: string } };
+type Msg = {
+	id: string;
+	role: string;
+	content?: unknown;
+	stopReason?: string;
+	errorMessage?: string;
+	contextOverflow?: { providerText: string; unrecoverable?: boolean };
+	customType?: string;
+	details?: { notice?: string; firstKeptMessageId?: string };
+};
 type Chat = { messages: Msg[]; tree?: unknown; turnInFlight: boolean; compacting?: boolean };
 
 const size = (req: StubRequest) => JSON.stringify(req.messages).length;
@@ -59,13 +71,25 @@ const lastLearnerText = (req: StubRequest) => {
 const answer = (text: string) => `Answering "${text}". ${FILLER}`;
 /** Bedrock's wording: a length rejection that states no limit. */
 const BEDROCK_400 = reply.http(400, { message: "Input is too long for requested model." });
-const limited = (limitChars: number, rejection = reply.contextLength(Math.floor(limitChars / 4))): StubResponder => (req) => {
-	if (size(req) > limitChars) return rejection;
-	return reply.text(req.system.startsWith(SUMMARIZER) ? SUMMARY : answer(lastLearnerText(req)));
+let rejections = 0;
+const limited = (limitChars: number, rejection = reply.contextLength(Math.floor(limitChars / 4)), summary = reply.text(SUMMARY)): StubResponder => (req) => {
+	if (size(req) > limitChars) {
+		rejections++;
+		return rejection;
+	}
+	if (req.system.startsWith(SUMMARIZER)) return summary;
+	const text = answer(lastLearnerText(req));
+	return reply.text(text, { prompt_tokens: Math.ceil(size(req) / 4), completion_tokens: Math.ceil(text.length / 4) });
 };
 const isTurnRequest = (req: StubRequest) => !req.system.startsWith(SUMMARIZER);
 const recoveryMarkers = (c: Chat) => c.messages.filter((m) => m.customType === "compaction" && m.details?.notice);
 const isReply = (m: Msg | undefined) => m?.role === "assistant" && m.stopReason !== "error";
+const lastReply = (c: Chat) => c.messages.filter(isReply).at(-1);
+/** A reply landed after the newest recovery marker (a threshold marker may follow it). */
+const replyAfterRecovery = (c: Chat) => {
+	const marker = recoveryMarkers(c).at(-1);
+	return !!marker && c.messages.slice(c.messages.indexOf(marker) + 1).some(isReply);
+};
 
 let stub: StubProvider;
 let server: LhServer;
@@ -116,7 +140,7 @@ async function grow(id: string, turns: number): Promise<void> {
 	for (let i = 0; i < turns; i++) {
 		const before = (await chat(id)).messages.filter(isReply).length;
 		await send(id, `Keep going, part ${i + 1}.`);
-		await settled(id, `growth turn ${i + 1}`, (c) => c.messages.filter(isReply).length > before && isReply(c.messages.at(-1)));
+		await settled(id, `growth turn ${i + 1}`, (c) => c.messages.filter(isReply).length > before);
 	}
 }
 
@@ -126,7 +150,20 @@ function hashDir(dir: string): string {
 	return h.digest("hex");
 }
 
+/** Each case starts with no limit learned from an earlier case. */
+function forgetLearnedLimits(): void {
+	const file = path.join(server.dataDir, "settings.json");
+	const { learnedContextLimits: _learned, ...rest } = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<string, unknown>;
+	fs.writeFileSync(file, JSON.stringify(rest, null, "\t"));
+}
+
+const settingsOnDisk = () => JSON.parse(fs.readFileSync(path.join(server.dataDir, "settings.json"), "utf-8")) as {
+	contextWindows?: Record<string, number>;
+	learnedContextLimits?: Record<string, number>;
+};
+
 async function newChat(title: string): Promise<string> {
+	forgetLearnedLimits();
 	const { id } = await server.json<{ id: string }>("/api/chats", { body: { title } });
 	return id;
 }
@@ -147,10 +184,19 @@ async function openChat(id: string, selector: string) {
 	return page;
 }
 
+/** The sidebar row for a chat title, once the session list has loaded. */
+const sidebarRow = (page: Page, title: string) =>
+	until(async () => {
+		for (const r of await page.$$('[data-testid="session-row"], [data-testid="session-row-kbd"]')) {
+			if ((await r.evaluate((el) => el.textContent ?? "")).includes(title)) return r;
+		}
+		return null;
+	}, `the sidebar row for ${title}`);
+
 /** Leave the chat as one broken before this release: the learner's
  *  message, then the provider's length rejection (pi-ai's persisted text
  *  for reply.contextLength, seen in a live run). */
-function breakChat(id: string): void {
+function breakChat(id: string, grown = true): void {
 	const file = path.join(server.dataDir, "chats", `${id}.json`);
 	const record = JSON.parse(fs.readFileSync(file, "utf-8")) as { messages: unknown[] };
 	const limit = Math.floor(LIMIT_CHARS / 4);
@@ -170,9 +216,28 @@ function breakChat(id: string): void {
 		},
 	);
 	fs.writeFileSync(file, JSON.stringify(record));
+	if (!grown) return;
 	const lastGrowth = stub.requests.at(-1)!;
 	assert.ok(size(lastGrowth) + JSON.stringify(record.messages.slice(-3)).length > LIMIT_CHARS, "the next request would be past the real window");
 }
+
+/** Append a compaction marker to the record file (a recovery one when `notice` is set). */
+function seedMarker(id: string, firstKeptMessageId: string, content: string, notice?: string): void {
+	const file = path.join(server.dataDir, "chats", `${id}.json`);
+	const record = JSON.parse(fs.readFileSync(file, "utf-8")) as { messages: unknown[] };
+	record.messages.push({
+		id: `msg_lh40_marker_${record.messages.length}`,
+		role: "custom",
+		customType: "compaction",
+		content: `${HEADER} The transcript before this point was summarized.\n\n${content}`,
+		display: true,
+		details: { firstKeptMessageId, tokensBefore: 1, at: new Date().toISOString(), ...(notice ? { notice } : {}) },
+		timestamp: Date.now(),
+	});
+	fs.writeFileSync(file, JSON.stringify(record));
+}
+
+const PRIOR = `PRIOR-SUMMARY-SENTINEL ${"The learner mastered one-sided limits. ".repeat(80)}`;
 
 test("(a, c) an over-window chat recovers on the next learner turn, and the learning state is untouched", async () => {
 	const id = await newChat("Limits of functions");
@@ -205,7 +270,7 @@ test("(a, c) an over-window chat recovers on the next learner turn, and the lear
 	} finally {
 		await page.close();
 	}
-	const done = await settled(id, "the recovered reply", (c) => recoveryMarkers(c).length > 0 && isReply(c.messages.at(-1)));
+	const done = await settled(id, "the recovered reply", replyAfterRecovery);
 
 	const turnRequests = stub.requests.slice(start).filter(isTurnRequest);
 	assert.equal(turnRequests.length, 2, "the rejected turn and exactly one retry");
@@ -220,7 +285,7 @@ test("(a, c) an over-window chat recovers on the next learner turn, and the lear
 	const markers = recoveryMarkers(done);
 	assert.equal(markers.length, 1);
 	assert.equal(markers[0]!.details!.notice, "This chat had grown too long for stub-a; I condensed the older part and continued.");
-	assert.match(JSON.stringify(done.messages.at(-1)!.content), /Answering \\"Keep going, part 6\.\\"/);
+	assert.match(JSON.stringify(lastReply(done)!.content), /Answering \\"Keep going, part 6\.\\"/);
 
 	// (c) Nothing was deleted: every earlier message survives, in order;
 	// the plan tree and the graph are byte-identical.
@@ -252,7 +317,7 @@ test("(b) Repair this chat fixes a chat already in the broken state", async () =
 
 	const start = stub.requests.length;
 	await send(id, "Thanks, carry on.");
-	const done = await settled(id, "the reply after repair", (c) => isReply(c.messages.at(-1)));
+	const done = await settled(id, "the reply after repair", replyAfterRecovery);
 	const turnRequests = stub.requests.slice(start).filter(isTurnRequest);
 	assert.equal(turnRequests.length, 1, "the first send after repair succeeds");
 	assert.ok(size(turnRequests[0]!) <= LIMIT_CHARS);
@@ -267,14 +332,16 @@ test("(b) the session menu repairs a broken chat and refuses a healthy one", asy
 	breakChat(id);
 	const page = await openChat(id, '[data-testid="session-row"]');
 	try {
-		const rows = await page.$$('[data-testid="session-row"], [data-testid="session-row-kbd"]');
-		let row = null;
-		for (const r of rows) if ((await r.evaluate((el) => el.textContent ?? "")).includes("Sequences")) row = r;
-		assert.ok(row, "the chat's sidebar row");
-		await row.click({ button: "right" });
+		await (await sidebarRow(page, "Sequences")).click({ button: "right" });
 		await page.click('[data-testid="ctx-repair"]');
 		const repaired = await settled(id, "the menu repair marker", (c) => recoveryMarkers(c).length === 1);
 		assert.equal(repaired.messages.at(-1)!.customType, "compaction");
+		// A working chat's menu offers no Repair (the list's repairable flag).
+		await newChat("Healthy menu");
+		await page.reload({ waitUntil: "domcontentloaded" });
+		await (await sidebarRow(page, "Healthy menu")).click({ button: "right" });
+		await page.waitForSelector('[data-testid="ctx-rename"]');
+		assert.equal(await page.$('[data-testid="ctx-repair"]'), null, "no Repair for a working chat");
 	} finally {
 		await page.close();
 	}
@@ -296,7 +363,7 @@ test("(d) recovery never loops: when even the smallest request is too big, the l
 	try {
 		const start = stub.requests.length;
 		await send(id, "Next part, please.");
-		const done = await settled(id, "the clear failure", (c) => /still too long/.test(c.messages.at(-1)?.errorMessage ?? ""));
+		const done = await settled(id, "the clear failure", (c) => !!c.messages.at(-1)?.contextOverflow?.unrecoverable);
 		// Quiet window: nothing else may fire.
 		await new Promise((r) => setTimeout(r, 8_000));
 		const turnRequests = stub.requests.slice(start).filter(isTurnRequest);
@@ -306,10 +373,17 @@ test("(d) recovery never loops: when even the smallest request is too big, the l
 		assert.equal(final.messages.length, done.messages.length, "nothing ran after the failure");
 		assert.equal(recoveryMarkers(final).length, 1);
 		assert.match(JSON.stringify(recoveryMarkers(final)[0]!.content), /no model summary could be written/, "the deterministic fallback landed");
+		const failed = final.messages.at(-1)!;
 		assert.match(
-			final.messages.at(-1)!.errorMessage!,
-			/^This chat is still too long for stub-a, even after condensing its older part\. Start a new session, or pick a model with a larger context window\./,
+			failed.errorMessage!,
+			/^This chat is still too long for stub-a, even after condensing its older part\. Start a new session, or pick a model with a larger context window\. \(400: /,
 		);
+		// (7) Never nested, the provider text kept apart, and Repair no longer offered.
+		assert.equal(failed.errorMessage!.split("This chat is still too long").length, 2);
+		assert.match(failed.contextOverflow!.providerText, /^400: .*context_length_exceeded/);
+		const refused = await server.api(`/api/chats/${id}/repair`, { method: "POST" });
+		assert.equal(refused.status, 409);
+		assert.match(await refused.text(), /cannot be condensed any further/);
 	} finally {
 		stub.setResponder(limited(LIMIT_CHARS));
 	}
@@ -327,14 +401,115 @@ test("(e) a custom window above the real limit: the chat overflows, then recover
 	try {
 		const start = stub.requests.length;
 		await send(id, "Keep going, part 6.");
-		const done = await settled(id, "the recovered reply", (c) => recoveryMarkers(c).length > 0 && isReply(c.messages.at(-1)));
+		const done = await settled(id, "the recovered reply", replyAfterRecovery);
 		const turnRequests = stub.requests.slice(start).filter(isTurnRequest);
 		assert.equal(turnRequests.length, 2, "the rejected turn and exactly one retry");
 		assert.ok(size(turnRequests[0]!) > LIMIT_CHARS);
 		assert.ok(size(turnRequests[1]!) <= LIMIT_CHARS, `the retried request fits (${size(turnRequests[1]!)} chars)`);
-		assert.match(JSON.stringify(done.messages.at(-1)!.content), /Answering \\"Keep going, part 6\.\\"/);
+		assert.match(JSON.stringify(lastReply(done)!.content), /Answering \\"Keep going, part 6\.\\"/);
 		assert.equal(recoveryMarkers(done).length, 1);
 	} finally {
 		stub.setResponder(limited(LIMIT_CHARS));
 	}
+});
+
+for (const summarizerWorks of [true, false]) {
+	test(`(f) a chained recovery keeps the prior summary (${summarizerWorks ? "model summary, transcript clipped" : "deterministic fallback"})`, async () => {
+		const id = await newChat(summarizerWorks ? "Continuity" : "Continuity fallback");
+		await grow(id, 5);
+		// An earlier threshold compaction: its summary stands for message 0.
+		seedMarker(id, (await chat(id)).messages[1]!.id, PRIOR);
+		if (!summarizerWorks) stub.setResponder(limited(LIMIT_CHARS, undefined, reply.http(500, { error: { message: "summarizer down" } })));
+		try {
+			const start = stub.requests.length;
+			await send(id, "Keep going, part 6.");
+			await settled(id, "the recovered reply", replyAfterRecovery);
+			const requests = stub.requests.slice(start);
+			const retried = requests.filter(isTurnRequest).at(-1)!;
+			assert.ok(size(retried) <= LIMIT_CHARS);
+			assert.match(JSON.stringify(retried.messages), /PRIOR-SUMMARY-SENTINEL/, "the prior summary rides into the new marker");
+			if (summarizerWorks) {
+				// (2) The summarizer saw the whole prior block, with only the raw transcript clipped.
+				const summarizer = JSON.stringify(requests.filter((r) => !isTurnRequest(r)).at(-1)!.messages);
+				assert.match(summarizer, /prior compaction summary, still authoritative/);
+				assert.match(summarizer, /PRIOR-SUMMARY-SENTINEL (?:The learner mastered one-sided limits\. ){80}/);
+				assert.match(summarizer, /older part omitted/);
+			} else {
+				// (1) The fallback carries the prior summary verbatim, then the plan tree.
+				assert.match(JSON.stringify(retried.messages), /no model summary could be written[^]*earlier summary \(still authoritative\)[^]*PRIOR-SUMMARY-SENTINEL[^]*plan dependency tree/);
+			}
+		} finally {
+			stub.setResponder(limited(LIMIT_CHARS));
+		}
+	});
+}
+
+test("(g) one compact-and-retry per overflow episode, even when a threshold marker landed after the recovery", async () => {
+	const id = await newChat("Guard");
+	await grow(id, 2);
+	breakChat(id, false);
+	const learner = `msg_lh40_user_${id}`;
+	seedMarker(id, learner, "Recovered summary.", "This chat had grown too long for stub-a; I condensed the older part and continued.");
+	seedMarker(id, learner, "A later threshold summary.");
+	stub.setResponder(limited(10_000));
+	try {
+		const start = stub.requests.length;
+		await send(id, "Another try.");
+		const done = await settled(id, "the clear failure", (c) => !!c.messages.at(-1)?.contextOverflow?.unrecoverable);
+		await new Promise((r) => setTimeout(r, 5_000));
+		assert.equal(stub.requests.slice(start).length, 1, "no second recovery, no retry");
+		assert.equal(recoveryMarkers(await chat(id)).length, 1);
+		assert.match(done.messages.at(-1)!.errorMessage!, /^This chat is still too long for stub-a/);
+	} finally {
+		stub.setResponder(limited(LIMIT_CHARS));
+	}
+});
+
+test("(h) a refused repair shows the server's reason, then the chat says plainly it cannot be condensed", async () => {
+	const id = await newChat("Nothing to drop");
+	breakChat(id, false); // the learner's one message and its rejection: nothing older to condense
+	const page = await openChat(id, '[data-testid="repair-chat"]');
+	try {
+		await (await sidebarRow(page, "Nothing to drop")).click({ button: "right" });
+		await page.waitForSelector('[data-testid="ctx-repair"]');
+		await page.click('[data-testid="ctx-repair"]');
+		await page.waitForFunction(
+			() => document.querySelector('[data-testid="ctx-repair-error"]')?.textContent === "Nothing older in this chat can be condensed.",
+			{ timeout: 60_000 },
+		);
+		// The server declared it hopeless: the banner explains, and Repair is no longer offered.
+		await page.waitForFunction(
+			() => document.querySelector('[data-testid="chat-error"]')?.textContent?.includes("This chat is still too long for stub-a") &&
+				!document.querySelector('[data-testid="repair-chat"]'),
+			{ timeout: 60_000 },
+		);
+	} finally {
+		await page.close();
+	}
+	assert.equal(recoveryMarkers(await chat(id)).length, 0);
+});
+
+test("(i) the stated limit is learned: after one recovery, the threshold compaction keeps the chat under the real limit", async () => {
+	const id = await newChat("Learned limit");
+	await grow(id, 5);
+	await send(id, "Keep going, part 6.");
+	const recovered = await settled(id, "the recovered reply", replyAfterRecovery);
+	const marker = recoveryMarkers(recovered).at(-1)!;
+	// Its own key, never the user's value.
+	assert.equal(settingsOnDisk().learnedContextLimits?.[`${STUB}:stub-a`], Math.floor(LIMIT_CHARS / 4));
+	assert.equal(settingsOnDisk().contextWindows?.[`${STUB}:stub-a`], 1_500_000);
+
+	const before = rejections;
+	const start = stub.requests.length;
+	for (let i = 7; i <= 12; i++) {
+		const replies = (await chat(id)).messages.filter(isReply).length;
+		await send(id, `Keep going, part ${i}.`);
+		await settled(id, `turn ${i}`, (c) => c.messages.filter(isReply).length > replies);
+	}
+	assert.equal(rejections, before, "no second rejection");
+	assert.ok(stub.requests.slice(start).filter(isTurnRequest).every((r) => size(r) <= LIMIT_CHARS));
+	const done = await chat(id);
+	const later = done.messages.slice(done.messages.indexOf(done.messages.find((m) => m.id === marker.id)!) + 1);
+	assert.ok(later.some((m) => m.customType === "compaction" && !m.details?.notice), "a threshold compaction fired");
+	assert.equal(recoveryMarkers(done).length, 1);
 });
