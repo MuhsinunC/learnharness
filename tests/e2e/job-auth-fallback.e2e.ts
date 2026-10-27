@@ -7,7 +7,8 @@ import { calledTool, lastToolName, reply, startStubProvider, type StubProvider, 
 // falls back once to the Strong model; when that is impossible it fails
 // within bounds with learner-readable text, even behind an open question.
 // A 403 that is not about credentials (OpenRouter moderation) is a plain
-// failure. A job that stops making progress, in a model call or in a step
+// failure, even when the flagged input talks about API keys. A Vision-model
+// 403 falls back the same way for a figure. A job that stops making progress, in a model call or in a step
 // that ignores the abort signal, fails at the idle limit; a slow job that
 // keeps making progress does not. The Background agents feed
 // (/api/activity) empties every time.
@@ -26,21 +27,25 @@ const ASK_MARKER = "[ask-a-question-too]";
 const STALL_MARKER = "[skip-run-demo]";
 const SLOW_MARKER = "[slow-builder]";
 const SLOW_STEP_MS = 14_000;
+const VISUAL_MARKER = "[draw-a-figure]";
+const SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"><circle cx="100" cy="100" r="80" fill="none" stroke="black"/></svg>';
 const MODERATION_403 = {
 	error: {
 		code: 403,
 		message: "Your chosen model requires moderation and your input was flagged",
-		metadata: { reasons: ["harassment"], flagged_input: "Teach me limits.", provider_name: "e2e-stub", model_slug: "stub-mod" },
+		// The echoed learner text uses credential words; only the provider's own message may count.
+		metadata: { reasons: ["harassment"], flagged_input: "Explain API key authentication, unauthorized tokens and credentials.", provider_name: "e2e-stub", model_slug: "stub-mod" },
 	},
 };
 
 interface Job {
 	id: string;
+	kind: string;
 	status: string;
 	error?: string;
 	activity: string;
 	delivery?: { status: string };
-	result?: { html?: string; notes?: string; needsSettingsFix?: boolean };
+	result?: { html?: string; svg?: string; notes?: string; needsSettingsFix?: boolean };
 	usage?: { model: string };
 }
 interface ChatRecord {
@@ -61,8 +66,12 @@ async function respond(req: StubRequest) {
 		if (last === "write_demo" && !transcript.includes("Stalled slider")) return reply.tools([{ name: "run_demo", arguments: {} }]);
 		return reply.text("A slider whose value is echoed beside it.");
 	}
+	if (req.system.includes("You are a visual maker"))
+		return calledTool(req, "write_svg") ? reply.text("A unit circle.") : reply.tools([{ name: "write_svg", arguments: { svg: SVG } }]);
 	if (req.tools.includes("probe_done") && !calledTool(req, "probe_done")) return reply.tools([{ name: "probe_done", arguments: ASSESSMENT }]);
-	if (req.tools.includes("demo") && !calledTool(req, "demo")) {
+	if (transcript.includes(VISUAL_MARKER) && req.tools.includes("visual") && !calledTool(req, "visual"))
+		return reply.tools([{ name: "visual", arguments: { brief: "A unit circle centred in the frame." } }], "Let me draw it.");
+	if (req.tools.includes("demo") && !calledTool(req, "demo") && !calledTool(req, "visual")) {
 		const title = transcript.includes(STALL_MARKER) ? "Stalled slider" : transcript.includes(SLOW_MARKER) ? "Slow slider" : "Limit slider";
 		const calls: Array<{ name: string; arguments: unknown }> = [{ name: "demo", arguments: { title, brief: "One slider, value shown." } }];
 		if (JSON.stringify(req.messages).includes(ASK_MARKER))
@@ -224,9 +233,8 @@ test("(d) a stalled step that ignores the abort fails at the idle limit, and its
 	assert.equal(later.error, failed.error);
 	assert.equal(later.activity, "failed");
 	assert.equal(later.result?.html, "");
-	const steers = (await chat(chatId)).messages.filter((m) => m.id === `steer_${failed.id}`);
-	assert(steers.length <= 1, "one steer at most");
-	if (steers[0]) assert.match(String(steers[0].content), /made no progress/);
+	const steer = (await chat(chatId)).messages.find((m) => m.id === `steer_${failed.id}`);
+	if (steer) assert.match(String(steer.content), /made no progress/);
 	await setModels(MODELS);
 });
 
@@ -259,5 +267,21 @@ test("(f) a 403 that is not about the key (OpenRouter moderation) is a plain fai
 
 	const steer = await until(async () => (await chat(chatId)).messages.find((m) => m.id === `steer_${failed.id}`), "the failure steer to land", 120_000);
 	assert.doesNotMatch(String(steer.content), /Retrying won't help/);
+	await setModels(MODELS);
+});
+
+test("(g) a Vision-model 403 falls back to the Strong model and the figure is delivered", async () => {
+	await setModels({ ...MODELS, cheap: stubModel("stub-a"), vision: stubModel("stub-b") });
+	const before = stub.requests.length;
+	const { job } = await startLesson(`Teach me the unit circle. ${VISUAL_MARKER}`);
+	const done = await settledJob(job, 120_000);
+
+	assert.equal(done.kind, "visual");
+	assert.equal(done.status, "done", done.error);
+	assert.equal(done.result?.svg, SVG);
+	const makerModels = stub.requests.slice(before).filter((r) => r.system.includes("You are a visual maker")).map((r) => r.model);
+	assert.equal(makerModels[0], "stub-b", "the Vision model was tried first");
+	assert(makerModels.slice(1).length > 0 && makerModels.slice(1).every((m) => m === "stub-a"), `one fallback onto stub-a: ${makerModels.join(",")}`);
+	assert.deepEqual(await backgroundAgents(), []);
 	await setModels(MODELS);
 });

@@ -39,15 +39,16 @@ const AUTH_TEXT = /api[ _-]?key|authenticat|unauthori[sz]ed|invalid[ _-]?token|c
  * `<status> <sdk message>` or `<status>: <body>` (utils/error-body.js), e.g.
  * Baseten's bad key: `403 "please check the api-key you provided"`. The
  * status survives only inside that string. A 401 is always credentials; a
- * 403 (or 400, or no status) only with credential wording, because
- * providers also send 403 for moderation, region and model access.
+ * 403 (or 400, or no status) only when the provider's own message uses
+ * credential wording, because providers also send 403 for moderation,
+ * region and model access. The rest of a body (a moderation body echoes
+ * the flagged input) is never read for it.
  */
 export function providerAuthError(message: string | undefined): ProviderAuthError | undefined {
 	if (!message) return undefined;
 	const match = /^(\d{3})(?::\s*|\s+)/.exec(message);
 	const status = match ? Number(match[1]) : undefined;
-	const auth = status === 401 || ((status === undefined || status === 400 || status === 403) && AUTH_TEXT.test(message));
-	if (!auth) return undefined;
+	if (status !== undefined && status !== 400 && status !== 401 && status !== 403) return undefined;
 	const rest = match ? message.slice(match[0].length) : message;
 	let detail = rest;
 	try {
@@ -58,6 +59,7 @@ export function providerAuthError(message: string | undefined): ProviderAuthErro
 	} catch {
 		// Not JSON: keep the text as the provider sent it.
 	}
+	if (status !== 401 && !AUTH_TEXT.test(detail)) return undefined;
 	return new ProviderAuthError(message, status, detail.slice(0, 300));
 }
 
