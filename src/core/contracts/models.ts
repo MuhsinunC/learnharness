@@ -17,6 +17,10 @@ export interface ModelCatalogEntry {
 	provider: string;
 	reasoning: boolean;
 	input: ("text" | "image")[];
+	/** Effective image support (LH-39): the learner's per-pair override
+	 *  (settings imageSupport) over the catalog's `input`; absent reads as
+	 *  the catalog's `input`. */
+	supportsImages?: boolean;
 	/** The thinking levels this model actually accepts (pi's
 	 * thinkingLevelMap — e.g. GLM-5.3-flash: low|high|max). The thinking
 	 * picker lists exactly these; anything else is a lie. */

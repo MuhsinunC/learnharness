@@ -25,6 +25,7 @@ import type {
 } from "../core/settings.ts";
 import { BACKGROUND_MODEL_ROLES, COMPACTION_THRESHOLD_FLOOR, EXTRACTION_CHUNK_TOKENS_FLOOR, MODEL_SLOTS } from "../core/settings.ts";
 import { WRITABLE_TOOL_KEYS } from "../core/pending.ts";
+import { sanitizeImageSupport, type ImageSupportSettings } from "../core/attachments.ts";
 
 /** Parsed-or-rejected — `ok: false` carries the 400's error message. */
 export type SettingsBodyResult<T> =
@@ -410,6 +411,22 @@ export function parseContextWindowBody(body: unknown): SettingsBodyResult<Contex
 	};
 }
 
+/** imageSupport (LH-39): { provider: { modelId: boolean } } — the learner's
+ *  per-pair "supports images" overrides. Strict: anything but a boolean
+ *  leaf is a 400; absent pairs resolve from the catalog. Replace-whole. */
+export function parseImageSupportSettingsBody(body: unknown): SettingsBodyResult<ImageSupportSettings> {
+	const raw = asRecord(body);
+	if (!raw) return { ok: false, error: "Invalid JSON body" };
+	for (const [provider, models] of Object.entries(raw)) {
+		const entries = asRecord(models);
+		if (!entries) return { ok: false, error: `imageSupport.${provider} must be an object of model id → boolean` };
+		for (const [id, value] of Object.entries(entries)) {
+			if (typeof value !== "boolean") return { ok: false, error: `imageSupport.${provider}.${id} must be a boolean` };
+		}
+	}
+	return { ok: true, settings: sanitizeImageSupport(raw) };
+}
+
 /** The section→parser map for PUT /api/settings/[section] (the route also
  *  carries the special prompts sub-resource). */
 export const SETTINGS_SECTIONS = {
@@ -420,6 +437,7 @@ export const SETTINGS_SECTIONS = {
 	graph: parseGraphSettingsBody,
 	compaction: parseCompactionSettingsBody,
 	models: parseModelsSettingsBody,
+	imageSupport: parseImageSupportSettingsBody,
 } as const;
 
 export type SettingsSectionName = keyof typeof SETTINGS_SECTIONS;

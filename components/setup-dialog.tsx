@@ -463,7 +463,7 @@ export function SetupDialog({
 							const level = levels[slot];
 							const levelsForEntry = entry?.supportedLevels ?? [];
 							const catalog =
-								slot === "vision" ? body?.models.filter((m) => m.input.includes("image")) : body?.models;
+								slot === "vision" ? body?.models.filter((m) => m.supportsImages ?? m.input.includes("image")) : body?.models;
 							return (
 								<div key={slot} data-testid={`setup-slot-${slot}`} className="flex flex-col gap-1.5">
 									<span className="flex items-center gap-1.5">

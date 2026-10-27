@@ -33,7 +33,7 @@
  */
 
 import type { AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai";
-import type { LhMarkerMessage, LhMessage } from "./native-messages.ts";
+import type { LhMarkerMessage, LhMessage, LhUserMessage } from "./native-messages.ts";
 import { modelSolutionForConclude, PRACTICE_CONCLUDE_TOOL, problemInputForConclude, SEND_TO_USER_TOOL, sendToUserText } from "./native-messages.ts";
 import { activeCompactionOf, type CompactionDetails } from "./compaction.ts";
 import { QUESTION_TOOLS } from "./pending.ts";
@@ -184,7 +184,11 @@ export function projectView(messages: readonly LhMessage[], live?: LiveTurnState
 				typeof content === "string"
 					? [content]
 					: content.filter((c) => c.type === "text").map((c) => (c as { text: string }).text);
-			out.push({ id: m.id, role: "user", parts: texts.map(textPart) });
+			// Attached images (LH-39) ride as their own parts — "image", not a
+			// data- part, so an image-only message still renders as the
+			// learner's own message rather than a marker card.
+			const images = ((m as LhUserMessage).attachments ?? []).map((ref) => ({ type: "image", id: ref.id, data: ref }));
+			out.push({ id: m.id, role: "user", parts: [...texts.map(textPart), ...images] });
 			continue;
 		}
 

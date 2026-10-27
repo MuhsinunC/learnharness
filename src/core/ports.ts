@@ -178,6 +178,16 @@ export interface SettingsStore {
 	writeSettings(settings: UserSettings): void;
 }
 
+// ─── AttachmentStore — the learner's stored images (LH-39) ──────────────────
+
+/** Read side of src/store/attachments.ts, handed to the agent layer: the
+ *  view_image tool checks ids, and the wire hydrator loads pixels. Both
+ *  key on store ids only (core/attachments.ts ATTACHMENT_ID_RE). */
+export interface AttachmentStore {
+	exists(id: string): boolean;
+	load(id: string): { type: "image"; data: string; mimeType: string } | null;
+}
+
 // ─── PromptOverrideStore — per-segment system-prompt overrides (2026-09-19) ──
 
 /**

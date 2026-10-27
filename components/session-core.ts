@@ -27,6 +27,7 @@ import {
 	newThinkingMessage,
 	newUserMessage,
 	projectView,
+	type AttachmentRef,
 	type ChatInput,
 	type LhMarkerMessage,
 	type LhMessage,
@@ -680,7 +681,7 @@ export class SessionModel {
 		// write-ahead will persist (inputAppends), with LOCAL ids so
 		// adoption can tell them from the record's absorbed copies.
 		const optimistic: LhMessage[] = [];
-		if (input.type === "text") optimistic.push({ ...newUserMessage(input.text), id: localId() });
+		if (input.type === "text") optimistic.push({ ...newUserMessage(input.text, input.attachments), id: localId() });
 		else if (input.type === "thinking") {
 			// The practice submissions (2026-10-04): the marker lands
 			// optimistically — the card renders from its details the
@@ -764,9 +765,9 @@ export class SessionModel {
 	 *  settled mid-send (the race): fall back to the plain text send —
 	 *  the entry is dropped and send() pushes its own optimistic card.
 	 */
-	async steer(text: string): Promise<void> {
+	async steer(text: string, attachments: AttachmentRef[] = []): Promise<void> {
 		const t = text.trim();
-		if (!t) return;
+		if (!t && attachments.length === 0) return;
 		const id = `steer_${localId()}`;
 		this.steerQueueValue = [...this.steerQueueValue, { id, text: t }];
 		this.onChange?.();
@@ -778,12 +779,12 @@ export class SessionModel {
 			const res = await this.fetch(`/api/chats/${this.chatId}/steer`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ input: { type: "steer", id, text: t } }),
+				body: JSON.stringify({ input: { type: "steer", id, text: t, ...(attachments.length ? { attachments } : {}) } }),
 			});
 			if (res.ok) return; // parked or delivered — the stream lands the card
 			if (res.status === 409) {
 				dropSteer();
-				await this.send({ type: "text", text: t }); // the settle race: plain send
+				await this.send({ type: "text", text: t, ...(attachments.length ? { attachments } : {}) }); // the settle race: plain send
 				return;
 			}
 			dropSteer();

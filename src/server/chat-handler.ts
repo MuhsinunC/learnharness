@@ -31,6 +31,7 @@ import { runPiTurn } from "./pi/ui-stream.ts";
 import { collectToolCallIds } from "./pi/call-ids.ts";
 import { providerEventNote } from "../agent/provider-events.ts";
 import { effectiveSettings, stores } from "./stores.ts";
+import { imageInputRefusal, withImageSupport } from "./attachments.ts";
 import { searchAvailable, searchProvider } from "./search.ts";
 import { providerKeyPresent } from "./keys.ts";
 import { bootClaudeCodeProvider } from "./claude-code-boot.ts";
@@ -345,6 +346,12 @@ export async function handleChatInput(
 	let conversationEngine: PiEngine;
 	try { conversationEngine = piEngineForSpec(conversation, () => callPurpose.background, lifecycle); }
 	catch { return Response.json({ error: conversation.provider === "chatgpt" ? chatGPTStreamError("model catalog") : isSubscriptionProvider(conversation.provider) ? nativeSubscriptionError(conversation.provider, "model catalog") : "The selected model is unavailable." }, { status: 503 }); }
+	// THE IMAGE GATE (LH-39): the learner's override reaches the Model
+	// (pi-ai keys image handling on model.input), and a send with images
+	// for a model that can't take them refuses before anything persists.
+	conversationEngine = withImageSupport(conversationEngine);
+	const imageRefusal = input.type === "text" ? imageInputRefusal(conversationEngine.model, input.attachments) : null;
+	if (imageRefusal) return imageRefusal;
 	const modelIdForCompaction = `${conversationEngine.model.provider}:${conversationEngine.model.id}`;
 	// The window seam (LH-40): never above a limit the provider stated.
 	const compactionWindow = contextWindowFor(conversationEngine);
@@ -506,6 +513,7 @@ export async function handleChatInput(
 		// point as the tool delta — the agent layer composes the system
 		// prompt fresh per turn, swapping in any enabled override segments.
 		promptSwitches: effective.agent.prompts,
+		attachments: stores.attachmentStore,
 	};
 	// PRACTICE BRANCH (owner design, 2026-10-04): a kind:"practice"
 	// session builds the practitioner from turn 1 — no prober→teacher

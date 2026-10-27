@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { subscriptionLabels, subscriptionLabel, type SessionPricing, type TurnUsage } from "@/src/core";
 import { formatTokens, formatUsd, planCostLabel, prettyModel } from "@/components/usage-format";
 import { ModelControl, catalogLimits, useModelCatalog } from "@/components/model-picker";
@@ -34,6 +34,7 @@ export function StatsBar({
 	dictationSlot,
 	chatId,
 	leadingSlot,
+	onModelChange,
 }: {
 	turns: TurnUsage[];
 	contextTokens?: number | null;
@@ -52,9 +53,16 @@ export function StatsBar({
 	 *  composer's teach | practice switch rides here — before the session
 	 *  data (which renders nothing pre-chat on that surface). */
 	leadingSlot?: ReactNode;
+	/** The control's effective "provider:id", reported up (LH-39: the
+	 *  composer gates image attachments on it). */
+	onModelChange?: (model: string | undefined) => void;
 }) {
 	const [open, setOpen] = useState(false);
 	const [selectedModel, setSelectedModel] = useState<string | undefined>();
+	const reportModel = useCallback((model: string | undefined) => {
+		setSelectedModel(model);
+		onModelChange?.(model);
+	}, [onModelChange]);
 	// Same dropdown discipline as the model control (owner, df4433f treatment,
 	// stats round 1): close on any pointerdown outside the bar or on Escape.
 	const barRef = useRef<HTMLDivElement>(null);
@@ -192,7 +200,7 @@ export function StatsBar({
 			{/* The model + thinking control — one controller for the conversation
 			    agents (prober/teacher); the record's `turns` above still folds
 			    the ACTUAL models billed, regardless of what the picker says. */}
-			<ModelControl chatId={chatId} onModelChange={setSelectedModel} />
+			<ModelControl chatId={chatId} onModelChange={reportModel} />
 		</div>
 	);
 }

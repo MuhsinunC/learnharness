@@ -23,6 +23,8 @@ import { AnsweredCard } from "@/components/answered-card";
 import { artifactRenderers } from "@/components/artifacts";
 import { SubagentSteerCard } from "@/components/artifacts/steer-card";
 import { Composer } from "@/components/composer";
+import { AttachmentChips, AttachmentImage, useAttachments } from "@/components/attachments";
+import { useModelCatalog } from "@/components/model-picker";
 import { useEnterSubmits } from "@/components/enter-submits";
 import { blurAfterPointerClick } from "@/components/focus-hygiene";
 import { dockStateKey } from "@/components/dock-state-key";
@@ -78,7 +80,7 @@ import {
 } from "@/src/core";
 import { ReadingThinkingField } from "@/components/reading-thinking";
 import { currentUserThinkingOpen, setAllUserThinkingOpen } from "@/components/thinking-block";
-import { slotsConfigured, type ModelsSettings } from "@/src/core";
+import { imagesUnsupportedText, slotsConfigured, type AttachmentRef, type ModelsSettings } from "@/src/core";
 import { useSettingsSaved } from "@/components/settings-signal";
 
 /** One width for everything: transcript, cards, and the bottom blob share this column. */
@@ -691,8 +693,19 @@ export function Chat({
 	// server's registry mutex is the structural gate; this is the
 	// affordance).
 	const [compacting, setCompacting] = useState(initiallyCompacting);
+	// Image attachments (LH-39): gated on the chat's effective model (the
+	// stats bar's model control reports it) — a model that can't read
+	// images gets the notice instead of a silent drop.
+	const [chatModel, setChatModel] = useState<string | undefined>();
+	const { catalog } = useModelCatalog();
+	const chatModelEntry = catalog?.models.find((m) => `${m.provider}:${m.id}` === chatModel);
+	const imagesBlocked =
+		chatModelEntry && !(chatModelEntry.supportsImages ?? chatModelEntry.input.includes("image"))
+			? imagesUnsupportedText(chatModelEntry)
+			: null;
+	const attach = useAttachments(imagesBlocked);
 	const canSend =
-		(text.trim().length > 0 || dictation.active) && !pending && !activeProblem && !compacting;
+		(text.trim().length > 0 || attach.items.length > 0 || dictation.active) && !pending && !activeProblem && !compacting;
 
 	/* THE PRACTICE PAUSE (owner round 16): between problems — practice
 	 * kind, nothing active, nothing in flight, and at least one problem
@@ -1162,18 +1175,19 @@ export function Chat({
 		 * let the last finals land in the composer, then send the REF value
 		 * (the flush lands via setState, invisible to this closure). */
 		if (!dictation.active) {
-			doSteerOrSend();
+			void doSteerOrSend();
 			return;
 		}
 		void dictation.finish().then(doSteerOrSend);
 	};
-	const doSend = () => {
+	const doSend = async () => {
 		if (busy || pending || compacting) return;
-		const t = textRef.current.trim();
-		if (!t) return;
+		const { text: t, refs } = await attach.takePaths(textRef.current.trim());
+		if (!t && refs.length === 0) return;
 		draftRef.current = t; // the refusal flow's preserve-and-replay seam
 		applyText("");
-		void send({ type: "text", text: t });
+		attach.clear();
+		void send({ type: "text", text: t, ...(refs.length ? { attachments: refs } : {}) });
 	};
 
 	/* STEER VS SEND (owner arc 2026-10-03): a send while a turn runs steers
@@ -1185,16 +1199,17 @@ export function Chat({
 	 * own stream AND foreign/wake turns — both have a live agent by the
 	 * time the send's POST resolved, so the steer lands. Idle takes the
 	 * plain send; a raced settle 409s and falls back to exactly that. */
-	const doSteerOrSend = () => {
+	const doSteerOrSend = async () => {
 		if (pending || compacting) return;
-		const t = textRef.current.trim();
-		if (!t) return;
+		if (!textRef.current.trim() && attach.items.length === 0) return;
 		if (busy) {
+			const { text: t, refs } = await attach.takePaths(textRef.current.trim());
 			applyText("");
-			void steer(t);
+			attach.clear();
+			void steer(t, refs);
 			return;
 		}
-		doSend();
+		void doSend();
 	};
 
 	return (
@@ -1464,6 +1479,9 @@ export function Chat({
 												<div className="lh-prose whitespace-pre-wrap text-foreground">
 													{m.parts.filter((p) => p.type === "text").map((p) => p.text).join("\n")}
 												</div>
+												{m.parts.filter((p) => p.type === "image").map((p) => (
+													<AttachmentImage key={p.id} attachment={p.data as AttachmentRef} />
+												))}
 											</div>
 									) : (
 									<Message from="assistant" className="max-w-full">
@@ -1695,8 +1713,20 @@ export function Chat({
 							nextProblem={nextReady}
 							onNext={sendNext}
 							placeholder={nextReady ? "Ask anything, or press Enter for the next one." : undefined}
+							onFiles={(files) => void attach.addFiles(files)}
 						/>
 					}
+					attachments={
+						<>
+							<AttachmentChips items={attach.items} onRemove={attach.remove} />
+							{attach.notice && (
+								<div data-testid="attachment-notice" className="px-3 pt-2 font-ui text-xs text-muted-foreground">
+									{attach.notice}
+								</div>
+							)}
+						</>
+					}
+					onModelChange={setChatModel}
 					onSubmitAnswer={(output) => {
 						if (!pending) return;
 						// THE ANSWER IS THE QUESTION CALL'S TOOL RESULT (fork 1, owner
@@ -1889,6 +1919,8 @@ function DockOverlay({
 	dictationCancel,
 	setupCta,
 	queuedSteers,
+	attachments,
+	onModelChange,
 }: {
 	pending: ReturnType<typeof findPendingToolCall>;
 	initialQuestionDraft?: QuestionFormDraft;
@@ -1938,6 +1970,11 @@ function DockOverlay({
 	/** The persistent setup CTA (BYOK, owner 2026-09-22): the same pill
 	 *  home and /chat/new carry, above the composer while slots are unset. */
 	setupCta?: React.ReactNode;
+	/** The composer's pending image chips + notice (LH-39), inside the
+	 *  shell above the text row; composer mode only. */
+	attachments?: React.ReactNode;
+	/** The stats bar's effective-model report (LH-39's image gate). */
+	onModelChange?: (model: string | undefined) => void;
 }) {
 	const { isAtBottom, scrollToBottom, scrollRef } = useStickToBottomContext();
 	// Render-fresh bottom state (flicker round): the arrival block below reads
@@ -2379,7 +2416,10 @@ function DockOverlay({
 									compactionRunning={compactionRunning}
 								/>
 							) : (
-								composer
+								<>
+									{attachments}
+									{composer}
+								</>
 							)}
 						</div>
 					</div>
@@ -2392,6 +2432,7 @@ function DockOverlay({
 						pricing={pricing}
 						dictationSlot={dictationSlot}
 						chatId={chatId}
+						onModelChange={onModelChange}
 					/>
 					{/* The scroll-down disc (moved here from the Conversation,
 					    owner refinement round 2026-09-24): anchored to the BLOCK's
