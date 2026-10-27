@@ -93,11 +93,13 @@ Pi's shape, with Codex's clipping and option 2 as the fallback
 
 ## The window seam (LH-38)
 
-Recovery reads the window only through `contextWindowFor(modelId)` in
-`src/server/context-recovery.ts`. Today it returns `catalogContextLimits()`.
-LH-38's per-(provider, model) setting should plug in there. The threshold
-compaction's two call sites in `chat-handler.ts` were left as they are,
-for LH-38. Until the window itself is corrected, the threshold still trusts
-the wrong value, so an over-window chat will hit the limit and recover again
-every few turns. Persisting the limit a rejection states, per model, would
-stop that; it is left to LH-38.
+Recovery reads the window only through `contextWindowFor(engine)` in
+`src/server/context-recovery.ts`, which returns `engine.model.contextWindow`.
+`piEngineForSpec` applies LH-38's per-(provider, model) custom window there,
+so it is the user's value when set and the catalog default otherwise. It
+also covers providers with no key, which `catalogContextLimits()` skips.
+Recovery still trusts the provider's stated limit over it. The threshold
+compaction keeps reading the same custom window, so until the user corrects
+it, an over-window chat hits the limit and recovers again every few turns.
+Persisting the limit a rejection states, per model, would stop that; it is
+not done here.
