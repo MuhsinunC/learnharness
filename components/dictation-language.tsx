@@ -86,7 +86,12 @@ function DictationLanguagePicker({ preference, disabled }: {
 		>
 			<div onKeyDown={(event) => {
 				closeOnEscape(event);
-				if (event.key === "Enter") { event.preventDefault(); event.stopPropagation(); }
+				if (event.key === "Enter") {
+					// Empty search results must not submit the composer, but a
+					// focused option button still needs Enter's native click.
+					if (event.target instanceof HTMLInputElement) event.preventDefault();
+					event.stopPropagation();
+				}
 			}}>
 				{error && <div role="alert" className="mb-1.5 text-destructive">{error}</div>}
 				<SearchMenuList

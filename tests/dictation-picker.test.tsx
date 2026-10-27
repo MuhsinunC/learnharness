@@ -127,6 +127,27 @@ test("the real picker searches by language, chooses with Arrow/Enter, and restor
 	assert.match(trigger().textContent!, /Polish/);
 });
 
+test("Enter on a focused option preserves native button activation", async () => {
+	const f = await fixture();
+	await click(trigger());
+	const option = byTest("dictation-language-multi");
+	option.focus();
+	let prevented = false;
+	await act(async () => {
+		const event = new window.Event("keydown", { bubbles: true, cancelable: true });
+		Object.assign(event, { key: "Enter" });
+		option.dispatchEvent(event);
+		prevented = event.defaultPrevented;
+		// linkedom does not implement native keyboard activation. Follow the
+		// browser's default action only if the handler left it uncancelled.
+		if (!prevented) option.click();
+	});
+	assert.equal(prevented, false, "focused option Enter must retain its native click");
+	assert.deepEqual(f.state.writes, ["multi"]);
+	assert.equal(menu(), null);
+	assert.match(trigger().textContent!, /Multilingual/);
+});
+
 test("empty results cannot save; Escape and outside click close the menu without closing settings", async () => {
 	const f = await fixture();
 	await click(trigger());
