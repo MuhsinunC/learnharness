@@ -18,10 +18,16 @@ export interface StubRequest {
 }
 
 export type StubReply =
-	| { kind: "text"; text: string }
+	| { kind: "text"; text: string; usage?: StubUsage }
 	| { kind: "tools"; calls: Array<{ name: string; arguments: unknown }>; text?: string }
 	| { kind: "http"; status: number; body: unknown }
 	| { kind: "hang" };
+
+/** Reported token counts (default: a fixed 100 prompt / 20 completion). */
+export interface StubUsage {
+	prompt_tokens: number;
+	completion_tokens: number;
+}
 
 export type StubResponder = (req: StubRequest) => StubReply | Promise<StubReply>;
 
@@ -29,7 +35,7 @@ export type StubResponder = (req: StubRequest) => StubReply | Promise<StubReply>
 export const BASETEN_403_BODY = { error: "please check the api-key you provided" };
 
 export const reply = {
-	text: (text: string): StubReply => ({ kind: "text", text }),
+	text: (text: string, usage?: StubUsage): StubReply => ({ kind: "text", text, usage }),
 	tools: (calls: Array<{ name: string; arguments: unknown }>, text?: string): StubReply => ({ kind: "tools", calls, text }),
 	http: (status: number, body: unknown): StubReply => ({ kind: "http", status, body }),
 	baseten403: (): StubReply => ({ kind: "http", status: 403, body: BASETEN_403_BODY }),
@@ -150,7 +156,8 @@ function send(res: http.ServerResponse, model: string, out: StubReply, stream: b
 		: [];
 	const text = out.text ?? "";
 	const finish = toolCalls.length > 0 ? "tool_calls" : "stop";
-	const usage = { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 };
+	const counts = (out.kind === "text" && out.usage) || { prompt_tokens: 100, completion_tokens: 20 };
+	const usage = { ...counts, total_tokens: counts.prompt_tokens + counts.completion_tokens };
 	if (!stream) {
 		res.writeHead(200, { "content-type": "application/json" }).end(
 			JSON.stringify({
