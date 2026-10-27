@@ -63,12 +63,11 @@ settings: { version: 1, graph: { enabled: false }, models: {
 The ids are not in `AUTH_PROVIDER_KEYS`, so the key gates pass and every
 request reaches the stub. `PUT /api/settings/models` also accepts them.
 
-Stub models are absent from `GET /api/models`, which lists keyed providers
-only, so the composer picker, the Settings slot menus and the footer's
-"/ Nk" denominator never show them. Set them through
-`PUT /api/settings/models` (or the `settings` you boot with). A test that
-needs them in the UI can register the stub under a key-gated id such as
-`openrouter` and save a dummy key with
+Stub providers under their own ids (such as `e2e-stub`) federate into
+`GET /api/models` as keyed, so the composer picker, the Settings slot menus
+and the footer's "/ Nk" denominator show their models. A stub registered
+under a key-gated id such as `openrouter` keeps that id's key gate: its
+models appear once a dummy key is saved with
 `PUT /api/keys/OPENROUTER_API_KEY` (at least 12 characters); see
 `context-window.e2e.ts`.
 
