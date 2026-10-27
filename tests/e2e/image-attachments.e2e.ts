@@ -106,7 +106,7 @@ before(async () => {
 		// The long message's reply reports a context past the 150k default
 		// threshold, so compaction runs at settle (the post-compaction
 		// projection, ~31k, stays under it).
-		return reply.text("I see it.", lastUserText(req).length > 50_000 ? { promptTokens: 160_000 } : {});
+		return reply.text("I see it.", lastUserText(req).length > 50_000 ? { prompt_tokens: 160_000, completion_tokens: 20 } : undefined);
 	});
 	providers.push({
 		id: "e2e-stub",
