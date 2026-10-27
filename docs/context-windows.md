@@ -1,8 +1,10 @@
 # Per-model context windows
 
-Settings → Agent → Context has one **Context window** row for each distinct
-slot model. Each row edits the window for one (provider, model) pair. The
-thinking level doesn't affect it.
+The window is set per (provider, model) pair in two places. The composer's
+model menu shows the active model's window, so a model that isn't in any slot
+can be edited too. Settings → Agent → Context has one **Context window** row
+for each distinct slot model. Both use the same field and the same modal. The
+thinking level doesn't affect the window.
 
 - **Default** is the catalog window, which is pi-ai's `contextWindow` for the model.
 - **Maximum** is the known working limit from
