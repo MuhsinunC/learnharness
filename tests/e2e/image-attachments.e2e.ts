@@ -67,9 +67,9 @@ function bmp(r: number, g: number, b: number, width = 8, height = 8): Buffer {
 const IMAGES = { pasted: png(220, 30, 30), dropped: png(30, 200, 40), byPath: png(30, 40, 210) };
 const idOf = (bytes: Buffer) => `${createHash("sha256").update(bytes).digest("hex")}.png`;
 
-/** Every base64 image payload a request carried. */
+/** Every base64 image payload a request carried, any format. */
 function imagesIn(req: StubRequest): string[] {
-	return [...JSON.stringify(req.messages).matchAll(/data:image\/png;base64,([A-Za-z0-9+/=]+)/g)].map((m) => m[1]!);
+	return [...JSON.stringify(req.messages).matchAll(/data:image\/(?:png|jpeg|gif|webp);base64,([A-Za-z0-9+/=]+)/g)].map((m) => m[1]!);
 }
 const lastUserText = (req: StubRequest) => JSON.stringify([...req.messages].reverse().find((m) => m.role === "user")?.content ?? "");
 const isSummary = (req: StubRequest) => JSON.stringify(req.messages).includes("You are compacting");
@@ -181,12 +181,12 @@ async function pickModel(page: Page, id: string): Promise<void> {
 	await until(async () => (await page.$eval("[data-testid=stats-model]", (el) => el.textContent ?? "")).includes(id), `the ${id} model`);
 }
 
-/** Every /api/attachments request the page makes, as "METHOD path?query". */
+/** Every intake request the page makes (image loads by id aside), as "METHOD path?query". */
 function attachmentRequests(page: Page): string[] {
 	const seen: string[] = [];
 	page.on("request", (r) => {
 		const url = new URL(r.url());
-		if (url.pathname.startsWith("/api/attachments")) seen.push(`${r.method()} ${url.pathname}${url.search}`);
+		if (url.pathname === "/api/attachments" || url.pathname === "/api/attachments/file") seen.push(`${r.method()} ${url.pathname}${url.search}`);
 	});
 	return seen;
 }
@@ -388,12 +388,6 @@ test("the wire carries at most 20 images per request, newest first", async () =>
 	assert.match(JSON.stringify(req.messages), new RegExp(`Image attached by the learner: ${idOf(many[0]!)}`));
 });
 
-/** The pixel size of a PNG payload (IHDR), or null for other formats. */
-function pngSize(b64: string): { width: number; height: number } | null {
-	const bytes = Buffer.from(b64, "base64");
-	return bytes.readUInt32BE(0) === 0x89504e47 ? { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) } : null;
-}
-
 test("a 4000×3000 screenshot is downscaled to 2000 px before it is stored", async () => {
 	const { id } = await server.json<{ id: string }>("/api/chats", { body: { title: "Big screenshot" } });
 	const page = await chrome.browser.newPage();
@@ -405,9 +399,10 @@ test("a 4000×3000 screenshot is downscaled to 2000 px before it is stored", asy
 	const chat = await settled(id, 1);
 	const sent = imagesIn(stub.requests.slice(before).find((r) => !isSummary(r))!);
 	assert.equal(sent.length, 1);
-	assert.deepEqual(pngSize(sent[0]!), { width: 2000, height: 1500 });
+	// PNG or JPEG, whichever came out smaller.
+	assert.deepEqual(imageDimensions(Buffer.from(sent[0]!, "base64")), { width: 2000, height: 1500 });
 	const stored = (chat.messages[0]!.attachments as Array<{ id: string }>)[0]!.id;
-	assert.deepEqual(pngSize(fs.readFileSync(path.join(dataDir, "attachments", stored)).toString("base64")), { width: 2000, height: 1500 });
+	assert.deepEqual(imageDimensions(fs.readFileSync(path.join(dataDir, "attachments", stored))), { width: 2000, height: 1500 });
 	await page.close();
 });
 
@@ -527,12 +522,13 @@ test("a large JPEG photo is downscaled and stays JPEG", async () => {
 	// A 4000×3000 photo-like JPEG, made in the page. The PNG the old
 	// encoder would have kept is reported too: it fits the cap, so only
 	// the JPEG preference makes the stored copy a .jpg.
-	const pngBytes = await page.evaluate(async () => {
-		const draw = (w: number, h: number) => {
+	// (A string, not a function: tsx's helpers don't exist in the page.)
+	const pngBytes = (await page.evaluate(`(async () => {
+		const draw = (w, h) => {
 			const c = document.createElement("canvas");
 			c.width = w;
 			c.height = h;
-			const ctx = c.getContext("2d")!;
+			const ctx = c.getContext("2d");
 			const g = ctx.createLinearGradient(0, 0, w, h);
 			g.addColorStop(0, "#3a6ea5");
 			g.addColorStop(1, "#f2c14e");
@@ -540,13 +536,13 @@ test("a large JPEG photo is downscaled and stays JPEG", async () => {
 			ctx.fillRect(0, 0, w, h);
 			return c;
 		};
-		const blob = (c: HTMLCanvasElement, type: string) => new Promise<Blob>((resolve) => c.toBlob((b) => resolve(b!), type, 0.92));
+		const blob = (c, type) => new Promise((resolve) => c.toBlob(resolve, type, 0.92));
 		const photo = await blob(draw(4000, 3000), "image/jpeg");
 		const dt = new DataTransfer();
 		dt.items.add(new File([photo], "photo.jpg", { type: "image/jpeg" }));
-		document.querySelector("[data-testid=composer] textarea")!.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+		document.querySelector("[data-testid=composer] textarea").dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
 		return (await blob(draw(2000, 1500), "image/png")).size;
-	});
+	})()`)) as number;
 	assert.ok(pngBytes <= MAX_ATTACHMENT_BYTES, `the PNG alternative fits the cap (${pngBytes} bytes)`);
 	await page.waitForSelector("[data-testid=attachment-chip]", { timeout: 60_000 });
 	await sendFromComposer(page, "What is in this photo?");
