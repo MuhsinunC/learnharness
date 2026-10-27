@@ -72,8 +72,15 @@ Defaults come from pi-ai 1.4.0's catalog (`input`), cross-checked against the pr
 | chatgpt (subscription) · each model | same as the matching openai entry | `chatgpt-bridge.ts` copies the openai catalog entry, including `input` |
 | github-copilot, xai subscriptions | the bridge's runtime model metadata | not checked here; the bridge supplies these models at runtime |
 | openrouter · 401 models, 122 text-only | per catalog | pi-ai catalog; for example `anthropic/*` models are yes |
+| claude-code (fork: the Claude subscription through Claude Code) · every model | yes | `claudeCodeCatalog` copies `input` from the anthropic catalog; [Agent SDK streaming input](https://code.claude.com/docs/en/agent-sdk/streaming-vs-single-mode) lists "Image uploads" and shows base64 `image` blocks in `SDKUserMessage` content |
 
-The fork's Claude Code sign-in (LH-21 and later) is not on v0.3.8, so on this base "Claude" means the anthropic key or OpenRouter's `anthropic/*` models.
+On the upstream base, "Claude" means the anthropic key or OpenRouter's `anthropic/*` models. The fork also has the claude-code provider (`src/agent/claude-code/`).
+
+**The claude-code path carries images, checked by reading the code; e2e can't reach it.** The harness stubs OpenAI-compatible HTTP, and this provider spawns the local `claude` binary through the Agent SDK.
+- `splitPrompt` (`history.ts`) turns the current turn's pi `image` blocks into base64 `image` prompt blocks.
+- `streamClaudeCode` yields them in streaming-input mode, which supports images.
+- `convertPiMessages` (`convert.ts`) keeps images in earlier user messages and in tool results, including `view_image` results, in the session file that the child resumes. `tests/claude-code-convert.test.ts` covers that conversion.
+- The provider has no `downgradeUnsupportedImages` step, and its models declare `input: ["text", "image"]`.
 
 ## Known limits
 
