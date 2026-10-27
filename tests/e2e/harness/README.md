@@ -62,6 +62,15 @@ settings: { version: 1, graph: { enabled: false }, models: {
 The ids are not in `AUTH_PROVIDER_KEYS`, so the key gates pass and every
 request reaches the stub. `PUT /api/settings/models` also accepts them.
 
+Stub models are absent from `GET /api/models`, which lists keyed providers
+only, so the composer picker, the Settings slot menus and the footer's
+"/ Nk" denominator never show them. Set them through
+`PUT /api/settings/models` (or the `settings` you boot with). A test that
+needs them in the UI can register the stub under a key-gated id such as
+`openrouter` and save a dummy key with
+`PUT /api/keys/OPENROUTER_API_KEY` (at least 12 characters); see
+`context-window.e2e.ts`.
+
 Under `LH_E2E=1`, the demo and visual headless runs also skip the Electron
 browser-service helper and launch headless system Chrome, using
 puppeteer's own temp profile.
