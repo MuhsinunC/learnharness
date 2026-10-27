@@ -2047,11 +2047,23 @@ function DockOverlay({
 		if (!el) return;
 		const measure = () => {
 			setSbInset(Math.round((el.offsetWidth - el.clientWidth) / 2));
-			setDockMaxH(Math.max(el.clientHeight - 32, 160));
+			const block = blockRef.current;
+			const question = block?.querySelector<HTMLElement>("[data-dock-scroll-area]");
+			// The height budget belongs to the whole dock, including answer
+			// controls, stats, and padding. Only the question may consume the
+			// remaining space; otherwise the overlay grows behind the header.
+			const chrome = block && question ? block.offsetHeight - question.offsetHeight : 0;
+			setDockMaxH(Math.max(el.clientHeight - 32 - chrome, 0));
 		};
 		measure();
+		const observer = new ResizeObserver(measure);
+		observer.observe(el);
+		if (blockRef.current) observer.observe(blockRef.current);
 		window.addEventListener("resize", measure);
-		return () => window.removeEventListener("resize", measure);
+		return () => {
+			observer.disconnect();
+			window.removeEventListener("resize", measure);
+		};
 	}, [scrollRef]);
 
 	// GROWTH MUTE (owner round, 2026-10-05 — the generation churn): during a
