@@ -259,6 +259,9 @@ export class SessionModel {
 	// The single live consume (POST response or reattach stream): a newer
 	// consume cancels the older — one reader at a time.
 	private consumeAbort: AbortController | null = null;
+	/** Retain the latest request across stop(): an opening POST still owns
+	 * its refusal after view detachment, but never after a newer request. */
+	private latestRequest: AbortController | null = null;
 	/** Synchronous ready check for the gate (send/read mount logic). */
 	readyRef = true;
 
@@ -556,6 +559,7 @@ export class SessionModel {
 		this.consumeAbort?.abort();
 		const controller = new AbortController();
 		this.consumeAbort = controller;
+		this.latestRequest = controller;
 		// REPLAY ONTO A CLEAN SLATE (owner, optimistic round 3, 2026-10-02):
 		// the reattach stream replays the turn from its FIRST event — an
 		// aborted earlier attempt (React StrictMode's simulated remount)
@@ -646,6 +650,7 @@ export class SessionModel {
 		this.consumeAbort?.abort();
 		const controller = new AbortController();
 		this.consumeAbort = controller;
+		this.latestRequest = controller;
 		this.setError(null);
 		this.setStatus("submitted");
 		if (recovering && input.type === "answer") {
@@ -749,11 +754,21 @@ export class SessionModel {
 			await this.resumeStream(true);
 			return true;
 		} catch (err) {
-			if (this.consumeAbort !== controller || controller.signal.aborted) return accepted;
-			// Restore the question, or the new-session opening draft, when
-			// acceptance failed/is unknown. Other text sends keep their existing
-			// optimistic presentation; remove only THIS attempt's local entries.
-			if (input.type === "answer" || (input.type === "text" && onAccepted && !accepted)) {
+			const failedOpening = input.type === "text" && onAccepted !== undefined && !accepted;
+			if (failedOpening) {
+				// The POST outlives stop(), including StrictMode's cleanup. Remove
+				// only its own failed optimistic bubble even if a newer request
+				// won; never touch canonical messages or another attempt's tail.
+				const ids = new Set(optimistic.map(m => m.id));
+				this.mutate(() => { this.tail = this.tail.filter(m => !ids.has(m.id)); });
+			}
+			const detachedOpening = failedOpening && this.consumeAbort === null && this.latestRequest === controller;
+			if ((this.consumeAbort !== controller || controller.signal.aborted) && !detachedOpening) return accepted;
+			// A detached opening refusal must still reach the replayed mount's
+			// existing setup recovery. A newer send/reattach ALWAYS owns errors
+			// and status instead, even if that request has since been stopped.
+			// Ordinary text and answer teardown behavior stays unchanged.
+			if (input.type === "answer") {
 				const ids = new Set(optimistic.map(m => m.id));
 				this.mutate(() => {
 					this.tail = this.tail.filter(m => !ids.has(m.id));
