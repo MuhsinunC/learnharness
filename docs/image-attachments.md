@@ -29,9 +29,14 @@ A learner can attach an image to a chat message in three ways: paste it (a scree
   - Identical bytes get the same id, so attachments deduplicate.
   - Writes go to a temp file and are then renamed, so a crash never leaves a half-written image under a valid id.
   - Nothing deletes from the store. Deleting the original file, clearing the clipboard or restarting the app never breaks a chat.
-- **Intake.** Every image takes one road: the composer fits it, then uploads it to `POST /api/attachments`.
-  - **Fitting** (`fitImage`, canvas): an image whose longest edge is over 2000 px, or whose size is over 7 MB, is downscaled to a 2000 px longest edge. It is re-encoded as PNG, or as JPEG at quality 0.9 then 0.75 on a white ground if the PNG is still over the cap. An image already within both limits uploads byte-for-byte. Only what still doesn't fit is refused, by the server. Full-screen Retina screenshots (5-15 MB) attach this way.
-  - For a path, `POST /api/attachments/file` reads the file and returns its bytes, images only, sniffed. The server runs on the learner's machine, so it can read the path directly. The composer then fits and uploads the image like a paste.
+- **Intake.** A pasted or dropped image is fitted by the composer, then uploaded to `POST /api/attachments`. A path goes to `POST /api/attachments/file`.
+  - **The gate comes first.** Before it decodes anything, the composer asks `GET /api/attachments?check=1&chatId=…` whether the chat's model can read images. A refusal becomes the notice, and nothing is encoded or uploaded.
+  - **Fitting** (`fitImage`, canvas): an image whose longest edge is over 2000 px, or whose size is over 7 MB, is downscaled to a 2000 px longest edge. An image the browser decodes but the providers don't take (BMP, AVIF, TIFF) is re-encoded even when it is within both limits. The format is sniffed from the bytes, not the file's type.
+    - A JPEG source stays JPEG (quality 0.9).
+    - Anything else is encoded as PNG and, when it has no transparency, as JPEG too; the smaller that fits wins. Screenshots usually stay PNG, photos become JPEG, and transparent images stay PNG.
+    - JPEG at quality 0.75 on a white ground is the last resort.
+    - A png, jpeg, gif or webp already within both limits uploads byte-for-byte. Only what still doesn't fit is refused, by the server. Full-screen Retina screenshots (5-15 MB) attach this way.
+  - **Paths.** The server runs on the learner's machine, so it reads the path itself, asynchronously and capped at 64 MB, images only, sniffed. An image already within 7 MB and 2000 px is stored right there. A bigger one comes back as its bytes, and the composer fits and uploads it like a paste.
   - Accepted path forms: `~`, `file://`, quoted paths, and the `\ ` escapes a terminal drag produces.
   - The composer finds image paths in the message text at send time (`findImagePaths`). Each path that attaches is removed from the text, because the stored copy replaces it. A path that fails stays in the text as typed.
   - Every intake names its chat. The server refuses it before storing anything when that chat's model can't read images. The new-session page has no chat yet, so it gates on the strong slot the new chat is stamped from. Its images ride to the session's first send as `?images=<id>,…`.
@@ -40,7 +45,8 @@ A learner can attach an image to a chat message in three ways: paste it (a scree
   - `toLlmMessages`, the one model-facing seam, turns each reference into text: `[Image attached by the learner: <id> …]`.
   - It adds the pixels only for messages that come after the active compaction marker, and only when the live agent passes its store loader. The token estimate and the summarizer get references only.
   - Messages before the marker get the reference only. That includes the kept tail, which sits between `firstKeptMessageId` and the marker. Any image a tool returned inline there, such as the `read` tool's, is replaced by a short note.
-  - **A per-request budget.** Each request carries at most 20 image blocks and about 20 MB of base64, newest first, and each image goes once even if it appears several times. Older images ride as reference text, and the model can call `view_image` for them. The reason is Claude's limits: with more than 20 images in one request, every image must be under about 2000 px, and a request can be at most 32 MB. Compaction alone wouldn't prevent either: it triggers on tokens, and each image is estimated at only about 1,200 tokens.
+  - **A per-request budget.** Each request carries at most 20 image blocks and about 20 MB of base64, newest first. Every image block counts: attachments, `view_image` results, and the images a tool result carries inline (the `read` tool's). Older stored images ride as reference text, and the model can call `view_image` for them; an older inline tool image becomes a note asking to read it again.
+  - **One copy per stored image, where it first rode.** A stored image that appears several times (attached again, or viewed) carries its pixels at its first occurrence in the window, and the later ones are reference text. Pixels never move out of an earlier message, so the prefix stays byte-stable. The reason is Claude's limits: with more than 20 images in one request, every image must be under about 2000 px, and a request can be at most 32 MB. Compaction alone wouldn't prevent either: it triggers on tokens, and each image is estimated at only about 1,200 tokens.
   - The summarizer input lists each image's reference, and its prompt asks it to keep image ids exact. A summarized image therefore stays nameable.
 - **`view_image`.**
   - The tool takes an attachment id only. It checks the id against `^[0-9a-f]{64}\.(png|jpg|gif|webp)$` before touching the store. No caller-supplied path is ever joined, so path traversal can't happen.
@@ -57,6 +63,8 @@ A learner can attach an image to a chat message in three ways: paste it (a scree
   - `/api/models` reports the effective value as `supportsImages`, and the vision-slot pickers filter on it.
   - The chat handler copies an override into the engine's Model (`withImageSupport`). Otherwise pi-ai's `downgradeUnsupportedImages` would replace the images with placeholder text.
   - Sends and steers that carry images refuse with `images_unsupported`. The composer shows the same words when you attach, so a refusal is never silent.
+  - A send or steer refused that way (the model was switched after the image was attached) puts the text and the chips back in the composer, with the refusal as the notice.
+  - The notice stays until the next intake or send, or until the chat's model, the strong slot or an image override changes.
 
 ## Default image support (v0.3.8 catalog)
 
@@ -84,6 +92,6 @@ On the upstream base, "Claude" means the anthropic key or OpenRouter's `anthropi
 
 ## Known limits
 
-- **Fitting needs the browser.** An image the browser can't decode (for example a HEIC file) uploads as is, and the server refuses it unless it is a png, jpeg, gif or webp within 7 MB.
+- **Fitting needs the browser.** An image the browser can't decode (for example a HEIC file in Chrome) uploads as is, and the server refuses it unless it is a png, jpeg, gif or webp within 7 MB.
 - **The first message needs text.** On the new-session page, the first message must have text; images ride along with it.
 - **An image-only steer shows an empty line** in the queued-steer indicator until its card lands.

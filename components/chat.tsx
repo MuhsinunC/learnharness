@@ -79,7 +79,7 @@ import {
 } from "@/src/core";
 import { ReadingThinkingField } from "@/components/reading-thinking";
 import { currentUserThinkingOpen, setAllUserThinkingOpen } from "@/components/thinking-block";
-import { slotsConfigured, type AttachmentRef, type ModelsSettings } from "@/src/core";
+import { IMAGES_UNSUPPORTED_CODE, slotsConfigured, type AttachmentRef, type ModelsSettings } from "@/src/core";
 import { useSettingsSaved } from "@/components/settings-signal";
 
 /** One width for everything: transcript, cards, and the bottom blob share this column. */
@@ -160,6 +160,19 @@ export function parseProviderKeyRefusal(message: string | undefined): boolean {
 		return body.code === "provider_key_missing" && typeof body.error === "string" && isProviderKeyRefusal(body.error);
 	} catch {
 		return false;
+	}
+}
+
+/** The image gate's send refusal (LH-39): the chat's model can't read
+ *  images. Its words, for the composer's notice; null for anything else.
+ *  Exported pure for tests. */
+export function parseImagesRefusal(message: string | undefined): string | null {
+	if (!message) return null;
+	try {
+		const body = JSON.parse(message) as { code?: unknown; error?: unknown };
+		return body.code === IMAGES_UNSUPPORTED_CODE && typeof body.error === "string" ? body.error : null;
+	} catch {
+		return null;
 	}
 }
 
@@ -619,13 +632,20 @@ export function Chat({
 		if (!error) return;
 		const missing = parseModelsRefusal(error.message);
 		const action = providerRefusalAction(error.message);
-		if (!missing && !action) return; // a real error keeps the honest banner
+		// A model that can't read images (LH-39): the draft and its chips
+		// come back with the refusal as the composer's notice (no banner,
+		// no setup — the remedy is another model or the override). A
+		// refused steer has no orphan to drop, and a refetch mid-turn
+		// would wipe the live stream.
+		const images = parseImagesRefusal(error.message);
+		if (!missing && !action && !images) return; // a real error keeps the honest banner
+		const refetch = !(images && busy);
 		// Refetch and restore the draft before dismissing setup refusals.
 		// Subscription refusals keep their banner and restart instructions.
 		let cancelled = false;
 		void (async () => {
-			const res = await fetch(`/api/chats/${encodeURIComponent(chatId)}`);
-			if (!cancelled && res.ok) {
+			const res = refetch ? await fetch(`/api/chats/${encodeURIComponent(chatId)}`) : null;
+			if (!cancelled && res?.ok) {
 				const record = (await res.json().catch(() => null)) as { messages?: LhMessage[] } | null;
 				if (Array.isArray(record?.messages)) setMessages(record.messages);
 			}
@@ -636,7 +656,10 @@ export function Chat({
 				draftRef.current = null;
 			}
 			recoverFromError();
-			if (action !== "notice") {
+			if (images) {
+				clearError();
+				attach.showNotice(images);
+			} else if (action !== "notice") {
 				clearError();
 				setSetupOpen(true);
 			}
@@ -1206,6 +1229,7 @@ export function Chat({
 		if (!textRef.current.trim() && attach.items.length === 0) return;
 		if (busy) {
 			const { text: t, refs } = await attach.takePaths(textRef.current.trim());
+			draftRef.current = { text: t, refs }; // an image refusal puts it back
 			applyText("");
 			attach.clear();
 			void steer(t, refs);
@@ -1724,6 +1748,7 @@ export function Chat({
 							<AttachmentNotice notice={attach.notice} />
 						</>
 					}
+					onModelChange={attach.modelChanged}
 					onSubmitAnswer={(output) => {
 						if (!pending) return;
 						// THE ANSWER IS THE QUESTION CALL'S TOOL RESULT (fork 1, owner
@@ -1917,6 +1942,7 @@ function DockOverlay({
 	setupCta,
 	queuedSteers,
 	attachments,
+	onModelChange,
 }: {
 	pending: ReturnType<typeof findPendingToolCall>;
 	initialQuestionDraft?: QuestionFormDraft;
@@ -1969,6 +1995,9 @@ function DockOverlay({
 	/** The composer's pending image chips + notice (LH-39), inside the
 	 *  shell above the text row; composer mode only. */
 	attachments?: React.ReactNode;
+	/** The stats bar's effective-model report (LH-39: a model change
+	 *  clears the image notice). */
+	onModelChange?: (model: string | undefined) => void;
 }) {
 	const { isAtBottom, scrollToBottom, scrollRef } = useStickToBottomContext();
 	// Render-fresh bottom state (flicker round): the arrival block below reads
@@ -2426,6 +2455,7 @@ function DockOverlay({
 						pricing={pricing}
 						dictationSlot={dictationSlot}
 						chatId={chatId}
+						onModelChange={onModelChange}
 					/>
 					{/* The scroll-down disc (moved here from the Conversation,
 					    owner refinement round 2026-09-24): anchored to the BLOCK's

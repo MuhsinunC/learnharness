@@ -11,7 +11,7 @@
 // registry copy survives a question termination or abort and rides the
 // chat's next run.
 import { ChatInputError, newUserSteer, parseUserSteerInput } from "@/src/core";
-import { chatImageRefusal, getChat, steerLiveChat } from "@/src/server";
+import { chatAttachmentRefusal, getChat, steerLiveChat } from "@/src/server";
 
 export async function POST(request: Request, ctx: { params: Promise<{ id: string }> }): Promise<Response> {
 	const { id } = await ctx.params;
@@ -24,7 +24,7 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
 		if (err instanceof ChatInputError) return Response.json({ error: err.message }, { status: 400 });
 		throw err;
 	}
-	const refusal = chatImageRefusal(id, input.attachments ?? []);
+	const refusal = chatAttachmentRefusal(id, input.attachments);
 	if (refusal) return refusal;
 	const message = newUserSteer(input.text, input.id, input.attachments);
 	if (!steerLiveChat(id, message)) {

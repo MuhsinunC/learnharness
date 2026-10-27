@@ -7,10 +7,22 @@
  * the size cap; 400 images_unsupported when the chat's model can't read
  * images (nothing is stored then). Content-addressed: the same image
  * posted twice returns the same id.
+ *
+ * GET /api/attachments?check=1&chatId=… — the same model gate alone, so
+ * the composer can refuse before it decodes or uploads anything: 200
+ * {ok: true}, or the refusal.
  */
-import { AttachmentError, chatImageRefusal, getChat, saveAttachment } from "@/src/server";
+import { AttachmentError, chatIntakeRefusal, getChat, saveAttachment } from "@/src/server";
 
 export const dynamic = "force-dynamic";
+
+export async function GET(request: Request): Promise<Response> {
+	const params = new URL(request.url).searchParams;
+	if (params.get("check") !== "1") return Response.json({ error: "check=1 is required" }, { status: 400 });
+	const chatId = params.get("chatId") ?? undefined;
+	if (chatId !== undefined && !getChat(chatId)) return Response.json({ error: "unknown chat" }, { status: 404 });
+	return chatIntakeRefusal(chatId) ?? Response.json({ ok: true });
+}
 
 export async function POST(request: Request): Promise<Response> {
 	const form = await request.formData().catch(() => null);
@@ -18,7 +30,7 @@ export async function POST(request: Request): Promise<Response> {
 	if (chatId !== null && chatId !== undefined && (typeof chatId !== "string" || !getChat(chatId))) {
 		return Response.json({ error: "unknown chat" }, { status: 404 });
 	}
-	const refusal = chatImageRefusal(chatId ?? undefined);
+	const refusal = chatIntakeRefusal(chatId ?? undefined);
 	if (refusal) return refusal;
 	const file = form?.get("file");
 	if (!(file instanceof File)) return Response.json({ error: "no file" }, { status: 400 });

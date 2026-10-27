@@ -37,9 +37,16 @@ export const ATTACHMENT_MIME: Readonly<Record<string, string>> = {
  *  7.5 MB raw); nothing here resizes, so bigger images refuse up front. */
 export const MAX_ATTACHMENT_BYTES = 7 * 1024 * 1024;
 
+/** Longest edge an attachment keeps: past 20 images per request Claude
+ *  takes nothing above ~2000 px, and screenshots read fine at this size.
+ *  The composer downscales to it; a path image already within it (and
+ *  the byte cap) is stored by the server as is. */
+export const MAX_IMAGE_EDGE = 2000;
+
 /** The wire's pixel budget per request (Claude's limits): past 20 image
  *  blocks every image must be under ~2000 px, and a request caps at 32 MB.
- *  Newer images win; older ones ride as reference text (view_image). */
+ *  Every image block counts (attachments, view_image, and tool results'
+ *  inline images); newer ones win, older ones ride as text. */
 export const MAX_WIRE_IMAGES = 20;
 export const MAX_WIRE_IMAGE_BASE64 = 20 * 1024 * 1024;
 
@@ -60,6 +67,48 @@ export function sniffImageExt(bytes: Uint8Array): keyof typeof ATTACHMENT_MIME |
 	if (at(0, 0x47, 0x49, 0x46, 0x38)) return "gif";
 	if (at(0, 0x52, 0x49, 0x46, 0x46) && at(8, 0x57, 0x45, 0x42, 0x50)) return "webp";
 	return null;
+}
+
+/** The pixel size from an accepted image's header (no decode), or null
+ *  when the header doesn't say — callers then treat it as unknown. */
+export function imageDimensions(bytes: Uint8Array): { width: number; height: number } | null {
+	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	const u16 = (i: number, le = false) => (i + 2 <= bytes.length ? view.getUint16(i, le) : -1);
+	const u32 = (i: number, le = false) => (i + 4 <= bytes.length ? view.getUint32(i, le) : -1);
+	const size = (width: number, height: number) => (width > 0 && height > 0 ? { width, height } : null);
+	switch (sniffImageExt(bytes)) {
+		case "png":
+			return size(u32(16), u32(20));
+		case "gif":
+			return size(u16(6, true), u16(8, true));
+		case "webp": {
+			const chunk = String.fromCharCode(...bytes.subarray(12, 16));
+			if (chunk === "VP8 ") return size(u16(26, true) & 0x3fff, u16(28, true) & 0x3fff);
+			if (chunk === "VP8L" && u32(21, true) !== -1) {
+				const bits = u32(21, true);
+				return size((bits & 0x3fff) + 1, ((bits >>> 14) & 0x3fff) + 1);
+			}
+			if (chunk === "VP8X" && bytes.length >= 30) {
+				return size((bytes[24]! | (bytes[25]! << 8) | (bytes[26]! << 16)) + 1, (bytes[27]! | (bytes[28]! << 8) | (bytes[29]! << 16)) + 1);
+			}
+			return null;
+		}
+		case "jpg":
+			// Walk the segments to the first start-of-frame (SOF0..SOF15,
+			// minus DHT/JPG/DAC, which share the range).
+			for (let i = 2; i + 9 <= bytes.length; ) {
+				if (bytes[i] !== 0xff) return null;
+				const marker = bytes[i + 1]!;
+				if (marker === 0xff) { i++; continue; }
+				if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+					return size(u16(i + 7), u16(i + 5));
+				}
+				i += 2 + u16(i + 2);
+			}
+			return null;
+		default:
+			return null;
+	}
 }
 
 /** The image-reading tool's name (single-sourced: the tool, the wire

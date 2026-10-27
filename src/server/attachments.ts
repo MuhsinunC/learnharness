@@ -40,17 +40,29 @@ export function imageInputRefusal(model: Model<Api>, attachments: readonly Attac
 	return modelRefusal(model);
 }
 
-/** The same gate for a chat by id, where no engine exists yet: an intake
- *  (no attachments argument — may this chat take images at all?) or a
- *  steer carrying attachments. No chat id = the new-session draft, which
+/** The model a chat's next turn would run (no engine exists yet), or the
+ *  503 when it doesn't resolve. No chat id = the new-session draft, which
  *  the server will stamp from the strong slot. */
-export function chatImageRefusal(chatId: string | undefined, attachments?: readonly AttachmentRef[]): Response | null {
-	if (attachments?.length === 0) return null;
+function chatModel(chatId: string | undefined): Model<Api> | Response {
 	const settings = chatId ? stores.chatStore.getChat(chatId)?.settings : undefined;
 	const spec = resolveConversationSpec(settings, effectiveSettings().models.strong);
-	let model: Model<Api> | undefined;
-	try { model = spec ? piEngineForSpec(spec).model : undefined; }
-	catch { model = undefined; }
-	if (!model) return Response.json({ error: "The selected model is unavailable." }, { status: 503 });
-	return attachments ? imageInputRefusal(model, attachments) : modelRefusal(model);
+	try {
+		const model = spec ? piEngineForSpec(spec).model : undefined;
+		if (model) return model;
+	} catch { /* the 503 below */ }
+	return Response.json({ error: "The selected model is unavailable." }, { status: 503 });
+}
+
+/** The intake gate: may this chat take images at all? */
+export function chatIntakeRefusal(chatId: string | undefined): Response | null {
+	const model = chatModel(chatId);
+	return model instanceof Response ? model : modelRefusal(model);
+}
+
+/** The send gate for a chat by id (the steer route has no engine): null
+ *  when nothing is attached, before any model resolves. */
+export function chatAttachmentRefusal(chatId: string, attachments: readonly AttachmentRef[] | undefined): Response | null {
+	if (!attachments?.length) return null;
+	const model = chatModel(chatId);
+	return model instanceof Response ? model : imageInputRefusal(model, attachments);
 }

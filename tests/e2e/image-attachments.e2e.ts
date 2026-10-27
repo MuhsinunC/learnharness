@@ -6,6 +6,7 @@ import path from "node:path";
 import zlib from "node:zlib";
 import { after, before, test } from "node:test";
 import type { Page } from "puppeteer-core";
+import { imageDimensions, MAX_ATTACHMENT_BYTES } from "../../src/core/attachments.ts";
 import { bootServer, until, type BootOptions, type LhServer } from "./harness/server.ts";
 import { launchChrome, type HeadlessChrome } from "./harness/chrome.ts";
 import { calledTool, reply, startStubProvider, type StubProvider, type StubRequest } from "./harness/stub-provider.ts";
@@ -20,6 +21,7 @@ const TICKET = "lh-39";
 // on this message and the three earlier image messages are summarized.
 const LONG = "Here is a long passage of notes about the topic. ".repeat(1_700);
 const VIEW_AGAIN = "Please look at the first image again.";
+const READ_ASK = "Please read the screenshot file.";
 
 /** A valid PNG of one solid color (4×4 unless sized) — distinct bytes per color. */
 function png(r: number, g: number, b: number, width = 4, height = 4): Buffer {
@@ -45,6 +47,23 @@ function png(r: number, g: number, b: number, width = 4, height = 4): Buffer {
 	]);
 }
 
+/** A valid 24-bit BMP of one solid color: Chrome decodes it, the store refuses it. */
+function bmp(r: number, g: number, b: number, width = 8, height = 8): Buffer {
+	const rowSize = Math.ceil((width * 3) / 4) * 4;
+	const out = Buffer.alloc(54 + rowSize * height);
+	out.write("BM", 0, "latin1");
+	out.writeUInt32LE(out.length, 2);
+	out.writeUInt32LE(54, 10);
+	out.writeUInt32LE(40, 14);
+	out.writeInt32LE(width, 18);
+	out.writeInt32LE(height, 22);
+	out.writeUInt16LE(1, 26);
+	out.writeUInt16LE(24, 28);
+	out.writeUInt32LE(rowSize * height, 34);
+	for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) out.set([b, g, r], 54 + y * rowSize + x * 3);
+	return out;
+}
+
 const IMAGES = { pasted: png(220, 30, 30), dropped: png(30, 200, 40), byPath: png(30, 40, 210) };
 const idOf = (bytes: Buffer) => `${createHash("sha256").update(bytes).digest("hex")}.png`;
 
@@ -62,6 +81,9 @@ let originals: string;
 let chatId: string;
 /** The first boot's data dir, reused by the restart. */
 let dataDir: string;
+/** A PNG on disk the stub's teacher reads with the read tool. */
+let readFile: string;
+const READ_IMAGE = png(10, 160, 160);
 
 const providers: BootOptions["providers"] = [];
 const slot = { model: { provider: "e2e-stub", id: "vision-a" } };
@@ -78,6 +100,9 @@ before(async () => {
 		if (lastUserText(req).includes(VIEW_AGAIN) && !calledTool(req, "view_image")) {
 			return reply.tools([{ name: "view_image", arguments: { id: idOf(IMAGES.pasted) } }]);
 		}
+		if (lastUserText(req).includes(READ_ASK) && !calledTool(req, "read")) {
+			return reply.tools([{ name: "read", arguments: { path: readFile } }]);
+		}
 		// The long message's reply reports a context past the 150k default
 		// threshold, so compaction runs at settle (the post-compaction
 		// projection, ~31k, stays under it).
@@ -89,6 +114,7 @@ before(async () => {
 		models: [
 			{ id: "vision-a", input: ["text", "image"] },
 			{ id: "text-only", input: ["text"] },
+			{ id: "plain-text", input: ["text"] },
 		],
 	});
 	server = await bootServer({ ticket: TICKET, providers, settings });
@@ -96,6 +122,8 @@ before(async () => {
 	chrome = await launchChrome(TICKET);
 	originals = fs.mkdtempSync(path.join(os.homedir(), ".cache", "lh-e2e", TICKET, "originals-"));
 	for (const [name, bytes] of Object.entries(IMAGES)) fs.writeFileSync(path.join(originals, `${name}.png`), bytes);
+	readFile = path.join(path.dirname(dataDir), "read-me.png");
+	fs.writeFileSync(readFile, READ_IMAGE);
 });
 
 after(async () => {
@@ -122,13 +150,13 @@ async function openChat(page: Page, id: string): Promise<void> {
 	}, "the model control to load", 120_000);
 }
 
-/** Fire a paste or drop of one PNG file on the composer, as the browser would. */
-async function fileEvent(page: Page, kind: "paste" | "drop", bytes: Buffer, name: string): Promise<void> {
+/** Fire a paste or drop of one image file on the composer, as the browser would. */
+async function fileEvent(page: Page, kind: "paste" | "drop", bytes: Buffer, name: string, type = "image/png"): Promise<void> {
 	await page.evaluate(
-		(kind, b64, name) => {
+		(kind, b64, name, type) => {
 			const data = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
 			const dt = new DataTransfer();
-			dt.items.add(new File([data], name, { type: "image/png" }));
+			dt.items.add(new File([data], name, { type }));
 			if (kind === "paste") {
 				document.querySelector("[data-testid=composer] textarea")!.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
 			} else {
@@ -140,7 +168,46 @@ async function fileEvent(page: Page, kind: "paste" | "drop", bytes: Buffer, name
 		kind,
 		bytes.toString("base64"),
 		name,
+		type,
 	);
+}
+
+/** Pick the chat's model in the stats bar's model control. */
+async function pickModel(page: Page, id: string): Promise<void> {
+	await page.click("[data-testid=stats-model]");
+	await page.waitForSelector("[data-testid=model-search]", { timeout: 30_000 });
+	await page.type("[data-testid=model-search]", id);
+	await page.click(`[data-testid=model-option-${id}]`);
+	await until(async () => (await page.$eval("[data-testid=stats-model]", (el) => el.textContent ?? "")).includes(id), `the ${id} model`);
+}
+
+/** Every /api/attachments request the page makes, as "METHOD path?query". */
+function attachmentRequests(page: Page): string[] {
+	const seen: string[] = [];
+	page.on("request", (r) => {
+		const url = new URL(r.url());
+		if (url.pathname.startsWith("/api/attachments")) seen.push(`${r.method()} ${url.pathname}${url.search}`);
+	});
+	return seen;
+}
+
+/** Upload one image straight to the store for a chat. */
+async function store(chat: string, bytes: Buffer, name: string): Promise<{ id: string; name?: string }> {
+	const form = new FormData();
+	form.append("chatId", chat);
+	form.append("file", new Blob([new Uint8Array(bytes)], { type: "image/png" }), name);
+	const res = await fetch(`${server.url}/api/attachments`, { method: "POST", body: form });
+	return ((await res.json()) as { attachment: { id: string } }).attachment;
+}
+
+/** Send one text message through the API and wait for its turn to settle. */
+async function sendViaApi(chat: string, text: string, attachments: unknown[], userTurns: number): Promise<StubRequest> {
+	const before = stub.requests.length;
+	const res = await server.api("/api/chat", { body: { chatId: chat, input: { type: "text", text, ...(attachments.length ? { attachments } : {}) } } });
+	assert.equal(res.status, 200, await res.clone().text());
+	await res.arrayBuffer();
+	await settled(chat, userTurns);
+	return stub.requests.slice(before).filter((r) => !isSummary(r)).at(-1)!;
 }
 
 async function sendFromComposer(page: Page, text: string): Promise<void> {
@@ -383,5 +450,183 @@ test("the new-session page takes a pasted image into the first message", async (
 	const chat = await settled(id, 1);
 	assert.deepEqual((chat.messages[0]!.attachments as Array<{ id: string }>).map((a) => a.id), [idOf(image)]);
 	assert.ok(stub.requests.slice(before).some((r) => imagesIn(r).includes(image.toString("base64"))), "the image reached the provider");
+	await page.close();
+});
+
+test("a send refused for images puts the draft back with the reason; a model change clears it", async () => {
+	const { id } = await server.json<{ id: string }>("/api/chats", { body: { title: "Switched to text" } });
+	const page = await chrome.browser.newPage();
+	await openChat(page, id);
+	await fileEvent(page, "paste", IMAGES.dropped, "diagram.png");
+	await page.waitForSelector("[data-testid=attachment-chip]", { timeout: 30_000 });
+	// The chip came in on a vision model; the send goes to a text-only one.
+	await pickModel(page, "plain-text");
+	await sendFromComposer(page, "Explain this diagram");
+	const notice = await page.waitForSelector("[data-testid=attachment-notice]", { timeout: 60_000 });
+	assert.match((await notice!.evaluate((el) => el.textContent)) ?? "", /plain-text can't read images/);
+	await until(async () => {
+		const value = await page.$eval("[data-testid=composer] textarea", (el) => (el as HTMLTextAreaElement).value);
+		return value === "Explain this diagram" && (await page.$$("[data-testid=attachment-chip]")).length === 1;
+	}, "the text and the image chip to come back");
+	const record = await server.json<{ messages: Array<{ role: string }> }>(`/api/chats/${id}`);
+	assert.equal(record.messages.filter((m) => m.role === "user").length, 0, "the refused send kept nothing");
+	assert.equal(await page.evaluate(() => document.body.innerText.includes("Something went wrong")), false, "no raw error banner");
+
+	await pickModel(page, "vision-a");
+	await until(() => page.$("[data-testid=attachment-notice]").then((n) => n === null), "the notice to clear on the model change");
+	await page.close();
+});
+
+test("a text-only chat refuses a paste before uploading it; the next send clears the notice", async () => {
+	const { id } = await server.json<{ id: string }>("/api/chats", { body: { title: "Plain text" } });
+	await server.json(`/api/chats/${id}/settings`, { method: "PUT", body: { model: { provider: "e2e-stub", id: "plain-text" } } });
+	const page = await chrome.browser.newPage();
+	const requests = attachmentRequests(page);
+	await openChat(page, id);
+	await fileEvent(page, "paste", png(240, 240, 10, 3000, 2000), "big.png");
+	const notice = await page.waitForSelector("[data-testid=attachment-notice]", { timeout: 30_000 });
+	assert.match((await notice!.evaluate((el) => el.textContent)) ?? "", /plain-text can't read images/);
+	assert.deepEqual(requests, [`GET /api/attachments?check=1&chatId=${id}`], "only the gate check ran: no upload");
+
+	// A path refused for the model is sent as text, and says so; the next
+	// send clears that notice.
+	const shot = path.join(path.dirname(dataDir), "plain.png");
+	fs.writeFileSync(shot, IMAGES.pasted);
+	await sendFromComposer(page, `Look at ${shot}`);
+	await settled(id, 1);
+	await until(async () => /The path was sent as text/.test(await page.$eval("[data-testid=attachment-notice]", (el) => el.textContent ?? "").catch(() => "")), "the path notice");
+	await sendFromComposer(page, "Thanks");
+	await settled(id, 2);
+	await until(() => page.$("[data-testid=attachment-notice]").then((n) => n === null), "the notice to clear after the send");
+
+	// A plain-text steer to this chat is never an image refusal (no turn
+	// is live, so it 409s).
+	const steer = await server.api(`/api/chats/${id}/steer`, { body: { input: { type: "steer", id: "steer_plain", text: "one more thing" } } });
+	assert.equal(steer.status, 409, await steer.clone().text());
+	await page.close();
+});
+
+test("a BMP the browser decodes is converted to PNG before it is stored", async () => {
+	const { id } = await server.json<{ id: string }>("/api/chats", { body: { title: "BMP" } });
+	const page = await chrome.browser.newPage();
+	await openChat(page, id);
+	await fileEvent(page, "paste", bmp(10, 120, 230), "old.bmp", "image/bmp");
+	await page.waitForSelector("[data-testid=attachment-chip]", { timeout: 30_000 });
+	await sendFromComposer(page, "What is this?");
+	const chat = await settled(id, 1);
+	const stored = (chat.messages[0]!.attachments as Array<{ id: string }>)[0]!.id;
+	assert.match(stored, /\.png$/);
+	assert.deepEqual(imageDimensions(fs.readFileSync(path.join(dataDir, "attachments", stored))), { width: 8, height: 8 });
+	await page.close();
+});
+
+test("a large JPEG photo is downscaled and stays JPEG", async () => {
+	const { id } = await server.json<{ id: string }>("/api/chats", { body: { title: "Photo" } });
+	const page = await chrome.browser.newPage();
+	await openChat(page, id);
+	// A 4000×3000 photo-like JPEG, made in the page. The PNG the old
+	// encoder would have kept is reported too: it fits the cap, so only
+	// the JPEG preference makes the stored copy a .jpg.
+	const pngBytes = await page.evaluate(async () => {
+		const draw = (w: number, h: number) => {
+			const c = document.createElement("canvas");
+			c.width = w;
+			c.height = h;
+			const ctx = c.getContext("2d")!;
+			const g = ctx.createLinearGradient(0, 0, w, h);
+			g.addColorStop(0, "#3a6ea5");
+			g.addColorStop(1, "#f2c14e");
+			ctx.fillStyle = g;
+			ctx.fillRect(0, 0, w, h);
+			return c;
+		};
+		const blob = (c: HTMLCanvasElement, type: string) => new Promise<Blob>((resolve) => c.toBlob((b) => resolve(b!), type, 0.92));
+		const photo = await blob(draw(4000, 3000), "image/jpeg");
+		const dt = new DataTransfer();
+		dt.items.add(new File([photo], "photo.jpg", { type: "image/jpeg" }));
+		document.querySelector("[data-testid=composer] textarea")!.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+		return (await blob(draw(2000, 1500), "image/png")).size;
+	});
+	assert.ok(pngBytes <= MAX_ATTACHMENT_BYTES, `the PNG alternative fits the cap (${pngBytes} bytes)`);
+	await page.waitForSelector("[data-testid=attachment-chip]", { timeout: 60_000 });
+	await sendFromComposer(page, "What is in this photo?");
+	const chat = await settled(id, 1);
+	const stored = (chat.messages[0]!.attachments as Array<{ id: string }>)[0]!.id;
+	assert.match(stored, /\.jpg$/);
+	assert.deepEqual(imageDimensions(fs.readFileSync(path.join(dataDir, "attachments", stored))), { width: 2000, height: 1500 });
+	await page.close();
+});
+
+test("an image attached twice keeps its pixels where they first rode", async () => {
+	const { id } = await server.json<{ id: string }>("/api/chats", { body: { title: "Twice" } });
+	const twice = png(70, 20, 140);
+	const ref = await store(id, twice, "twice.png");
+	const first = await sendViaApi(id, "Here is the chart.", [ref], 1);
+	const second = await sendViaApi(id, "The same chart again.", [ref], 2);
+	assert.deepEqual(imagesIn(second), [twice.toString("base64")], "one copy per request");
+	const firstUser = (req: StubRequest) => JSON.stringify(req.messages.find((m) => m.role === "user"));
+	assert.equal(firstUser(second), firstUser(first), "the earlier message is byte-identical across requests");
+	assert.ok(firstUser(second).includes(twice.toString("base64")), "the pixels stay in the first message");
+});
+
+test("a tool result's inline image counts against the per-request budget", async () => {
+	const { id } = await server.json<{ id: string }>("/api/chats", { body: { title: "Read then attach" } });
+	const before = stub.requests.length;
+	await sendViaApi(id, READ_ASK, [], 1);
+	const turn = stub.requests.slice(before);
+	assert.ok(turn[0]!.tools.includes("read"), "the read tool is offered");
+	assert.ok(turn.some((r) => calledTool(r, "read") && imagesIn(r).includes(READ_IMAGE.toString("base64"))), "the read image rode inline");
+	const refs = [];
+	for (let i = 0; i < 20; i++) refs.push(await store(id, png(i * 12, 30, 200), `shot-${i}.png`));
+	const req = await sendViaApi(id, "And these twenty.", refs, 2);
+	const sent = imagesIn(req);
+	assert.equal(sent.length, 20, "the budget holds every image block to 20");
+	assert.ok(!sent.includes(READ_IMAGE.toString("base64")), "the oldest, the read image, became text");
+	assert.match(JSON.stringify(req.messages), /left out of this request to stay within the image limit/);
+});
+
+test("a path image that fits is stored by the server; a big one is fitted first", async () => {
+	const { id } = await server.json<{ id: string }>("/api/chats", { body: { title: "Paths" } });
+	const dir = path.dirname(dataDir);
+	const small = png(15, 15, 90);
+	const big = png(150, 15, 90, 4000, 3000);
+	fs.writeFileSync(path.join(dir, "small.png"), small);
+	fs.writeFileSync(path.join(dir, "big.png"), big);
+	const page = await chrome.browser.newPage();
+	const requests = attachmentRequests(page);
+	await openChat(page, id);
+	await sendFromComposer(page, `Compare ${path.join(dir, "small.png")}`);
+	let chat = await settled(id, 1);
+	assert.deepEqual((chat.messages[0]!.attachments as Array<{ id: string }>).map((a) => a.id), [idOf(small)]);
+	assert.deepEqual(requests, ["POST /api/attachments/file"], "stored server-side: no upload round trip");
+
+	requests.length = 0;
+	await sendFromComposer(page, `and ${path.join(dir, "big.png")}`);
+	chat = await settled(id, 2);
+	const stored = (chat.messages.filter((m) => m.role === "user")[1]!.attachments as Array<{ id: string }>)[0]!.id;
+	assert.deepEqual(imageDimensions(fs.readFileSync(path.join(dataDir, "attachments", stored))), { width: 2000, height: 1500 });
+	assert.deepEqual(requests, ["POST /api/attachments/file", "POST /api/attachments"], "the big one went through the composer's fit");
+	await page.close();
+});
+
+test("a new session's first message still sends when its path can't be attached", async () => {
+	const page = await chrome.browser.newPage();
+	// The path read answers with a body that isn't the JSON it claims to be.
+	await page.setRequestInterception(true);
+	page.on("request", (r) => {
+		if (new URL(r.url()).pathname === "/api/attachments/file") void r.respond({ status: 200, contentType: "application/json", body: "{not json" });
+		else void r.continue();
+	});
+	await page.goto(`${server.url}/chat/new`, { waitUntil: "domcontentloaded", timeout: 180_000 });
+	await page.waitForFunction(
+		() => Object.keys(document.querySelector("[data-testid=composer] textarea") ?? {}).some((k) => k.startsWith("__reactProps")),
+		{ timeout: 180_000 },
+	);
+	const prompt = "Teach me what /nowhere/lh39/diagram.png shows";
+	await sendFromComposer(page, prompt);
+	await page.waitForFunction(() => /\/chat\/(?!new)[^/?]+/.test(location.pathname), { timeout: 60_000 });
+	const id = await page.evaluate(() => location.pathname.split("/").pop()!);
+	const chat = await settled(id, 1);
+	assert.equal((chat.messages[0] as { content?: unknown }).content, prompt, "the text went, with the path as typed");
 	await page.close();
 });
