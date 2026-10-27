@@ -20,6 +20,7 @@
  * scrypt hash and the SHA-256 of each live session token, never a token.
  * Reads are synchronous so the proxy can decide without awaiting.
  */
+import { execFile } from "node:child_process";
 import { createHash, randomBytes, scrypt, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -221,4 +222,26 @@ export function chargeLoginAttempt(key: string, now = Date.now()): () => void {
 /** A same-origin path to return to after login; anything else becomes "/". */
 export function safeNext(value: unknown): string {
 	return typeof value === "string" && /^\/(?![/\\])[^\s]*$/.test(value) && !value.startsWith("/login") ? value : "/";
+}
+
+// A GUI app's PATH rarely has the CLI: try the usual installs too.
+const TAILSCALE_BINS = ["tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale", "/opt/homebrew/bin/tailscale", "/usr/local/bin/tailscale"];
+
+/** This computer's `https://<machine>.<tailnet>.ts.net` from `tailscale status
+ * --json`, or null when Tailscale is missing, stopped or has no DNS name.
+ * Read-only: it never runs `tailscale serve`. LH_TAILSCALE_BIN overrides. */
+export async function tailnetURL(env: Record<string, string | undefined> = process.env): Promise<string | null> {
+	for (const bin of env.LH_TAILSCALE_BIN ? [env.LH_TAILSCALE_BIN] : TAILSCALE_BINS) {
+		const out = await new Promise<string | null>((resolve) =>
+			execFile(bin, ["status", "--json"], { timeout: 3000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => resolve(err ? null : stdout)));
+		if (out === null) continue;
+		try {
+			const status = JSON.parse(out) as { BackendState?: string; Self?: { DNSName?: string } };
+			const name = status.Self?.DNSName?.replace(/\.$/, "");
+			return status.BackendState === "Running" && name && /^[a-z0-9.-]+\.ts\.net$/i.test(name) ? `https://${name}` : null;
+		} catch {
+			return null;
+		}
+	}
+	return null;
 }

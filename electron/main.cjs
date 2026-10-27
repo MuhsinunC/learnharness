@@ -170,6 +170,30 @@ function freePort() {
 	});
 }
 
+/** REMOTE ACCESS (LH-43, docs/remote-access.md): once the learner has set a
+ *  login password (the server's data/web-login.json), the server takes a
+ *  fixed loopback port so `tailscale serve --bg <port>` can point at it.
+ *  Still 127.0.0.1 only; proxy.ts makes everything tailscale serve forwards
+ *  log in, and the window keeps its secret header. LH_REMOTE_PORT overrides
+ *  3757; a busy port falls back to a random one (Settings says so). */
+const REMOTE_PORT = (() => {
+	const port = Number(process.env.LH_REMOTE_PORT);
+	return Number.isInteger(port) && port > 1023 && port < 65536 ? port : 3757;
+})();
+
+function portFree(port) {
+	return new Promise((resolve) => {
+		const srv = net.createServer();
+		srv.once("error", () => resolve(false));
+		srv.listen(port, "127.0.0.1", () => srv.close(() => resolve(true)));
+	});
+}
+
+async function serverPort() {
+	if (fs.existsSync(path.join(DATA_DIR(), "web-login.json")) && (await portFree(REMOTE_PORT))) return REMOTE_PORT;
+	return freePort();
+}
+
 /** BYOK keys: auth.json in userData, flat {VAR: value} map, 0600 —
  *  SERVER-MANAGED since the auth-keys wave (2026-09-19). This shell no
  *  longer reads or injects it: the child gets LH_AUTH_FILE below and does
@@ -223,6 +247,10 @@ function startServer(port) {
 					LH_AUTH_FILE: AUTH_FILE(),
 					LH_DESKTOP_SERVER: "1",
 					LH_DESKTOP_API_SECRET: desktopAPISecret,
+					// Web login (LH-43): the listener proxy.ts may trust for loopback
+					// pages, and the port Settings tells tailscale serve to use.
+					LH_LISTEN_HOST: "127.0.0.1",
+					LH_REMOTE_PORT: String(REMOTE_PORT),
 				},
 				stdio: ["ignore", "pipe", "pipe", "ipc"],
 			},
@@ -660,7 +688,7 @@ async function main() {
 	// spawn, no packaging, full HMR. The rest of this shell still applies
 	// (guards, menu, single instance).
 	const devUrl = process.env.LH_DEV_URL;
-	const url = devUrl ?? `http://127.0.0.1:${await freePort()}`;
+	const url = devUrl ?? `http://127.0.0.1:${await serverPort()}`;
 	if (!devUrl) {
 		desktopAPISecret = randomBytes(32).toString("hex");
 		const ownedOrigin = new URL(url).origin;

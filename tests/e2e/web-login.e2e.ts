@@ -19,6 +19,8 @@ import { launchChrome } from "./harness/chrome.ts";
 const TICKET = "lh-43";
 const PASSWORD = "correct horse battery";
 const TS_HOST = "lh-test.example.ts.net";
+/** Keeps the real `tailscale status` (this machine's tailnet name) out of the run. */
+const NO_TAILSCALE = "/nonexistent/tailscale";
 
 let server: LhServer;
 let port: number;
@@ -81,7 +83,7 @@ async function setPassword(password: string): Promise<RawResponse> {
 }
 
 before(async () => {
-	server = await bootServer({ ticket: TICKET, providers: [], settings: { version: 1, graph: { enabled: false } }, env: { LH_LISTEN_HOST: "127.0.0.1" } });
+	server = await bootServer({ ticket: TICKET, providers: [], settings: { version: 1, graph: { enabled: false } }, env: { LH_LISTEN_HOST: "127.0.0.1", LH_TAILSCALE_BIN: NO_TAILSCALE } });
 	port = Number(new URL(server.url).port);
 	chatId = (await server.json<{ id: string }>("/api/chats", { body: { title: "Remote" } })).id;
 });
@@ -94,7 +96,7 @@ test("(a) with no password, loopback needs no login and remote requests are refu
 	assert.equal((await raw("/api/settings", { headers: local() })).status, 200);
 	assert.equal((await raw("/chat/new", { headers: local() })).status, 200);
 	assert.equal((await raw("/api/settings", { headers: { host: `localhost:${port}` } })).status, 200);
-	assert.deepEqual(JSON.parse((await raw("/api/remote-access", { headers: local() })).body), { available: true, enabled: false, access: "local" });
+	assert.deepEqual(JSON.parse((await raw("/api/remote-access", { headers: local() })).body), { enabled: false, access: "local", remotePort: port, restartNeeded: false, url: null });
 	const remote = await raw("/api/settings", { headers: viaServe() });
 	assert.equal(remote.status, 401);
 	assert.match(remote.headers["content-type"] ?? "", /json/);
@@ -122,6 +124,9 @@ test("(b) the computer sets the password in Settings → General → Remote acce
 		await page.type('[data-testid="remote-access-password"]', PASSWORD);
 		await page.click('[data-testid="remote-access-save"]');
 		await page.waitForFunction(() => /^On/.test(document.querySelector('[data-testid="remote-access-status"]')?.textContent ?? ""), { timeout: 60_000 });
+		await page.waitForSelector('[data-testid="remote-access-command"]', { timeout: 60_000 });
+		assert.equal(await page.$eval('[data-testid="remote-access-command"]', (el) => el.textContent), `tailscale serve --bg ${port}`);
+		assert.match(await page.$eval('[data-testid="remote-access-url"]', (el) => el.textContent ?? ""), /<this-computer>/, "no tailscale here: the placeholder");
 	} finally {
 		await chrome.close();
 	}
@@ -299,7 +304,7 @@ test("a raw `next dev` (no LH_LISTEN_HOST) keeps loopback login-free and refuses
 	// Two `next dev` in one checkout collide on its dev lock: stop the main one first.
 	const record = fs.readFileSync(path.join(server.dataDir, "web-login.json"));
 	await server.stop();
-	const rawServer = await bootServer({ ticket: TICKET, providers: [], settings: { version: 1, graph: { enabled: false } } });
+	const rawServer = await bootServer({ ticket: TICKET, providers: [], settings: { version: 1, graph: { enabled: false } }, env: { LH_TAILSCALE_BIN: NO_TAILSCALE } });
 	try {
 		const put = await rawServer.api("/api/remote-access", { method: "PUT", body: { password: PASSWORD } });
 		assert.equal(put.status, 409);

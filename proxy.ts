@@ -6,26 +6,30 @@ import { ACCESS_HEADER, decideAccess } from "./src/server/web-login.ts";
  * No public callback or worker bypass: internal jobs call server functions,
  * and any legitimate self-HTTP request must carry the private capability.
  *
- * Web mode (LH-43): the one place pages, API, SSE and exports are gated.
+ * Web login (LH-43): the one place pages, API, SSE and exports are gated,
+ * in web mode and in the desktop app alike.
  * Local requests and valid sessions pass, stamped with ACCESS_HEADER for
  * the routes that care; everyone else gets 401 JSON or the login page. */
 export function proxy(request: NextRequest) {
+	const headers = new Headers(request.headers);
+	headers.delete(ACCESS_HEADER);
+	const { pathname, search } = request.nextUrl;
+	const api = pathname.startsWith("/api");
+	let access = decideAccess(request.headers);
 	if (process.env.LH_DESKTOP_SERVER === "1" || process.env.LH_DESKTOP_API_SECRET) {
-		if (request.nextUrl.pathname.startsWith("/api") && !desktopAPIAuthorized(request.headers)) {
+		// Desktop: only the window's per-launch secret makes an API call local.
+		// A phone behind tailscale serve gets in with its session, like web mode.
+		if (api) access = desktopAPIAuthorized(request.headers) ? "local" : access === "session" ? "session" : null;
+		if (api && !access) {
 			return NextResponse.json(
 				{ error: "Desktop API access requires the trusted LearnHarness window." },
 				{ status: 403, headers: { "Cache-Control": "no-store" } },
 			);
 		}
-		return NextResponse.next();
 	}
-	const headers = new Headers(request.headers);
-	headers.delete(ACCESS_HEADER);
-	const access = decideAccess(request.headers);
 	if (access) headers.set(ACCESS_HEADER, access);
-	const { pathname, search } = request.nextUrl;
 	if (access || pathname === "/login") return NextResponse.next({ request: { headers } });
-	if (pathname.startsWith("/api")) {
+	if (api) {
 		return NextResponse.json({ error: "Log in to LearnHarness first." }, { status: 401, headers: { "Cache-Control": "no-store" } });
 	}
 	// An absolute URL on Next's own origin: Next rewrites it to a relative

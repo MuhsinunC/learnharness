@@ -112,6 +112,18 @@ jobs:
           cp "$golden/graph/"* "$data/data/graph/"
           cp "$golden/settings.json" "$data/data/settings.json"
           printf 'fixture bytes\n' > "$data/nested dir/file with space"
+          # Remote access (LH-43): a login password makes the app take its fixed
+          # loopback port (3757). Same record src/server/web-login.ts writes;
+          # the password is CI-only dummy data.
+          python3 - "$data/data/web-login.json" <<'PY'
+          import base64, hashlib, json, os, sys
+          salt = os.urandom(16)
+          key = hashlib.scrypt(b'ci-remote-access-dummy', salt=salt, n=2**15, r=8, p=3, maxmem=128 * 1024 * 1024, dklen=32)
+          record = {'version': 1, 'password': {'salt': base64.b64encode(salt).decode(), 'hash': base64.b64encode(key).decode(), 'N': 2**15, 'r': 8, 'p': 3}, 'sessions': []}
+          with open(sys.argv[1], 'w') as out:
+              json.dump(record, out)
+          os.chmod(sys.argv[1], 0o600)
+          PY
           bash tests/fork-mac-e2e/data-manifest.sh write "$data" "$ART/data-manifest.jsonl"
       - name: Quarantine downloaded fork
         run: |
@@ -168,8 +180,26 @@ jobs:
             sleep 1
           done
           [[ $port =~ ^[0-9]+$ ]]
+          [[ $port == 3757 ]] # the seeded login password selects the fixed remote port
           [[ $(curl --max-time 20 -sSL -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/") == 200 ]]
           [[ $(curl --max-time 20 -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/api/models") == 403 ]]
+          # A phone behind `tailscale serve`: its Host and forwarding headers.
+          serve=(-H 'Host: ci-mac.example.ts.net' -H 'X-Forwarded-Host: ci-mac.example.ts.net' -H 'X-Forwarded-Proto: https'
+            -H 'X-Forwarded-For: 100.101.102.103' -H 'Tailscale-User-Login: learner@example.com')
+          curl --max-time 20 -sS "${serve[@]}" -o /dev/null -D "$RUNNER_TEMP/remote-page.txt" "http://127.0.0.1:$port/chat/new"
+          grep -Eq '^HTTP/[0-9.]+ 303' "$RUNNER_TEMP/remote-page.txt"
+          grep -iq '^location: /login?next=%2Fchat%2Fnew' "$RUNNER_TEMP/remote-page.txt"
+          curl --max-time 20 -sS "${serve[@]}" "http://127.0.0.1:$port/login" | grep -Fq 'type="password"'
+          [[ $(curl --max-time 20 -sS "${serve[@]}" -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/api/models") == 403 ]]
+          curl --max-time 60 -sS "${serve[@]}" -H 'Origin: https://ci-mac.example.ts.net' -o /dev/null -D "$RUNNER_TEMP/remote-login.txt" \
+            --data-urlencode 'password=ci-remote-access-dummy' --data-urlencode 'next=/' "http://127.0.0.1:$port/login"
+          grep -Eq '^HTTP/[0-9.]+ 303' "$RUNNER_TEMP/remote-login.txt"
+          cookie=$(sed -nE 's/^[Ss]et-[Cc]ookie: (lh_session=[A-Za-z0-9_-]+);.*/\1/p' "$RUNNER_TEMP/remote-login.txt")
+          [[ -n $cookie ]]
+          echo "::add-mask::${cookie#lh_session=}"
+          [[ $(curl --max-time 60 -sS "${serve[@]}" -H "Cookie: $cookie" -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/api/models") == 200 ]]
+          rm -f "$RUNNER_TEMP/remote-login.txt"
+          unset cookie
           # Inspect only descendants; never log the child's environment or secret.
           secret=
           for child in $(pgrep -P "$pid"); do
@@ -263,13 +293,14 @@ jobs:
           # Every seeded file must stay byte-identical except data/graph/positions.json:
           # components/graph-view.tsx and components/graph-canvas.ts re-persist it
           # after the launch-time physics settle. Validate its structure instead.
+          # data/web-login.json gains the session the remote-access check logged in.
           # Startup purges only unseeded edges/events ledgers; no jobs are seeded.
           # Dummy sign-in files and the nested space-named file must also survive.
           # Logs, Chromium profile and caches may be added and are listed by name.
           # Runs after the quit so the live Chromium profile is not walked mid-write.
           if ! bash tests/fork-mac-e2e/data-manifest.sh subset \
             "$HOME/Library/Application Support/LearnHarness" "$ART/data-manifest.jsonl" \
-            data/graph/positions.json > "$ART/new-data-entries.jsonl" 2> "$ART/allowed-changes.txt"; then
+            data/graph/positions.json data/web-login.json > "$ART/new-data-entries.jsonl" 2> "$ART/allowed-changes.txt"; then
             cat "$ART/allowed-changes.txt" >&2
             exit 1
           fi

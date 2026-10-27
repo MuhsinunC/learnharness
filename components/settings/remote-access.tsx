@@ -5,14 +5,15 @@ import { Button } from "@/components/ui/button";
 import { SettingsRow } from "./controls.tsx";
 
 /** GET /api/remote-access (LH-43). */
-type RemoteAccess = { available: boolean; enabled: boolean; access: "local" | "session" | null };
+type RemoteAccess = { enabled: boolean; access: "local" | "session" | null; remotePort: number | null; restartNeeded: boolean; url: string | null };
 
 const DOCS = `${process.env.LH_HOMEPAGE ?? ""}/blob/main/docs/remote-access.md`;
 const MIN_LENGTH = 8;
 
 /** Settings → General: the login password for phones on the learner's
- * tailnet. Only the computer itself can change it; a logged-in phone sees
- * the status and a Log out button. Hidden in the desktop app. */
+ * tailnet, plus the one `tailscale serve` command and the phone's address.
+ * Only the computer itself can change it; a logged-in phone sees the
+ * status and a Log out button. */
 export function RemoteAccessSettings() {
 	const [state, setState] = useState<RemoteAccess | null>(null);
 	const [password, setPassword] = useState("");
@@ -39,11 +40,25 @@ export function RemoteAccessSettings() {
 		await load();
 	};
 
-	if (!state?.available) return null;
+	if (!state) return null;
 	const local = state.access === "local";
 	const hint = state.enabled
 		? "On. Devices on your tailnet log in with this password. Saving a new one logs every device out."
 		: "Off. Set a password to open LearnHarness from your phone over Tailscale.";
+	const setup = !state.enabled || !local ? null : state.restartNeeded ? (
+		<span className="block" data-testid="remote-access-restart">
+			Quit LearnHarness and open it again to finish. If this stays, port {state.remotePort} is used by another program.
+		</span>
+	) : (
+		<>
+			<span className="block">
+				Once, in Terminal on this computer: <code className="select-all font-mono text-foreground" data-testid="remote-access-command">tailscale serve --bg {state.remotePort}</code>
+			</span>
+			<span className="block">
+				Then open <span className="select-all font-mono text-foreground" data-testid="remote-access-url">{state.url ?? "https://<this-computer>.<your-tailnet>.ts.net"}</span> on your phone.
+			</span>
+		</>
+	);
 	return (
 		<SettingsRow
 			label="Remote access"
@@ -51,6 +66,7 @@ export function RemoteAccessSettings() {
 			hint={
 				<>
 					<span className="block" data-testid="remote-access-status">{hint}</span>
+					{setup}
 					{error && <span className="block text-red-500" role="alert">{error}</span>}
 					<a href={DOCS} target="_blank" rel="noopener noreferrer" className="underline-offset-2 hover:text-foreground hover:underline">How to set it up</a>
 				</>

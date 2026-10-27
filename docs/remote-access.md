@@ -5,11 +5,10 @@ it from your phone, through Tailscale, a free private network that joins only
 your own devices. Nothing is put on the public internet.
 
 You need:
-- the computer that runs LearnHarness (web mode, `npm run dev` or `npm start`);
+- the computer that runs LearnHarness: the desktop app, or web mode
+  (`npm run dev` or `npm start`);
 - your phone;
 - one Tailscale account, the same one on both.
-
-The desktop app has no remote access. Use web mode for this.
 
 ## 1. Install Tailscale on both devices
 
@@ -22,27 +21,46 @@ The desktop app has no remote access. Use web mode for this.
 
 ## 2. Set a password in LearnHarness
 
-1. Start LearnHarness on the computer as usual and open it in the browser
-   there (`http://127.0.0.1:3000`).
+1. Open LearnHarness on the computer: the desktop app, or in web mode the
+   browser there (`http://127.0.0.1:3000`).
 2. Open **Settings → General → Remote access**.
 3. Type a password of at least 8 characters and press **Save**. The status
    line says "On".
+4. **Desktop app only:** quit LearnHarness (⌘Q) and open it again. From then
+   on it always uses the same port, 3757, so Tailscale can find it. If
+   Settings still says to quit and reopen, another program is using port 3757:
+   quit that program. (Advanced: start the app from Terminal with another
+   port above 1023, for example
+   `LH_REMOTE_PORT=3758 /Applications/LearnHarness.app/Contents/MacOS/LearnHarness`,
+   and use that port in step 3.)
 
 You never need this password on the computer itself, only on other devices.
 Saving a new password logs every other device out. **Turn off** removes the
-password and logs every device out.
+password and logs every device out (the desktop app goes back to a random
+port the next time it opens).
 
 ## 3. Share LearnHarness on your tailnet
 
-In a terminal on the computer, run (use your port if it isn't 3000):
+**Settings → General → Remote access** now shows the exact command and the
+address for your phone. Open **Terminal** on the computer and run the command
+once. For the desktop app it is:
 
 ```bash
-tailscale serve --bg 3000
+tailscale serve --bg 3757
 ```
 
-Tailscale prints an address such as `https://my-laptop.tail1234.ts.net`. It
-keeps serving after a restart until you run `tailscale serve --https=443 off`
-(or `tailscale serve reset`).
+In web mode it is your port instead (3000 unless you changed it).
+
+On a Mac with the Tailscale app from the App Store or tailscale.com, the
+`tailscale` command may be missing from Terminal. Use the full path instead:
+
+```bash
+/Applications/Tailscale.app/Contents/MacOS/Tailscale serve --bg 3757
+```
+
+Tailscale prints an address such as `https://my-laptop.tail1234.ts.net`, the
+same one Settings shows. It keeps serving, also after a restart, until you run
+`tailscale serve --https=443 off` (or `tailscale serve reset`).
 
 If Tailscale asks you to enable HTTPS certificates for your tailnet, follow the
 link it prints and turn them on (one click in the Tailscale admin console).
@@ -54,6 +72,9 @@ link it prints and turn them on (one click in the Tailscale admin console).
 2. Enter the password. You stay logged in on that phone for 30 days, or until
    you tap **Settings → General → Log out** or change the password.
 
+The computer must be awake with LearnHarness open (the desktop app running, or
+the web server started) for the phone to reach it.
+
 ## What is safe, and what isn't
 
 Safe:
@@ -62,6 +83,9 @@ Safe:
   encrypted, and the cookie is marked Secure.
 - LearnHarness itself still listens only on `127.0.0.1`. Other computers on
   your Wi-Fi cannot reach it.
+- In the desktop app, the app window keeps its own private per-launch key for
+  everything it asks the server. A phone never gets that key; it only gets in
+  with the password.
 - Every page, API call, live update and export from another device needs the
   login. The login cookie can't be read by scripts and isn't sent by other
   websites. Wrong passwords are rate-limited: five failures lock that device
@@ -83,8 +107,10 @@ Not safe, don't do it:
   one you don't use anywhere else.
 - Anyone using the computer itself has full access without a password, as
   before. Lock the computer when you leave it.
+- Remote access is only as private as your Tailscale account. Use a strong
+  password or sign-in for that account, and remove devices you no longer use.
 
-## Other ways to listen (advanced)
+## Other ways to listen (advanced, web mode)
 
 `npm run dev` and `npm start` go through `scripts/web-server.mjs`, which
 always listens on `127.0.0.1` unless told otherwise:
