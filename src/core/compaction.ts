@@ -36,7 +36,8 @@
 import type { PlanTree } from "./contracts/plan.ts";
 import { derivePlanStatusesLh, derivedNodeStatus } from "./contracts/plan.ts";
 import { COMPACTED_HISTORY_HEADER } from "./contracts/chat.ts";
-import type { LhMessage, LhMarkerMessage } from "./native-messages.ts";
+import type { LhMessage, LhMarkerMessage, LhUserMessage } from "./native-messages.ts";
+import { attachmentReferenceText } from "./attachments.ts";
 import { newMessageId } from "./native-messages.ts";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage, SystemMessage } from "@earendil-works/pi-ai";
@@ -315,7 +316,10 @@ export function serializeForSummary(messages: readonly LhMessage[]): string {
 	for (const m of messages) {
 		const role = (m as { role?: string }).role;
 		if (role === "user") {
-			lines.push(`[LEARNER] ${(m as { content: string }).content}`);
+			// Attached images keep their store ids through the summary, so
+			// the post-cut model can still view_image them (LH-39).
+			const refs = ((m as LhUserMessage).attachments ?? []).map(attachmentReferenceText);
+			lines.push([`[LEARNER] ${(m as { content: string }).content}`, ...refs].join("\n"));
 		} else if (role === "assistant") {
 			const assistant = m as AssistantMessage;
 			const blocks: string[] = [];
@@ -404,7 +408,7 @@ ${planSection}
 ## The current moment
 What is happening RIGHT NOW at the cut: any question or problem awaiting the learner's answer, any commitment the agent has made that a later turn must honor, and the immediate next step.
 
-Rules: no praise, no filler, no speculation beyond the transcript. Every claim about the learner must be traceable to what they actually said or answered. Keep every identifier (proposition ids, node ids, file paths) exact.${input.maxWords ? ` Keep the whole summary under ${input.maxWords} words.` : ""}
+Rules: no praise, no filler, no speculation beyond the transcript. Every claim about the learner must be traceable to what they actually said or answered. Keep every identifier (proposition ids, node ids, file paths, attached image ids) exact.${input.maxWords ? ` Keep the whole summary under ${input.maxWords} words.` : ""}
 
 TRANSCRIPT TO SUMMARIZE:
 

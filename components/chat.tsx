@@ -83,7 +83,7 @@ import {
 } from "@/src/core";
 import { ReadingThinkingField } from "@/components/reading-thinking";
 import { currentUserThinkingOpen, setAllUserThinkingOpen } from "@/components/thinking-block";
-import { imagesUnsupportedText, type AttachmentRef } from "@/src/core";
+import { type AttachmentRef } from "@/src/core";
 
 /** One width for everything: transcript, cards, and the bottom blob share this column. */
 /**
@@ -757,15 +757,9 @@ export function Chat({
 	// recovers from it. Later compaction requires new input instead.
 	const retryable = (status === "ready" || status === "error") && !busy && !compacting && endsInFailedTurn(nativeMessages);
 	const retryFailedTurn = () => retryFailedResponse(send, draftRef);
-	// Image attachments (LH-39): gated on the chat's effective model (the
-	// stats bar's model control reports it) — a model that can't read
-	// images gets the notice instead of a silent drop.
-	const chatModelEntry = catalog?.models.find((m) => `${m.provider}:${m.id}` === selectedModel);
-	const imagesBlocked =
-		chatModelEntry && !(chatModelEntry.supportsImages ?? chatModelEntry.input.includes("image"))
-			? imagesUnsupportedText(chatModelEntry)
-			: null;
-	const attach = useAttachments(imagesBlocked);
+	// Image attachments (LH-39): the server checks the chat's model on
+	// every intake, so a model that can't read images shows the notice.
+	const attach = useAttachments(chatId);
 	const canSend =
 		(text.trim().length > 0 || attach.items.length > 0 || dictation.active) && !pending && !activeProblem && !compacting;
 

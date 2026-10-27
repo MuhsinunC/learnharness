@@ -1,8 +1,9 @@
 /**
  * Image-attachment gates (LH-39): the server half of the "never a silent
- * failure" rule. A send carrying images to a model that cannot take them
- * refuses with IMAGES_UNSUPPORTED_CODE before anything is persisted; the
- * composer already shows the same message at attach time.
+ * failure" rule. An intake for a chat whose model can't read images, and
+ * a send carrying images to such a model, refuse with
+ * IMAGES_UNSUPPORTED_CODE before anything is stored or persisted; the
+ * composer shows the refusal as its notice.
  */
 
 import type { Api, Model } from "@earendil-works/pi-ai";
@@ -24,23 +25,30 @@ export function withImageSupport(engine: PiEngine): PiEngine {
 	return { ...engine, model: { ...engine.model, input } };
 }
 
+/** 400 when this model can't read images (the override counted). */
+function modelRefusal(model: Model<Api>): Response | null {
+	if (supportsImages(model, effectiveSettings().imageSupport)) return null;
+	return Response.json({ error: imagesUnsupportedText(model), code: IMAGES_UNSUPPORTED_CODE }, { status: 400 });
+}
+
 /** 400 when the attachments can't go to this model (or an id is not in
  *  the store); null when the send may proceed. */
 export function imageInputRefusal(model: Model<Api>, attachments: readonly AttachmentRef[] | undefined): Response | null {
 	if (!attachments?.length) return null;
 	const missing = attachments.find((a) => !attachmentExists(a.id));
 	if (missing) return Response.json({ error: `No stored image has the id ${missing.id}.` }, { status: 400 });
-	if (supportsImages(model, effectiveSettings().imageSupport)) return null;
-	return Response.json({ error: imagesUnsupportedText(model), code: IMAGES_UNSUPPORTED_CODE }, { status: 400 });
+	return modelRefusal(model);
 }
 
-/** The same gate for a chat by id (the steer route has no engine). */
-export function chatImageRefusal(chatId: string, attachments: readonly AttachmentRef[] | undefined): Response | null {
-	if (!attachments?.length) return null;
+/** The same gate for a chat by id, where no engine exists yet: an intake
+ *  (no attachments argument — may this chat take images at all?) or a
+ *  steer carrying attachments. */
+export function chatImageRefusal(chatId: string, attachments?: readonly AttachmentRef[]): Response | null {
+	if (attachments?.length === 0) return null;
 	const spec = resolveConversationSpec(stores.chatStore.getChat(chatId)?.settings, effectiveSettings().models.strong);
 	let model: Model<Api> | undefined;
 	try { model = spec ? piEngineForSpec(spec).model : undefined; }
 	catch { model = undefined; }
 	if (!model) return Response.json({ error: "The selected model is unavailable." }, { status: 503 });
-	return imageInputRefusal(model, attachments);
+	return attachments ? imageInputRefusal(model, attachments) : modelRefusal(model);
 }
