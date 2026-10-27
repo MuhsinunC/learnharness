@@ -261,15 +261,21 @@ export function Chat({
 	// The reattach settled terminal → the sync-and-continue seam (below).
 	setReattachSettled(() => reattachSettledRef.current());
 
+	// Image attachments (LH-39): the server checks the chat's model on
+	// every intake, so a model that can't read images shows the notice.
+	const attach = useAttachments(chatId);
+	const { takePaths } = attach;
+
 	// New chat with a topic: send the first message exactly once
-	// (initialPromptOwed — the pure gate, pinned in the test suite).
+	// (initialPromptOwed — the pure gate, pinned in the test suite). Image
+	// paths in it attach like a composer send's.
 	const sentInitial = useRef(false);
 	useEffect(() => {
 		if (!sentInitial.current && initialPromptOwed(initialMessages, initialPrompt)) {
 			sentInitial.current = true;
-			void send({ type: "text", text: initialPrompt! });
+			void takePaths(initialPrompt!).then(({ text, refs }) => send({ type: "text", text, ...(refs.length ? { attachments: refs } : {}) }));
 		}
-	}, [initialPrompt, initialMessages, send]);
+	}, [initialPrompt, initialMessages, send, takePaths]);
 
 	// A turn running server-side, attached to no live view of ours (navigate
 	// away mid-turn, or a wake turn discovered mid-session): the reattach
@@ -692,9 +698,6 @@ export function Chat({
 	// server's registry mutex is the structural gate; this is the
 	// affordance).
 	const [compacting, setCompacting] = useState(initiallyCompacting);
-	// Image attachments (LH-39): the server checks the chat's model on
-	// every intake, so a model that can't read images shows the notice.
-	const attach = useAttachments(chatId);
 	const canSend =
 		(text.trim().length > 0 || attach.items.length > 0 || dictation.active) && !pending && !activeProblem && !compacting;
 

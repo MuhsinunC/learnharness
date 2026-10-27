@@ -44,7 +44,7 @@ import {
 } from "./contracts/chat.ts";
 import { compactAnswerForModel, type QuestionAnswerData } from "./question-core.ts";
 import { activeCompactionOf, keptIndexFor } from "./compaction.ts";
-import { attachmentReferenceText, VIEW_IMAGE_TOOL, type AttachmentRef } from "./attachments.ts";
+import { attachmentReferenceText, MAX_WIRE_IMAGE_BASE64, MAX_WIRE_IMAGES, VIEW_IMAGE_TOOL, type AttachmentRef } from "./attachments.ts";
 
 /** The hard-invariant wording for an aborted turn's unanswered calls —
  *  carried over verbatim from the pre-native era so the model's view
@@ -565,9 +565,11 @@ function resultIdsFrom(messages: readonly AgentMessage[]): Set<string> {
  *   naming each stored id, and a view_image result names its id too. The
  *   PIXELS ride only for messages after the active compaction marker
  *   (everything before it, kept tail included, is compacted history —
- *   references only), and only when the caller injects `loadImage` (the
- *   live agent does; the token estimate and summarizer paths do not). The
- *   prefix stays byte-stable between compactions, so prompt caches hold.
+ *   references only; a tool result's inline images there become a note),
+ *   within the per-request budget (newest first), and only when the
+ *   caller injects `loadImage` (the live agent does; the token estimate
+ *   and summarizer paths do not). Until the budget fills, the prefix
+ *   stays byte-stable between compactions, so prompt caches hold.
  *
  * Contract (pi-agent-core): never throws — an unknown shape passes
  * through untouched rather than killing the loop.
@@ -610,10 +612,29 @@ export function toLlmMessages(
 	// context.systemPrompt + context.tools around its projection.
 	const leading =
 		(messages[0] as { role?: string } | undefined)?.role === "system" ? (messages[0] as Message) : null;
+	// THE PIXEL BUDGET (LH-39): only messages after the active compaction
+	// marker carry pixels, newest first, one copy per image, within the
+	// provider's per-request limits. Everything else is reference text.
 	const pixelsFrom = active ? lhMessages.findIndex((m) => m.id === active.id) + 1 : 0;
+	const pixels = new Map<string, ImageContent>();
+	if (loadImage) {
+		const seen = new Set<string>();
+		let chars = 0;
+		for (let i = messages.length - 1; i >= pixelsFrom && pixels.size < MAX_WIRE_IMAGES; i--) {
+			for (const id of attachmentIdsOf(messages[i]!).reverse()) {
+				if (seen.has(id) || pixels.size >= MAX_WIRE_IMAGES) continue;
+				seen.add(id);
+				let loaded: ImageContent | null = null;
+				try { loaded = loadImage(id); }
+				catch { /* never throw at the wire: the reference text still names it */ }
+				if (!loaded || chars + loaded.data.length > MAX_WIRE_IMAGE_BASE64) continue;
+				chars += loaded.data.length;
+				pixels.set(`${i}:${id}`, loaded);
+			}
+		}
+	}
 	const image = (i: number, id: string): ImageContent[] => {
-		if (!loadImage || i < pixelsFrom) return [];
-		const loaded = loadImage(id);
+		const loaded = pixels.get(`${i}:${id}`);
 		return loaded ? [loaded] : [];
 	};
 	const out: Message[] = [];
@@ -652,6 +673,13 @@ export function toLlmMessages(
 			});
 			continue;
 		}
+		// Compacted history keeps no pixels from any tool either (the read
+		// tool persists image files it reads inline).
+		if (role === "toolResult" && i < pixelsFrom && (native as ToolResultMessage).content.some((c) => c.type === "image")) {
+			const result = native as ToolResultMessage;
+			out.push({ ...result, content: result.content.map((c) => (c.type === "image" ? { type: "text" as const, text: COMPACTED_TOOL_IMAGE_TEXT } : c)) });
+			continue;
+		}
 		const viewed = role === "toolResult" && (native as ToolResultMessage).toolName === VIEW_IMAGE_TOOL
 			? ((native as ToolResultMessage).details as { attachment?: unknown } | null)?.attachment
 			: undefined;
@@ -683,6 +711,21 @@ export function toLlmMessages(
 		}
 	}
 	return out;
+}
+
+/** The image a tool returned, as compacted history shows it. */
+const COMPACTED_TOOL_IMAGE_TEXT = "[An image this tool returned was dropped when earlier context was summarized; read it again to see it.]";
+
+/** The store ids a message carries pixels for at the wire: a user
+ *  message's attachments, or a view_image result's image. */
+function attachmentIdsOf(message: AgentMessage): string[] {
+	const m = message as { role?: string; attachments?: AttachmentRef[]; toolName?: string; details?: unknown };
+	if (m.role === "user") return (m.attachments ?? []).map((ref) => ref.id);
+	if (m.role === "toolResult" && m.toolName === VIEW_IMAGE_TOOL) {
+		const id = (m.details as { attachment?: unknown } | null | undefined)?.attachment;
+		return typeof id === "string" ? [id] : [];
+	}
+	return [];
 }
 
 // ─── native scans (the UIMessage-era pending/phase seams, natively) ──────────
