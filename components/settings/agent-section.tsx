@@ -53,6 +53,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MenuShell } from "@/components/menu-shell";
+import { ImageSupportRow } from "@/components/settings/image-support-row";
 import { useSettingsSaved } from "@/components/settings-signal";
 import { defaultOrderLevel, populateLevel } from "@/components/thinking-default";
 import { useModelCatalog } from "@/components/model-catalog";
@@ -611,7 +612,7 @@ export function AgentSection({
 					const thisMenuOpen = openMenu?.target === slot ? openMenu.kind : null;
 					// Vision slots pick from image-capable models only.
 					const slotCatalog =
-						slot === "vision" ? catalog?.filter((m) => m.input.includes("image")) : catalog;
+						slot === "vision" ? catalog?.filter((m) => m.supportsImages ?? m.input.includes("image")) : catalog;
 					return (
 						<SettingsRow
 							key={slot}
@@ -698,6 +699,7 @@ export function AgentSection({
 						</SettingsRow>
 					);
 				})}
+				<ImageSupportRow catalog={catalog} />
 			</SettingsGroup>
 
 			<SettingsGroup label="Tools" testid="group-tools">

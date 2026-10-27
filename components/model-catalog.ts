@@ -42,7 +42,7 @@ export function useModelCatalog(): { catalog: ModelCatalogResponse | undefined; 
 				if (section === "keys") {
 					catalogGeneration++; catalogInflight = undefined; catalogCache = undefined;
 					fetchCatalog();
-				} else if (section === "models" || section === "contextWindows") fetchCatalog(true);
+				} else if (section === "models" || section === "contextWindows" || section === "imageSupport") fetchCatalog(true);
 			});
 			fetchCatalog(true);
 		} else fetchCatalog();

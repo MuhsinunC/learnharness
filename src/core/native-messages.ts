@@ -34,7 +34,7 @@
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, Message, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, ImageContent, Message, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
 import { QUESTION_TOOLS } from "./pending.ts";
 import {
 	CONCLUDE_ACK_TEXT,
@@ -44,6 +44,7 @@ import {
 } from "./contracts/chat.ts";
 import { compactAnswerForModel, type QuestionAnswerData } from "./question-core.ts";
 import { activeCompactionOf, keptIndexFor } from "./compaction.ts";
+import { attachmentReferenceText, VIEW_IMAGE_TOOL, type AttachmentRef } from "./attachments.ts";
 
 /** The hard-invariant wording for an aborted turn's unanswered calls —
  *  carried over verbatim from the pre-native era so the model's view
@@ -89,8 +90,12 @@ declare module "@earendil-works/pi-agent-core" {
 	}
 }
 
+/** A learner message as the record keeps it: pi's UserMessage plus the
+ *  image references (LH-39) — never pixels; toLlmMessages hydrates them. */
+export type LhUserMessage = UserMessage & { attachments?: AttachmentRef[] };
+
 /** A record message: a native pi message (or our marker) plus the record id. */
-export type LhMessage = (UserMessage | AssistantMessage | ToolResultMessage | LhMarkerMessage) & { id: string };
+export type LhMessage = (LhUserMessage | AssistantMessage | ToolResultMessage | LhMarkerMessage) & { id: string };
 
 /** A record message list is assignable to the agent's context — that IS
  *  the replay (ui-stream/chat-handler assign it to initialState.messages). */
@@ -158,11 +163,12 @@ export function newMessageId(): string {
 //     core/input-events.ts; steers in core/contracts/jobs.ts) ─────────────────
 
 /** A learner-authored user message (text input, verdict note). */
-export function newUserMessage(text: string): LhMessage & UserMessage {
+export function newUserMessage(text: string, attachments: AttachmentRef[] = []): LhMessage & LhUserMessage {
 	return {
 		id: newMessageId(),
 		role: "user",
 		content: text,
+		...(attachments.length ? { attachments } : {}),
 		timestamp: Date.now(),
 	};
 }
@@ -172,8 +178,8 @@ export function newUserMessage(text: string): LhMessage & UserMessage {
  *  rides agent.steer(), the live stream's message events, and the settled
  *  record, so the optimistic queued indicator and the transcript card
  *  upsert by one identity. */
-export function newUserSteer(text: string, id: string): LhMessage & UserMessage {
-	return { id, role: "user", content: text, timestamp: Date.now() };
+export function newUserSteer(text: string, id: string, attachments: AttachmentRef[] = []): LhMessage & LhUserMessage {
+	return { id, role: "user", content: text, ...(attachments.length ? { attachments } : {}), timestamp: Date.now() };
 }
 
 /** The learner's answer — the question call's tool result (fork 1).
@@ -556,10 +562,21 @@ function resultIdsFrom(messages: readonly AgentMessage[]): Set<string> {
  *   Error/aborted generations do not: Pi drops those assistant messages,
  *   so manufacturing their results would leave orphan results on the wire.
  *
+ * - image attachments (LH-39): a user message's references become text
+ *   naming each stored id, and a view_image result names its id too. The
+ *   PIXELS ride only for messages after the active compaction marker
+ *   (everything before it, kept tail included, is compacted history —
+ *   references only), and only when the caller injects `loadImage` (the
+ *   live agent does; the token estimate and summarizer paths do not). The
+ *   prefix stays byte-stable between compactions, so prompt caches hold.
+ *
  * Contract (pi-agent-core): never throws — an unknown shape passes
  * through untouched rather than killing the loop.
  */
-export function toLlmMessages(messages: readonly AgentMessage[]): Message[] {
+export function toLlmMessages(
+	messages: readonly AgentMessage[],
+	loadImage?: (id: string) => ImageContent | null,
+): Message[] {
 	// THE COMPACTION CUT (owner round 14, 2026-10-05): the ACTIVE marker
 	// (the newest — chained compactions rule last) names the first kept
 	// message; everything before it is replaced by the marker's content
@@ -595,6 +612,12 @@ export function toLlmMessages(messages: readonly AgentMessage[]): Message[] {
 	// context.systemPrompt + context.tools around its projection.
 	const leading =
 		(messages[0] as { role?: string } | undefined)?.role === "system" ? (messages[0] as Message) : null;
+	const pixelsFrom = active ? lhMessages.findIndex((m) => m.id === active.id) + 1 : 0;
+	const image = (i: number, id: string): ImageContent[] => {
+		if (!loadImage || i < pixelsFrom) return [];
+		const loaded = loadImage(id);
+		return loaded ? [loaded] : [];
+	};
 	const out: Message[] = [];
 	if (leading) out.push(leading);
 	if (head) out.push(head);
@@ -619,6 +642,25 @@ export function toLlmMessages(messages: readonly AgentMessage[]): Message[] {
 		}
 		// Strip the record id: the wire carries the native shape only.
 		const { id: _id, ...native } = m as LhMessage;
+		if (role === "user" && (native as LhUserMessage).attachments?.length) {
+			const { attachments, content, ...user } = native as LhUserMessage;
+			out.push({
+				...user,
+				content: [
+					...(typeof content === "string" ? (content ? [{ type: "text" as const, text: content }] : []) : content),
+					...attachments!.flatMap((ref) => [{ type: "text" as const, text: attachmentReferenceText(ref) }, ...image(i, ref.id)]),
+				],
+			});
+			continue;
+		}
+		const viewed = role === "toolResult" && (native as ToolResultMessage).toolName === VIEW_IMAGE_TOOL
+			? ((native as ToolResultMessage).details as { attachment?: unknown } | null)?.attachment
+			: undefined;
+		if (typeof viewed === "string") {
+			const result = native as ToolResultMessage;
+			out.push({ ...result, content: [...result.content, ...image(i, viewed)] });
+			continue;
+		}
 		out.push(native as Message);
 		// Repair unanswered calls from completed generations, not calls in
 		// failed generations. Pi filters error/aborted assistants itself;

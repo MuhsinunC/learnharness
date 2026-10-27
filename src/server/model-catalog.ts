@@ -50,6 +50,7 @@ import type {
 import type { EffectiveModelSpec, EffectiveSlot } from "../core/settings-resolution.ts";
 import { AUTH_PROVIDER_KEYS } from "../core/auth-keys.ts";
 import { contextWindowKey, maxContextWindow, minContextWindow } from "../core/context-windows.ts";
+import { supportsImages, type ImageSupportSettings } from "../core/attachments.ts";
 import { BACKGROUND_MODEL_ROLES, MODEL_SLOTS, type BackgroundModelRole, type ModelSlotName, type ModelsSettings } from "../core/settings.ts";
 
 bootClaudeCodeProvider();
@@ -177,7 +178,7 @@ export function contextWindowBounds(provider: string, id: string): { defaultWind
 
 /** Project one catalog model to the client DTO. `contextWindow` is the
  *  window that runs (custom over default). */
-export function toModelDto(model: Model<Api>, custom: Record<string, number> = {}): ModelDto {
+export function toModelDto(model: Model<Api>, custom: Record<string, number> = {}, imageSupport?: ImageSupportSettings): ModelDto {
 	const customWindow = custom[contextWindowKey(model.provider, model.id)];
 	return {
 		id: model.id,
@@ -185,6 +186,7 @@ export function toModelDto(model: Model<Api>, custom: Record<string, number> = {
 		provider: model.provider,
 		reasoning: model.reasoning,
 		input: [...model.input],
+		supportsImages: supportsImages(model, imageSupport),
 		supportedLevels: getSupportedThinkingLevels(model),
 		cost: {
 			input: model.cost.input,
@@ -230,13 +232,14 @@ export function catalogContextLimits(): Map<string, number> {
 export function modelCatalog(): ModelCatalogResponse {
 	const keyed = keyedProviderIds();
 	const custom = customContextWindows();
+	const { imageSupport } = effectiveSettings();
 	const models = piModels()
 		.getProviders()
 		.filter((p) => keyed.has(p.id))
 		.flatMap((p) => piModels().getModels(p.id))
-		.map((m) => toModelDto(m, custom))
+		.map((m) => toModelDto(m, custom, imageSupport))
 		.sort((a, b) => (a.provider === b.provider ? a.id.localeCompare(b.id) : a.provider.localeCompare(b.provider)))
-		.concat([...chatGPTModels(), ...nativeSubscriptionModels()].map((m) => toModelDto(m, custom)));
+		.concat([...chatGPTModels(), ...nativeSubscriptionModels()].map((m) => toModelDto(m, custom, imageSupport)));
 	return {
 		models,
 		defaults: catalogDefaults(),
