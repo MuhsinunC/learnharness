@@ -715,10 +715,17 @@ export class SessionModel {
 				throw new Error("A turn is already running — try again in a moment.");
 			}
 			if (!res.ok) {
-				// Refusal envelopes (503 BYOK/key gates) and 400s: the RAW body
-				// text rides the error message — the banner shows it, and the
-				// page's refusal flow JSON-parses the envelope out of it.
-				throw new Error((await res.text()) || `The send failed (${res.status}).`);
+				// Keep model/key refusal envelopes verbatim: the page's refusal
+				// flow parses them. Retry's 400s are ordinary user-facing
+				// guidance, so show their error text without JSON syntax.
+				let message = (await res.text()) || `The send failed (${res.status}).`;
+				if (input.type === "retry" && res.status === 400) {
+					try {
+						const refusal = JSON.parse(message) as { error?: unknown } | null;
+						if (typeof refusal?.error === "string" && refusal.error.length > 0) message = refusal.error;
+					} catch { /* Non-envelope failures keep their original text. */ }
+				}
+				throw new Error(message);
 			}
 			// CONNECTION DIET B (owner, 2026-10-10 — parallel-session freeze
 			// postmortem): the POST acknowledges and closes; there is no stream

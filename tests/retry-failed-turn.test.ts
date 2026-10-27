@@ -487,10 +487,26 @@ describe("the Retry button's client path", () => {
 		});
 		await m.send({ type: "retry" });
 		assert.equal(m.getState().status, "error");
-		assert.equal(JSON.parse(m.getState().error!.message).error, refused, "the existing refusal-envelope path carries both messages");
+		assert.equal(m.getState().error!.message, refused, "the banner keeps both messages as readable text, without JSON syntax");
 		assert.deepEqual(m.getState().nativeMessages, compacted);
 		assert.equal(endsInFailedTurn(m.getState().nativeMessages), false);
 	});
+
+	for (const { status, body, expected } of [
+		{ status: 400, body: '{"error":"retry input requires a failed turn to retry"}', expected: "retry input requires a failed turn to retry" },
+		{ status: 400, body: "Plain refusal", expected: "Plain refusal" },
+		{ status: 400, body: '{"reason":"not an error envelope"}', expected: '{"reason":"not an error envelope"}' },
+		{ status: 503, body: '{"error":"model gate","code":"models_not_configured"}', expected: '{"error":"model gate","code":"models_not_configured"}' },
+	]) {
+		it(`preserves the appropriate Retry refusal format for ${status}: ${body}`, async () => {
+			const m = new SessionModel({
+				chatId: "chat_x", initialMessages: [newUserMessage("hello"), failed("failed-response")],
+				fetch: async () => new Response(body, { status }),
+			});
+			await m.send({ type: "retry" });
+			assert.equal(m.getState().error?.message, expected);
+		});
+	}
 
 	it("after a dropped request, Retry posts straight from the error status", async () => {
 		const failedTurn = [newUserMessage("hello"), failed("a1")];
