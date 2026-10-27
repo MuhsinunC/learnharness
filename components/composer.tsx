@@ -75,8 +75,8 @@ export function Composer({
 	/** The signal's dispatcher (send({type:"next"})) — the chip and the
 	 *  empty-Enter share it. */
 	onNext?: () => void;
-	/** Image intake (LH-39): files pasted into the textarea or dropped on
-	 *  the composer. Absent = the browser's default paste/drop. */
+	/** Image intake (LH-39): image files pasted into the textarea or
+	 *  dropped on the composer. Absent = the browser's default paste/drop. */
 	onFiles?: (files: File[]) => void;
 }) {
 	const act = () => {
@@ -95,9 +95,10 @@ export function Composer({
 			}}
 			onDragOver={onFiles ? (e) => { if (e.dataTransfer.types.includes("Files")) e.preventDefault(); } : undefined}
 			onDrop={onFiles ? (e) => {
-				if (e.dataTransfer.files.length === 0) return; // dropped text lands as text
+				const images = [...e.dataTransfer.files].filter((f) => f.type.startsWith("image/"));
+				if (images.length === 0) return; // dropped text lands as text
 				e.preventDefault();
-				onFiles([...e.dataTransfer.files]);
+				onFiles(images);
 			} : undefined}
 		>
 			<textarea
@@ -107,9 +108,10 @@ export function Composer({
 				onPaste={onFiles ? (e) => {
 					// A copied screenshot arrives as clipboard files; pasted text
 					// (image paths included — lifted at send) pastes as usual.
-					if (e.clipboardData.files.length === 0) return;
+					const images = [...e.clipboardData.files].filter((f) => f.type.startsWith("image/"));
+					if (images.length === 0) return;
 					e.preventDefault();
-					onFiles([...e.clipboardData.files]);
+					onFiles(images);
 				} : undefined}
 				onKeyDown={(e) => {
 					// Esc ends dictation before anything else Esc might someday mean

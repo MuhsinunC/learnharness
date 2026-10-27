@@ -24,7 +24,7 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
 		if (err instanceof ChatInputError) return Response.json({ error: err.message }, { status: 400 });
 		throw err;
 	}
-	const refusal = chatImageRefusal(id, input.attachments);
+	const refusal = chatImageRefusal(id, input.attachments ?? []);
 	if (refusal) return refusal;
 	const message = newUserSteer(input.text, input.id, input.attachments);
 	if (!steerLiveChat(id, message)) {

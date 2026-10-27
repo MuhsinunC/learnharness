@@ -24,7 +24,6 @@ import { artifactRenderers } from "@/components/artifacts";
 import { SubagentSteerCard } from "@/components/artifacts/steer-card";
 import { Composer } from "@/components/composer";
 import { AttachmentChips, AttachmentImage, useAttachments } from "@/components/attachments";
-import { useModelCatalog } from "@/components/model-picker";
 import { useEnterSubmits } from "@/components/enter-submits";
 import { blurAfterPointerClick } from "@/components/focus-hygiene";
 import { dockStateKey } from "@/components/dock-state-key";
@@ -80,7 +79,7 @@ import {
 } from "@/src/core";
 import { ReadingThinkingField } from "@/components/reading-thinking";
 import { currentUserThinkingOpen, setAllUserThinkingOpen } from "@/components/thinking-block";
-import { imagesUnsupportedText, slotsConfigured, type AttachmentRef, type ModelsSettings } from "@/src/core";
+import { slotsConfigured, type AttachmentRef, type ModelsSettings } from "@/src/core";
 import { useSettingsSaved } from "@/components/settings-signal";
 
 /** One width for everything: transcript, cards, and the bottom blob share this column. */
@@ -693,17 +692,9 @@ export function Chat({
 	// server's registry mutex is the structural gate; this is the
 	// affordance).
 	const [compacting, setCompacting] = useState(initiallyCompacting);
-	// Image attachments (LH-39): gated on the chat's effective model (the
-	// stats bar's model control reports it) — a model that can't read
-	// images gets the notice instead of a silent drop.
-	const [chatModel, setChatModel] = useState<string | undefined>();
-	const { catalog } = useModelCatalog();
-	const chatModelEntry = catalog?.models.find((m) => `${m.provider}:${m.id}` === chatModel);
-	const imagesBlocked =
-		chatModelEntry && !(chatModelEntry.supportsImages ?? chatModelEntry.input.includes("image"))
-			? imagesUnsupportedText(chatModelEntry)
-			: null;
-	const attach = useAttachments(imagesBlocked);
+	// Image attachments (LH-39): the server checks the chat's model on
+	// every intake, so a model that can't read images shows the notice.
+	const attach = useAttachments(chatId);
 	const canSend =
 		(text.trim().length > 0 || attach.items.length > 0 || dictation.active) && !pending && !activeProblem && !compacting;
 
@@ -1726,7 +1717,6 @@ export function Chat({
 							)}
 						</>
 					}
-					onModelChange={setChatModel}
 					onSubmitAnswer={(output) => {
 						if (!pending) return;
 						// THE ANSWER IS THE QUESTION CALL'S TOOL RESULT (fork 1, owner
@@ -1920,7 +1910,6 @@ function DockOverlay({
 	setupCta,
 	queuedSteers,
 	attachments,
-	onModelChange,
 }: {
 	pending: ReturnType<typeof findPendingToolCall>;
 	initialQuestionDraft?: QuestionFormDraft;
@@ -1973,8 +1962,6 @@ function DockOverlay({
 	/** The composer's pending image chips + notice (LH-39), inside the
 	 *  shell above the text row; composer mode only. */
 	attachments?: React.ReactNode;
-	/** The stats bar's effective-model report (LH-39's image gate). */
-	onModelChange?: (model: string | undefined) => void;
 }) {
 	const { isAtBottom, scrollToBottom, scrollRef } = useStickToBottomContext();
 	// Render-fresh bottom state (flicker round): the arrival block below reads
@@ -2432,7 +2419,6 @@ function DockOverlay({
 						pricing={pricing}
 						dictationSlot={dictationSlot}
 						chatId={chatId}
-						onModelChange={onModelChange}
 					/>
 					{/* The scroll-down disc (moved here from the Conversation,
 					    owner refinement round 2026-09-24): anchored to the BLOCK's
