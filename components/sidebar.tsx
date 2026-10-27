@@ -911,6 +911,21 @@ function SessionsSidebar() {
 						>
 							Export as Markdown…
 						</button>
+						{/* Repair (LH-40): compacts a chat that outgrew its model's
+						    real context window; the open chat adopts the result
+						    through record-changed. */}
+						<button
+							type="button"
+							data-testid="ctx-repair"
+							onClick={() => {
+								const chatId = ctxChatId;
+								setCtxChatId(null);
+								void fetch(`/api/chats/${chatId}/repair`, { method: "POST" }).catch(() => undefined);
+							}}
+							className="flex items-center rounded-lg px-2.5 py-1.5 text-left text-foreground transition-colors hover:bg-accent"
+						>
+							Repair this chat
+						</button>
 						<button
 							type="button"
 							data-testid="ctx-delete"

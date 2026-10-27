@@ -48,7 +48,8 @@ import { registerTurn, rememberTurnFailure, unregisterTurn } from "./turn-runs.t
 import { persistTurn, triggerExtraction, TurnPersistenceError } from "./turn-service.ts";
 import { hasProbeDone, danglingQuestionOf } from "../core/native-messages.ts";
 import { composeInstructions } from "../agent/teacher-agent.ts";
-import { ensureCompacted, kickCompaction, effectiveThresholdTokens } from "./compaction.ts";
+import { ensureCompacted, kickCompaction, effectiveThresholdTokens, holdCompactionGate } from "./compaction.ts";
+import { explainUnrecoverable, isContextOverflowMessage, recoverContext, recoveryAttempted, recoveryDeps } from "./context-recovery.ts";
 import { refreshConnectionCatalog } from "./model-catalog.ts";
 import { emit } from "../core/events.ts";
 import { settledTurnResponse } from "./turn-runs.ts";
@@ -166,6 +167,35 @@ function withContextWindow(spec: ResolvedModelSpec, windows: Record<string, numb
 }
 
 setJobRespawn((jobId) => void jobRunner.runJob(jobId));
+
+/**
+ * CONTEXT-OVERFLOW RECOVERY (LH-40, docs/context-recovery.md): the turn
+ * just persisted ended in a length rejection. Compact toward the window
+ * the provider enforces, under the compaction gate, then retry the turn
+ * ONCE as a continue. A retry that overflows again (the guard reads the
+ * record) or a record with nothing to drop gets a plain explanation.
+ */
+function recoverFromOverflow(
+	chatId: string,
+	conversation: NonNullable<ReturnType<typeof resolveConversationSpec>>,
+	buildAgent?: (opts: AgentBuildOptions & { teaching: boolean }) => TeachingAgent,
+): void {
+	const record = stores.chatStore.getChat(chatId);
+	if (!record || !isContextOverflowMessage(record.messages.at(-1))) return;
+	let engine: PiEngine;
+	try { engine = piEngineForSpec(conversation, true); } catch { return; }
+	const modelName = engine.model.name || engine.model.id;
+	if (recoveryAttempted(record.messages)) return explainUnrecoverable(stores.chatStore, chatId, modelName);
+	if (!connectionBackgroundAllowed(conversation.provider)) return;
+	const deps = recoveryDeps(stores.chatStore, record, engine, `This chat had grown too long for ${modelName}; I condensed the older part and continued.`);
+	void holdCompactionGate(chatId, () => recoverContext(deps, chatId))
+		?.then(async (outcome) => {
+			if (outcome === "unchanged") return explainUnrecoverable(stores.chatStore, chatId, modelName);
+			const res = await handleChatInput(chatId, { type: "continue" }, buildAgent);
+			await res.arrayBuffer().catch(() => undefined);
+		})
+		.catch((err) => console.error(`[chat ${chatId}] overflow recovery failed:`, err));
+}
 
 /** The route-facing entry: parse {chatId, input} and run one turn. */
 export async function handleChatRequest(
@@ -586,6 +616,9 @@ export async function handleChatInput(
 				// subsequent fetch reads the dismissal already in the record
 				// (the same ordering law as persistTurn itself).
 				applyParkedDismissal(stores.chatStore, chatId);
+				// OVERFLOW RECOVERY (LH-40): takes the compaction gate before
+				// endTurn, so nothing model-facing slips in ahead of the repair.
+				if (process.env.NODE_ENV !== "test" && !isAborted) recoverFromOverflow(chatId, conversation, buildAgent);
 				// LAST: a poller that sees not-in-flight must read an already-persisted
 				// record — endTurn only after persistTurn has done its job.
 				endTurn(chatId);
