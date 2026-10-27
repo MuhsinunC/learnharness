@@ -25,7 +25,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { PATHS } from "../../config.ts";
 
-export const SESSION_COOKIE = "lh_session";
+const SESSION_COOKIE = "lh_session";
 /** Stamped by proxy.ts on every request it lets through; client copies are stripped. */
 export const ACCESS_HEADER = "x-lh-access";
 export const MIN_PASSWORD_LENGTH = 8;
@@ -33,7 +33,7 @@ const SESSION_MS = 30 * 24 * 60 * 60 * 1000;
 // OWASP's scrypt alternative to N=2^17,p=1: the same work for 32 MiB.
 const KDF = { N: 2 ** 15, r: 8, p: 3, keylen: 32 } as const;
 
-export type Access = "local" | "session";
+type Access = "local" | "session";
 
 interface Session { id: string; expires: number }
 interface LoginRecord {
@@ -42,7 +42,7 @@ interface LoginRecord {
 	sessions: Session[];
 }
 
-export function loginFile(): string {
+function loginFile(): string {
 	return path.join(PATHS.data, "web-login.json");
 }
 
@@ -190,23 +190,25 @@ export function clientKey(headers: Headers): string {
 }
 
 const WINDOW_MS = 15 * 60 * 1000, PER_CLIENT = 5, GLOBAL = 30;
+/** The global bucket: trimmed header values never start with a space. */
+const ALL = " all";
 const failures = new Map<string, number[]>();
 function recent(key: string, now: number): number[] {
 	const list = (failures.get(key) ?? []).filter((t) => now - t < WINDOW_MS);
-	failures.set(key, list);
+	// Only clients with live failures keep an entry: forged keys cannot grow the map.
+	if (list.length) failures.set(key, list); else failures.delete(key);
 	return list;
 }
 
 /** Seconds until this client may try again, or 0. Checked before any hashing. */
 export function loginRetryAfter(key: string, now = Date.now()): number {
-	const mine = recent(key, now), all = recent("*", now);
+	const mine = recent(key, now), all = recent(ALL, now);
 	const blockedBy = mine.length >= PER_CLIENT ? mine[mine.length - PER_CLIENT] : all.length >= GLOBAL ? all[all.length - GLOBAL] : undefined;
 	return blockedBy === undefined ? 0 : Math.ceil((blockedBy + WINDOW_MS - now) / 1000);
 }
 
 export function recordLoginFailure(key: string, now = Date.now()): void {
-	recent(key, now).push(now);
-	recent("*", now).push(now);
+	for (const bucket of [key, ALL]) failures.set(bucket, [...recent(bucket, now), now]);
 }
 
 export function clearLoginFailures(key: string): void {
