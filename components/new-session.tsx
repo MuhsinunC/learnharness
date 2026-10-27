@@ -12,7 +12,8 @@ import { ClaudeCodeOffNotice, preSendRemedy, useModelSetup, selectedModelUnavail
 import { StatsBar } from "@/components/stats-bar";
 import { ChainTableOverlay } from "@/components/chain-table.tsx";
 import { ComposerActions, NodePickerControl } from "@/components/composer-actions";
-import { stashOpeningPrompt } from "@/components/opening-prompt";
+import { OPENING_PROMPT_FAILURE } from "@/components/opening-prompt";
+import { SessionStarter } from "@/components/start-session";
 import type { ChatSettings, GraphSnapshot } from "@/src/core";
 
 /** The draft's pick set (owner round 10): the SAME shape the home pick
@@ -34,20 +35,18 @@ export type DraftPick = { id: string; name: string; statement: string };
 const DOCK = "mx-auto w-full max-w-[46rem] px-4";
 
 /**
- * The draft's whole behavior as one pure seam: create the session (title =
- * the first message), persist the lifted pre-chat settings, stash the
- * opening text beside the navigation, and return the push target —
- * /chat/<id>. The chat page reads the stash and delivers it as turn 1.
- * The text never rides the URL: a long paste exceeds Node's header limit
- * and the window commits an empty document. Injected fetch so tests pin
- * the contract. Returns null on empty text; rethrows on transport failure
- * (the caller's busy flag resets).
+ * Create, safely hand over the full opening text, then return a short
+ * /chat/<id> target. Storage/creation failures leave the caller's draft
+ * intact. A per-composer starter reuses an already-created session on an
+ * unchanged retry. The server stamps settings at birth; no settings PUT.
  */
 export async function startDraftSession(
 	text: string,
 	fetchLike: typeof fetch,
 	mode?: "practice",
 	picks?: readonly DraftPick[],
+	starter = new SessionStarter(),
+	settingsIdentity?: string,
 ): Promise<string | null> {
 	const t = text.trim();
 	if (!t) return null;
@@ -55,20 +54,13 @@ export async function startDraftSession(
 	// from the pick bar creates its session WITH the graph context — the
 	// same contract as the home screen's practice send (the marker with
 	// [id] name: statement lines, target validation's truth set).
-	const res = await fetchLike("/api/chats", {
-		method: "POST",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(
-			mode === "practice"
-				? { title: t, kind: "practice", ...(picks && picks.length > 0 ? { graphContext: { propositions: picks } } : {}) }
-				: { title: t },
-		),
-	});
-	const { id } = (await res.json()) as { id: string };
-	// No settings PUT on create (per-session models, owner 2026-09-28):
-	// the SERVER stamps the newborn from the strong slot.
-	stashOpeningPrompt(id, t);
-	return `/chat/${id}`;
+	return starter.start(
+		mode === "practice"
+			? { title: t, kind: "practice", ...(picks && picks.length > 0 ? { graphContext: { propositions: picks } } : {}) }
+			: { title: t },
+		fetchLike,
+		settingsIdentity,
+	);
 }
 
 /** The pure shell (no router) — the render-test seam: the draft view's
@@ -81,6 +73,7 @@ export function DraftShell({
 	text,
 	onChange,
 	onSend,
+	startError = false,
 	setupCta,
 	mode = "teach",
 	picks = [],
@@ -92,6 +85,7 @@ export function DraftShell({
 	text: string;
 	onChange: (v: string) => void;
 	onSend: () => void;
+	startError?: boolean;
 	/** The practice draft (owner, 2026-10-04): ?mode=practice — the
 	 *  created session carries kind:"practice" and the copy changes
 	 *  (the practice agent opens; no probing). */
@@ -194,6 +188,7 @@ export function DraftShell({
 									)}
 									setup={setupCta}
 								/>
+								{startError && <p role="alert" className="pointer-events-auto mb-2 text-sm text-destructive">{OPENING_PROMPT_FAILURE}</p>}
 								<div className="pointer-events-auto overflow-hidden rounded-2xl border bg-card shadow-lg">
 									<Composer
 										busy={busy}
@@ -247,6 +242,9 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 		setText(v);
 	};
 	const [busy, setBusy] = useState(false);
+	const startingRef = useRef(false);
+	const starterRef = useRef(new SessionStarter());
+	const [startError, setStartError] = useState(false);
 	// THE PICK BAR (owner round 10): the draft's lifted pick set + the
 	// snapshot the standalone chain-table picker reads. Lazy — the graph
 	// is fetched on FIRST open only, then reused.
@@ -286,7 +284,7 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 
 	const send = useCallback(() => {
 		const draft = textRef.current.trim();
-		if (!draft || busy) return;
+		if (!draft || startingRef.current) return;
 		if (!configured) {
 			setSetupOpen(true);
 			return;
@@ -311,19 +309,27 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 			openModelPicker();
 			return; // The learner replaces it explicitly, then sends again.
 		}
+		startingRef.current = true;
 		setBusy(true);
-		void startDraftSession(draft, fetch, mode === "practice" ? "practice" : undefined, mode === "practice" ? picksRef.current : undefined)
+		setStartError(false);
+		void startDraftSession(draft, fetch, mode === "practice" ? "practice" : undefined, mode === "practice" ? picksRef.current : undefined,
+			starterRef.current, JSON.stringify(catalog?.slots.strong))
 			.then((target) => {
 				if (target) router.push(target);
-				else setBusy(false);
+				else { startingRef.current = false; setBusy(false); }
 			})
-			.catch(() => setBusy(false));
-	}, [busy, router, configured, remedy, zeroKeys, catalog]);
+			.catch(() => {
+				startingRef.current = false;
+				setBusy(false);
+				setStartError(true);
+			});
+	}, [router, configured, remedy, zeroKeys, catalog, mode]);
 
 	return (
 		<>
 			<DraftShell
 				busy={busy}
+				startError={startError}
 				text={text}
 				onChange={applyText}
 				onSend={send}

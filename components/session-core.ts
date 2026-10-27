@@ -180,6 +180,8 @@ function sameDetails(a: unknown, b: unknown): boolean {
 export interface SessionState {
 	messages: LhViewMessage[];
 	nativeMessages: LhMessage[];
+	/** Server-read history only; optimistic bubbles are not delivery proof. */
+	hasConfirmedConversation: boolean;
 	/** Completed conversation usage; null after compaction or before first usage. */
 	contextTokens: number | null;
 	status: SessionStatus;
@@ -299,6 +301,7 @@ export class SessionModel {
 		return {
 			messages: projectView(messages, live),
 			nativeMessages: messages,
+			hasConfirmedConversation: this.base.some(m => m.role === "user" || m.role === "assistant"),
 			contextTokens: measuredContextTokens(messages, this.incompleteUsageIds),
 			status: this.statusValue,
 			error: this.errorValue ?? providerError,
@@ -637,7 +640,7 @@ export class SessionModel {
 	 * POST + consume. Ready-gated: one turn per client at a time (the
 	 * server's 409 + identity retry covers the wake-race window).
 	 */
-	async send(input: ChatInput): Promise<boolean> {
+	async send(input: ChatInput, onAccepted?: () => void): Promise<boolean> {
 		const recovering = this.statusValue === "error";
 		if (!this.readyRef && !recovering) return false;
 		this.consumeAbort?.abort();
@@ -729,6 +732,8 @@ export class SessionModel {
 				throw new Error(message);
 			}
 			accepted = true;
+			// Opening-message handover ends at acceptance, not stream completion.
+			onAccepted?.();
 			// CONNECTION DIET B (owner, 2026-10-10 — parallel-session freeze
 			// postmortem): the POST acknowledges and closes; there is no stream
 			// on this response to consume. Attach through the SAME reattach wire
@@ -745,10 +750,10 @@ export class SessionModel {
 			return true;
 		} catch (err) {
 			if (this.consumeAbort !== controller || controller.signal.aborted) return accepted;
-			// Restore the question when acceptance failed or is unknown. Remove
-			// only THIS optimistic answer, never saved copies/newer live content.
-			// Other input kinds retain their existing optimistic presentation.
-			if (input.type === "answer") {
+			// Restore the question, or the new-session opening draft, when
+			// acceptance failed/is unknown. Other text sends keep their existing
+			// optimistic presentation; remove only THIS attempt's local entries.
+			if (input.type === "answer" || (input.type === "text" && onAccepted && !accepted)) {
 				const ids = new Set(optimistic.map(m => m.id));
 				this.mutate(() => {
 					this.tail = this.tail.filter(m => !ids.has(m.id));
@@ -757,9 +762,9 @@ export class SessionModel {
 			}
 			this.setError((err as Error).message);
 			this.setStatus("error");
-			// true only once the POST ack landed. A throw before that (the
-			// fetch, or !res.ok) leaves the message unsent — the caller keeps
-			// its opening-text stash and a reload can retry.
+			// true means we observed this POST's acknowledgment. false does
+			// NOT prove non-delivery: a network failure may hide acceptance.
+			// Opening-message callers restore a draft, never automatically retry.
 			return accepted;
 		}
 	}

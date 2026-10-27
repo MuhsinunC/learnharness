@@ -2,12 +2,26 @@ import React from "react";
 (globalThis as Record<string, unknown>).React = React;
 
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { ClaudeCodeOffNotice } from "../components/setup-cta.tsx";
 import { CLAUDE_CODE_OFF_REFUSAL } from "../src/core/settings.ts";
 import { DraftShell, startDraftSession } from "../components/new-session.tsx";
-import { clearOpeningPrompt, readOpeningPrompt } from "../components/opening-prompt.ts";
+import { clearOpeningPrompt, readOpeningPrompt, OPENING_PROMPT_FAILURE } from "../components/opening-prompt.ts";
+
+const originalStorage = Object.getOwnPropertyDescriptor(globalThis, "sessionStorage");
+beforeEach(() => {
+	const data = new Map<string, string>();
+	Object.defineProperty(globalThis, "sessionStorage", { configurable: true, value: {
+		getItem: (key: string) => data.get(key) ?? null,
+		setItem: (key: string, value: string) => { data.set(key, value); },
+		removeItem: (key: string) => { data.delete(key); },
+	} });
+});
+afterEach(() => {
+	if (originalStorage) Object.defineProperty(globalThis, "sessionStorage", originalStorage);
+	else Reflect.deleteProperty(globalThis, "sessionStorage");
+});
 
 /**
  * The sessionless draft view (/chat/new, owner 2026-09-13): "+ New session"
@@ -84,6 +98,12 @@ describe("startDraftSession — the create-on-send contract", () => {
 });
 
 describe("DraftShell — the sessionless surface", () => {
+	it("storage failure leaves the full draft editable beside the approved error", () => {
+		const html = renderToStaticMarkup(<DraftShell busy={false} text="keep all my text" onChange={() => {}} onSend={() => {}} startError />);
+		assert.ok(html.includes('role="alert"'));
+		assert.ok(html.includes(OPENING_PROMPT_FAILURE));
+		assert.match(html, /<textarea[^>]*>keep all my text<\/textarea>/);
+	});
 	it("renders the composer blob, the stats bar, and the fresh-chat empty state", () => {
 		const html = renderToStaticMarkup(
 			<DraftShell

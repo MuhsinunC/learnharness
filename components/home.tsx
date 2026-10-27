@@ -12,7 +12,8 @@ import { DictationBar, joinDictation, useDictation } from "@/components/dictatio
 import { useFieldCycle } from "@/components/field-cycle";
 import { SidebarToggle } from "@/components/sidebar";
 import { StatsBar } from "@/components/stats-bar";
-import { stashOpeningPrompt } from "@/components/opening-prompt";
+import { OPENING_PROMPT_FAILURE } from "@/components/opening-prompt";
+import { SessionStarter } from "@/components/start-session";
 import type { TurnUsage } from "@/src/core";
 
 /**
@@ -59,6 +60,9 @@ export function Home({
 		},
 	});
 	const [busy, setBusy] = useState(false);
+	const startingRef = useRef(false);
+	const starterRef = useRef(new SessionStarter());
+	const [startError, setStartError] = useState(false);
 	/* Run end focuses the topic input (owner, 2026-10-01): the hands are on
 	 * the keyboard from the stop. Falling edge only; this surface's only
 	 * dictation target IS this textarea, so no case-split is needed. */
@@ -108,7 +112,7 @@ export function Home({
 	};
 	const begin = async () => {
 		const t = topicRef.current.trim();
-		if (!t || busy) return;
+		if (!t || startingRef.current) return;
 		// Unconfigured: the send INTERCEPTS into the setup flow (the draft
 		// stays in the textarea; the learner sends it after Save).
 		if (!configured) {
@@ -136,32 +140,25 @@ export function Home({
 			openModelPicker();
 			return; // Preserve the draft and never create an orphan session.
 		}
+		startingRef.current = true;
 		setBusy(true);
+		setStartError(false);
 		try {
 			// The map context (owner, 2026-10-04): picks in EITHER mode ride
 			// the CREATION as graphContext — the server writes a
 			// graph-context marker as message[0] (a separate custom message
 			// before the learner's first user message, propositions + the
 			// chains among them); the prompt stays the learner's own words.
-			const res = await fetch("/api/chats", {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({
-					title: t,
-					...(mode === "practice" ? { kind: "practice" } : {}),
-					...(practiceProps.length > 0 ? { graphContext: { propositions: practiceProps } } : {}),
-				}),
-			});
-			const { id } = (await res.json()) as { id: string };
-			// No settings PUT on create (per-session models, owner
-			// 2026-09-28): the SERVER stamps the newborn from the strong
-			// slot — the same default this surface's model control edits.
-			// The opening text stays out of the URL (opening-prompt.ts):
-			// a long paste as ?prompt= is a 431 and a blank window.
-			stashOpeningPrompt(id, t);
-			router.push(`/chat/${id}`);
+			const target = await starterRef.current.start({
+				title: t,
+				...(mode === "practice" ? { kind: "practice" } : {}),
+				...(practiceProps.length > 0 ? { graphContext: { propositions: practiceProps } } : {}),
+			}, fetch, JSON.stringify(catalog?.slots.strong));
+			router.push(target);
 		} catch {
+			startingRef.current = false;
 			setBusy(false);
+			setStartError(true);
 		}
 	};
 
@@ -252,6 +249,7 @@ export function Home({
 							)
 						)}
 					/>
+					{startError && <p role="alert" className="mb-2 text-sm text-destructive">{OPENING_PROMPT_FAILURE}</p>}
 					<form
 						className="flex items-end gap-1.5 rounded-2xl border bg-card p-1.5 shadow-lg"
 					onSubmit={(e) => {
