@@ -20,7 +20,7 @@ import {
 	type VisualToolInput,
 } from "../../core/contracts.ts";
 import { registerJobAbort, unregisterJobAbort } from "./aborts.ts";
-import { authFailureText, modelLabel, providerAuthError, retryRejectedText, strongFallback, type ProviderAuthError } from "./auth-fallback.ts";
+import { isKeyRejectedError, isProviderAuthError, modelLabel, withStrongFallback } from "./auth-fallback.ts";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -111,7 +111,7 @@ export interface JobRunner {
  * semantics) and the usage tap (money channel — every model call folds into
  * JobRecord.usage as it completes). */
 interface LoopContext {
-	/** Fires when abortJob kills the run (or the time limit passes);
+	/** Fires when abortJob kills the run (or a job limit passes);
 	 * abortSignal is passed into every model call so the spend stops
 	 * mid-call, not at the next loop check. */
 	abortSignal: AbortSignal;
@@ -120,6 +120,8 @@ interface LoopContext {
 	chatId?: string;
 	/** Fold one model call's usage into the job record (progress write). */
 	onUsage: (step: UsageStepLike) => void;
+	/** Set the job's activity line; a no-op once the job left running. */
+	onActivity: (line: string) => void;
 }
 
 /** The kind→role table (model slots wave, 2026-09-20): which ModelRole's
@@ -131,19 +133,16 @@ const KIND_ROLE: Record<JobKind, ModelRole> = {
 	pdf: "pdfReader",
 };
 
-/** Wall-clock limit per job (LH-37): past it the loop is aborted and the
- *  job fails visibly, so no card or Background agents row spins forever. */
-const JOB_TIME_LIMIT_MS: Record<JobKind, number> = {
-	research: 20 * 60_000,
-	demo: 15 * 60_000,
-	visual: 15 * 60_000,
-	pdf: 15 * 60_000,
-};
+/** Job limits (LH-37): a job that starts or finishes no model call for
+ *  JOB_IDLE_LIMIT_MS, or runs past JOB_TIME_CAP_MS, is stopped and fails
+ *  visibly, so no card or Background agents row spins forever. */
+const JOB_IDLE_LIMIT_MS = 10 * 60_000;
+const JOB_TIME_CAP_MS = 60 * 60_000;
 
-/** e2e runs (LH_E2E=1) may shorten the limit to prove the timeout path. */
-function jobTimeLimitMs(kind: JobKind): number {
-	const override = process.env.LH_E2E === "1" ? Number(process.env.LH_E2E_JOB_TIME_LIMIT_MS) : NaN;
-	return override > 0 ? override : JOB_TIME_LIMIT_MS[kind];
+/** e2e runs (LH_E2E=1) may shorten either limit to prove the stop path. */
+function jobLimitMs(fallback: number, override: string | undefined): number {
+	const ms = process.env.LH_E2E === "1" ? Number(override) : NaN;
+	return ms > 0 ? ms : fallback;
 }
 
 type JobResult = ResearchResult | DemoResult | VisualResult | PdfResult;
@@ -155,7 +154,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 	 * then writes through the job store so the poll sees progress). */
 	const usageTotals = new Map<string, JobUsage>();
 
-	function makeLoopContext(jobId: string, engine: PiEngine, abortSignal: AbortSignal): LoopContext {
+	function makeLoopContext(jobId: string, engine: PiEngine, abortSignal: AbortSignal, progress: () => void): LoopContext {
 		const chatId = jobStore.getJob(jobId)?.chatId;
 		// Provider-qualified stamp: the engine's actual model — the only
 		// thing that ran (BYOK: no config-pin fallback stamps exist).
@@ -164,9 +163,13 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 			abortSignal,
 			chatId,
 			onUsage: (step) => {
+				progress();
 				const next = accumulateJobUsage(usageTotals.get(jobId), model, step);
 				usageTotals.set(jobId, next);
 				jobStore.updateJob(jobId, { usage: next }); // merge patch — status untouched
+			},
+			onActivity: (line) => {
+				if (stillRunning(jobId)) jobStore.updateJob(jobId, { activity: line });
 			},
 		};
 	}
@@ -299,55 +302,70 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 		}
 		// Real-kill wiring (2026-09 abort semantics): one controller spans the
 		// job's attempts. The abort endpoint fires it (aborts.ts registry), and
-		// so does the time limit; its signal rides into every model call.
+		// so do the job limits; its signal rides into every model call.
 		const controller = new AbortController();
 		registerJobAbort(jobId, controller);
-		const limitMs = jobTimeLimitMs(job.kind);
-		let timedOut = false;
-		const timer = setTimeout(() => {
-			timedOut = true;
-			controller.abort();
-		}, limitMs);
-		// One run on one engine. Its model calls are watched for a provider
-		// auth rejection (401/403, "invalid api key"), the one failure a
-		// different model can get past.
-		const attempt = async (attemptEngine: PiEngine): Promise<{ result?: JobResult; authError?: ProviderAuthError }> => {
-			let authError: ProviderAuthError | undefined;
-			const watched: PiEngine = {
-				...attemptEngine,
-				streamFn: (model, context, options) => {
-					const stream = attemptEngine.streamFn(model, context, options);
-					void Promise.resolve(stream)
-						.then((s) => s.result())
-						.then((message) => {
-							if (message.stopReason === "error") authError ??= providerAuthError(message.errorMessage);
-						}, () => {});
-					return stream;
-				},
-			};
-			const result = await run(jobId, watched, input, makeLoopContext(jobId, attemptEngine, controller.signal));
-			// Let the watchers of already-settled calls run before reading.
-			await new Promise((resolve) => setImmediate(resolve));
-			return { result, authError };
+		const idleMs = jobLimitMs(JOB_IDLE_LIMIT_MS, process.env.LH_E2E_JOB_IDLE_LIMIT_MS);
+		const capMs = jobLimitMs(JOB_TIME_CAP_MS, process.env.LH_E2E_JOB_TIME_CAP_MS);
+		const startedAt = Date.now();
+		let lastProgress = startedAt;
+		const progress = () => {
+			lastProgress = Date.now();
 		};
-		try {
-			let outcome = await attempt(engine);
-			let authFailure: string | undefined;
-			if (outcome.authError && !timedOut && stillRunning(jobId)) {
-				const fallback = strongFallback(tier, engine, deps);
-				if (typeof fallback === "string") {
-					authFailure = authFailureText(tier, engine, outcome.authError, fallback);
-				} else {
-					console.info(`[job ${jobId}] ${engine.model.provider}:${engine.model.id} rejected — retrying on ${fallback.model.provider}:${fallback.model.id}`);
-					jobStore.updateJob(jobId, { error: undefined, activity: `retrying on ${modelLabel(fallback)}` });
-					const retry = await attempt(fallback);
-					if (retry.authError)
-						authFailure = authFailureText(tier, engine, outcome.authError, retryRejectedText(fallback, retry.authError));
-					outcome = retry;
+		// The limits are terminal: the job fails the moment one passes, even
+		// while a step that ignores the abort signal (a hung headless run)
+		// keeps the loop alive. That loop unwinds in the background; the
+		// stillRunning guards drop whatever it produces late.
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const limitHit = new Promise<{ limit: string }>((resolve) => {
+			const check = () => {
+				const idleLeft = lastProgress + idleMs - Date.now();
+				const capLeft = startedAt + capMs - Date.now();
+				if (idleLeft > 0 && capLeft > 0) {
+					timer = setTimeout(check, Math.min(idleLeft, capLeft));
+					return;
 				}
-			}
-			if (timedOut) await refuse(`The ${job.kind} job timed out after ${formatLimit(limitMs)} and was stopped.`);
-			else if (authFailure) await refuse(authFailure, true);
+				controller.abort();
+				resolve({
+					limit:
+						idleLeft <= 0
+							? `The ${job.kind} job made no progress for ${formatLimit(idleMs)} and was stopped.`
+							: `The ${job.kind} job ran past its ${formatLimit(capMs)} limit and was stopped.`,
+				});
+			};
+			check();
+		});
+		// Progress = a model call starting (here) or finishing (onUsage).
+		const tracked = (e: PiEngine): PiEngine => ({
+			...e,
+			streamFn: (...args) => {
+				progress();
+				return e.streamFn(...args);
+			},
+		});
+		// One run per engine; a rejected key reruns once on the Strong slot
+		// (auth-fallback.ts). The runners rethrow only auth failures.
+		const work = withStrongFallback(
+			tier,
+			engine,
+			deps,
+			(e) => run(jobId, tracked(e), input, makeLoopContext(jobId, e, controller.signal, progress)),
+			(fallback) => {
+				console.info(`[job ${jobId}] ${engine.model.provider}:${engine.model.id} rejected — retrying on ${fallback.model.provider}:${fallback.model.id}`);
+				if (stillRunning(jobId)) jobStore.updateJob(jobId, { activity: `retrying on ${modelLabel(fallback)}` });
+			},
+		).then(
+			(result) => ({ result }),
+			(err: unknown) => {
+				if (isKeyRejectedError(err)) return { keyRejected: err.message };
+				throw err;
+			},
+		);
+		try {
+			const outcome: { result?: JobResult; keyRejected?: string; limit?: string } = await Promise.race([work, limitHit]);
+			clearTimeout(timer);
+			if (outcome.limit) await refuse(outcome.limit);
+			else if (outcome.keyRejected) await refuse(outcome.keyRejected, true);
 			else if (outcome.result) await finishJob(jobId, outcome.result);
 		} finally {
 			clearTimeout(timer);
@@ -473,7 +491,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 					if (typeof input?.url === "string" && (toolName === "web_fetch" || toolName === "web_fetch_pdf")) {
 						fetchedUrls.push(input.url);
 					}
-					jobStore.updateJob(jobId, { activity: activityLine(toolName, input) });
+					loop.onActivity(activityLine(toolName, input));
 				},
 			});
 			if (!brief.trim()) throw new Error("the researcher produced no text");
@@ -481,10 +499,11 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 			return research;
 		} catch (err) {
 			// Real-kill abort (2026-09): the abort path flipped the record and
-			// queued the abort steer (or runJob's time limit fired and fails
+			// queued the abort steer (or a job limit passed and runJob failed
 			// the job itself) — unwind silently, keep the usage folded so
 			// far (flushed by runJob's finally).
 			if (loop.abortSignal.aborted) return;
+			if (isProviderAuthError(err)) throw err; // runJob's auth fallback decides
 			const reason = err instanceof Error ? err.message : String(err);
 			if (stillRunning(jobId)) jobStore.updateJob(jobId, { error: reason });
 			return { brief: `Research failed: ${reason}`, sources: [] };
@@ -518,7 +537,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 					abortSignal: loop.abortSignal,
 					chatId: loop.chatId,
 					onUsage: (usage) => loop.onUsage(piUsageToStep(usage)),
-					onActivity: (line) => jobStore.updateJob(jobId, { activity: line }),
+					onActivity: loop.onActivity,
 				},
 			);
 			if (isDemoFailure(result) && stillRunning(jobId))
@@ -526,6 +545,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 			return result;
 		} catch (err) {
 			if (loop.abortSignal.aborted) return;
+			if (isProviderAuthError(err)) throw err;
 			const reason = err instanceof Error ? err.message : String(err);
 			if (stillRunning(jobId)) jobStore.updateJob(jobId, { error: reason });
 			return { title, html: "", tested: true, notes: `FAILED: ${reason}` };
@@ -554,7 +574,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 					abortSignal: loop.abortSignal,
 					chatId: loop.chatId,
 					onUsage: (usage) => loop.onUsage(piUsageToStep(usage)),
-					onActivity: (line) => jobStore.updateJob(jobId, { activity: line }),
+					onActivity: loop.onActivity,
 				},
 			);
 			if (isVisualFailure(result) && stillRunning(jobId))
@@ -562,6 +582,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 			return result;
 		} catch (err) {
 			if (loop.abortSignal.aborted) return;
+			if (isProviderAuthError(err)) throw err;
 			const reason = err instanceof Error ? err.message : String(err);
 			if (stillRunning(jobId)) jobStore.updateJob(jobId, { error: reason });
 			return { svg: "", notes: `FAILED: ${reason}` };
@@ -593,7 +614,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 				abortSignal: loop.abortSignal,
 				chatId: loop.chatId,
 				onUsage: (usage) => loop.onUsage(piUsageToStep(usage)),
-				onActivity: (line) => jobStore.updateJob(jobId, { activity: line }),
+				onActivity: loop.onActivity,
 			},
 			);
 			if (isPdfFailure(result) && stillRunning(jobId))
@@ -601,6 +622,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 			return result;
 		} catch (err) {
 			if (loop.abortSignal.aborted) return;
+			if (isProviderAuthError(err)) throw err;
 			const reason = err instanceof Error ? err.message : String(err);
 			if (stillRunning(jobId)) jobStore.updateJob(jobId, { error: reason });
 			return { path, question, brief: `PDF failed: ${reason}`, pagesRead: [], pagesConsulted: [] };

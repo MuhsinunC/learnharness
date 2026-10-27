@@ -11,26 +11,43 @@ import type { ModelSlotName, ProviderKeyMissing } from "../../core/settings.ts";
  * the job runner and the extraction pipeline.
  */
 
-/** A model call the provider refused on credentials. */
-export interface ProviderAuthError {
-	status?: number;
-	/** The provider's own message, unwrapped from its JSON body. */
-	detail: string;
+/** A model call the provider refused on credentials. `message` stays the
+ *  provider's raw text; the parsed status and detail ride alongside. Branded
+ *  by name (isProviderAuthError): Next dev may load this module twice. */
+export class ProviderAuthError extends Error {
+	constructor(
+		message: string,
+		readonly status: number | undefined,
+		/** The provider's own message, unwrapped from its JSON body. */
+		readonly detail: string,
+	) {
+		super(message);
+		this.name = "ProviderAuthError";
+	}
 }
 
-const AUTH_TEXT = /invalid[ _-]?api[ _-]?key|incorrect api key|check the api[ _-]?key|authentication_error|unauthori[sz]ed/i;
+export function isProviderAuthError(err: unknown): err is ProviderAuthError {
+	return err instanceof Error && err.name === "ProviderAuthError";
+}
+
+/** Credential wording: OpenAI's invalid_api_key, Anthropic's
+ *  authentication_error, Baseten's "check the api-key", and similar. */
+const AUTH_TEXT = /api[ _-]?key|authenticat|unauthori[sz]ed|invalid[ _-]?token|credential|permission to use this key/i;
 
 /**
  * Classify a failed call's errorMessage. pi-ai formats HTTP failures as
  * `<status> <sdk message>` or `<status>: <body>` (utils/error-body.js), e.g.
  * Baseten's bad key: `403 "please check the api-key you provided"`. The
- * status survives only inside that string.
+ * status survives only inside that string. A 401 is always credentials; a
+ * 403 (or 400, or no status) only with credential wording, because
+ * providers also send 403 for moderation, region and model access.
  */
 export function providerAuthError(message: string | undefined): ProviderAuthError | undefined {
 	if (!message) return undefined;
 	const match = /^(\d{3})(?::\s*|\s+)/.exec(message);
 	const status = match ? Number(match[1]) : undefined;
-	if (status !== 401 && status !== 403 && !AUTH_TEXT.test(message)) return undefined;
+	const auth = status === 401 || ((status === undefined || status === 400 || status === 403) && AUTH_TEXT.test(message));
+	if (!auth) return undefined;
 	const rest = match ? message.slice(match[0].length) : message;
 	let detail = rest;
 	try {
@@ -41,7 +58,12 @@ export function providerAuthError(message: string | undefined): ProviderAuthErro
 	} catch {
 		// Not JSON: keep the text as the provider sent it.
 	}
-	return { status, detail: detail.slice(0, 300) };
+	return new ProviderAuthError(message, status, detail.slice(0, 300));
+}
+
+/** What a failed model call throws: the typed auth error, else a plain Error. */
+export function modelCallError(message: string): Error {
+	return providerAuthError(message) ?? new Error(message);
 }
 
 function describeAuthError(error: ProviderAuthError): string {
@@ -108,4 +130,44 @@ export function strongFallback(tier: ModelSlotName, failed: PiEngine, deps: Fall
 	if (deps.backgroundAllowed && !deps.backgroundAllowed(strong.model.provider))
 		return `Your Strong model (${modelLabel(strong)}) could run this instead, but background use is off for that sign-in. Turn on background use for it in Settings → Providers, or pick another ${SLOT_LABEL[tier]} model.`;
 	return strong;
+}
+
+/** The learner-readable end of an auth failure (authFailureText): only a
+ *  settings change can fix it. Branded by name, like ProviderAuthError. */
+export class KeyRejectedError extends Error {
+	constructor(message: string, options?: { cause?: unknown }) {
+		super(message, options);
+		this.name = "KeyRejectedError";
+	}
+}
+
+export function isKeyRejectedError(err: unknown): err is KeyRejectedError {
+	return err instanceof Error && err.name === "KeyRejectedError";
+}
+
+/** The one auth-fallback policy (job runner and extraction): run `call` on
+ *  `engine`; when it throws a ProviderAuthError, rerun it once on the Strong
+ *  slot's engine. No usable fallback, or a second rejection, throws a
+ *  KeyRejectedError; every other failure propagates untouched. */
+export async function withStrongFallback<T>(
+	tier: ModelSlotName,
+	engine: PiEngine,
+	deps: FallbackDeps,
+	call: (engine: PiEngine) => Promise<T>,
+	onFallback?: (fallback: PiEngine) => void,
+): Promise<T> {
+	try {
+		return await call(engine);
+	} catch (err) {
+		if (!isProviderAuthError(err)) throw err;
+		const fallback = strongFallback(tier, engine, deps);
+		if (typeof fallback === "string") throw new KeyRejectedError(authFailureText(tier, engine, err, fallback), { cause: err });
+		onFallback?.(fallback);
+		try {
+			return await call(fallback);
+		} catch (retryErr) {
+			if (!isProviderAuthError(retryErr)) throw retryErr;
+			throw new KeyRejectedError(authFailureText(tier, engine, err, retryRejectedText(fallback, retryErr)), { cause: retryErr });
+		}
+	}
 }

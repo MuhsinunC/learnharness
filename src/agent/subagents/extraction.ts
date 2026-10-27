@@ -15,7 +15,7 @@ import {
 import type { PiEngine } from "../models.ts";
 import { runSubagent } from "./pi-run.ts";
 import { withBgLlmSlot } from "./bg-llm-semaphore.ts";
-import { authFailureText, providerAuthError, retryRejectedText, strongFallback } from "./auth-fallback.ts";
+import { withStrongFallback } from "./auth-fallback.ts";
 import type {
 	AuditVerdicts,
 	CallUsage,
@@ -665,8 +665,9 @@ interface LhExtractionGlobal {
 	 *  process-wide. globalThis for the same module-instance reason as
 	 *  the run registries. */
 	__lhAuditLock?: { tail: Promise<void> };
-	/** The last failure per source (LH-37): a session's failed runs were
-	 *  only logged; the coverage block now shows this. A clean run clears it. */
+	/** The last failure per session (LH-37): a session's failed runs were
+	 *  only logged; the coverage block now shows this. A clean or no-op run
+	 *  and the session's deletion clear it. */
 	__lhExtractionFailures?: Map<string, string>;
 	/** The EXTRACT SEMAPHORE (owner, 2026-09-28): 3 concurrent extractor
 	 *  calls process-wide — the provider-facing rate stance (the import
@@ -692,9 +693,14 @@ function failures(): Map<string, string> {
 	return (g.__lhExtractionFailures ??= new Map());
 }
 
-/** The source's last failed run, learner-readable; undefined after a clean run. */
-export function extractionFailure(sourceId: string): string | undefined {
-	return failures().get(sourceId);
+/** The session's last failed run, learner-readable; undefined after a clean run. */
+export function extractionFailure(chatId: string): string | undefined {
+	return failures().get(chatId);
+}
+
+/** Forget a deleted session's failure (deleteChatSession). */
+export function clearExtractionFailure(chatId: string): void {
+	failures().delete(chatId);
 }
 
 /** In-flight pipeline runs (oldest first) — the /api/graph/status payload. */
@@ -815,28 +821,14 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 	// an honest refusal.
 	const stageEngine = (role: ModelRole, override?: PiEngine): PiEngine | undefined =>
 		override ?? deps.engineFor?.(role);
-	/** One stage call on its engine (LH-37): when the provider rejects the
-	 *  key, rerun it once on the Strong slot's engine (the job runner's
-	 *  gates); otherwise fail with the learner-readable text. */
-	async function withAuthFallback<T>(role: ModelRole, override: PiEngine | undefined, call: (engine: PiEngine | undefined) => Promise<T>): Promise<T> {
+	/** One stage call on its engine (LH-37): a rejected key reruns once on
+	 *  the Strong slot's engine, the job runner's policy (auth-fallback.ts). */
+	function withAuthFallback<T>(role: ModelRole, override: PiEngine | undefined, call: (engine: PiEngine | undefined) => Promise<T>): Promise<T> {
 		const engine = stageEngine(role, override);
-		try {
-			return await call(engine);
-		} catch (err) {
-			const authError = err instanceof Error && err.name !== "AbortError" ? providerAuthError(err.message) : undefined;
-			if (!authError || !engine) throw err;
-			const tier = ROLE_SLOT[role];
-			const fallback = strongFallback(tier, engine, deps);
-			if (typeof fallback === "string") throw new Error(authFailureText(tier, engine, authError, fallback), { cause: err });
-			console.info(`[extraction] ${role} ${engine.model.provider}:${engine.model.id} rejected — retrying on ${fallback.model.provider}:${fallback.model.id}`);
-			try {
-				return await call(fallback);
-			} catch (retryErr) {
-				const retryAuth = retryErr instanceof Error && retryErr.name !== "AbortError" ? providerAuthError(retryErr.message) : undefined;
-				if (!retryAuth) throw retryErr;
-				throw new Error(authFailureText(tier, engine, authError, retryRejectedText(fallback, retryAuth)), { cause: retryErr });
-			}
-		}
+		if (!engine) return call(engine);
+		return withStrongFallback(ROLE_SLOT[role], engine, deps, call, (fallback) =>
+			console.info(`[extraction] ${role} ${engine.model.provider}:${engine.model.id} rejected — retrying on ${fallback.model.provider}:${fallback.model.id}`),
+		);
 	}
 	/** The per-need refusal guard: which slot tiers the pipeline's stages
 	 *  found unset (test values count as configured — they ARE engines),
@@ -1116,7 +1108,6 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 		const stats: EmissionStats = { nodes: 0, chains: 0 };
 		let aborted = false;
 		let failed = 0;
-		let firstFailure: string | undefined;
 		for (const result of settled) {
 			if (result.status === "fulfilled") {
 				stats.nodes += result.value.nodes;
@@ -1131,7 +1122,6 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 			if (err instanceof Error && err.name === "AbortError") aborted = true;
 			else {
 				failed++;
-				firstFailure ??= err instanceof Error ? err.message : String(err);
 				console.error(`[extraction ${sourceId}] job failed (isolated):`, err);
 			}
 		}
@@ -1139,10 +1129,8 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 			console.info(
 				`[extraction ${sourceId}] aborted — merged chunks keep their coverage, the rest stay uncovered for the next run`,
 			);
-		if (failed > 0) {
-			failures().set(sourceId, firstFailure!);
+		if (failed > 0)
 			console.error(`[extraction ${sourceId}] ${failed} job(s) failed; successful jobs still merged`);
-		} else if (!aborted) failures().delete(sourceId);
 		return stats;
 	}
 
@@ -1169,6 +1157,7 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 			const failedOutputCalls = failedOutputCallIds(record.messages);
 			if (covered.uncovered.length === 0) {
 				console.info(`[extraction ${chatId}] nothing uncovered — no-op`);
+				failures().delete(chatId);
 				return { nodes: 0, chains: 0 };
 			}
 			const chunkTokens = deps.getChunkTokens?.() ?? FACTORY_SETTINGS.graph.extractionChunkTokens;
@@ -1265,6 +1254,13 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 				}
 			}
 			const stats = aggregateJobs(chatId, settled);
+			// The coverage block's failure line: the first isolated failure;
+			// a clean run clears it, an aborted one leaves it.
+			const failure = settled.find(
+				(r): r is PromiseRejectedResult => r.status === "rejected" && !(r.reason instanceof Error && r.reason.name === "AbortError"),
+			);
+			if (failure) failures().set(chatId, failure.reason instanceof Error ? failure.reason.message : String(failure.reason));
+			else if (settled.every((r) => r.status === "fulfilled")) failures().delete(chatId);
 			console.info(
 				`[extraction ${chatId}] merged: ${stats.nodes} nodes, ${stats.chains ?? 0} chains ` +
 					`(${Math.round(performance.now() - t0)}ms total, ${batches.length} batch job(s))`,
