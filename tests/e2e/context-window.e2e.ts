@@ -97,6 +97,23 @@ function writeDiskWindow(pair: string, tokens: number): void {
 	fs.writeFileSync(file, JSON.stringify(record, null, "\t"));
 }
 
+/** Click `selector`, re-querying it when React swapped the node out
+ *  between the query and the click (hydration after a slow first
+ *  compile, or a field remounting after a save). Only that error retries:
+ *  it is thrown before any click is dispatched. */
+async function click(selector: string): Promise<void> {
+	for (let attempt = 0; ; attempt++) {
+		try {
+			await page.waitForSelector(selector, { timeout: 60_000 });
+			await page.click(selector);
+			return;
+		} catch (err) {
+			if (attempt >= 20 || !/detached/i.test(String(err))) throw err;
+			await new Promise((r) => setTimeout(r, 250));
+		}
+	}
+}
+
 async function openAgentSettings(): Promise<void> {
 	await page.goto(server.url, { waitUntil: "domcontentloaded", timeout: 180_000 });
 	// Clicks before hydration land on inert markup: retry until it opens.
@@ -104,7 +121,7 @@ async function openAgentSettings(): Promise<void> {
 		await page.click('[data-testid="settings-entry"]');
 		return page.waitForSelector('[data-testid="settings-nav-agent"]', { timeout: 2000 });
 	}, "the settings dialog to open", 180_000, 500);
-	await page.click('[data-testid="settings-nav-agent"]');
+	await click('[data-testid="settings-nav-agent"]');
 	await page.waitForSelector('[data-testid="group-context"]', { timeout: 60_000 });
 }
 
@@ -130,8 +147,7 @@ async function typeWindow(pair: string, value: string, commit: "enter" | "blur")
  *  click on the Context group's corner (the field commits on blur). */
 async function typeIn(container: string, value: string, commit: "enter" | "blur"): Promise<void> {
 	const input = `${container} [data-testid="input-context-window"]`;
-	await page.waitForSelector(input, { timeout: 60_000 });
-	await page.click(input);
+	await click(input);
 	await page.keyboard.press("End");
 	for (let i = 0; i < 12; i++) await page.keyboard.press("Backspace");
 	await page.type(input, value);
@@ -160,9 +176,8 @@ async function footerReads(denominator: string): Promise<void> {
 }
 
 async function pickStrong(id: string): Promise<void> {
-	await page.click('[data-testid="slot-model-strong"]');
-	await page.waitForSelector(`[data-testid="model-option-${id}"]`);
-	await page.click(`[data-testid="model-option-${id}"]`);
+	await click('[data-testid="slot-model-strong"]');
+	await click(`[data-testid="model-option-${id}"]`);
 	await until(() => diskSettings().models?.strong?.model?.id === id, `strong slot = ${id}`);
 }
 
@@ -417,7 +432,7 @@ test("(g) the composer's model picker edits a model that is in no slot", async (
 		}, "the composer model menu to open", 180_000, 500);
 	await openMenu();
 	await page.waitForSelector('[data-testid="model-option-stub-d"]', { timeout: 60_000 });
-	await page.click('[data-testid="model-option-stub-d"]');
+	await click('[data-testid="model-option-stub-d"]');
 	await until(async () => (await server.json<{ settings?: { model?: { id: string } } }>(`/api/chats/${id}`)).settings?.model?.id === "stub-d", "the session to run stub-d");
 	await footerReads("64k");
 
