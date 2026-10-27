@@ -20,6 +20,7 @@
 import { clampThinkingLevel, getSupportedThinkingLevels, type Api, type Model } from "@earendil-works/pi-ai";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { piModels } from "../agent/models.ts";
+import { e2eProviders } from "../agent/e2e-providers.ts";
 import { chatGPTConnected, chatGPTModel, chatGPTModels, refreshChatGPTModels } from "../agent/chatgpt-bridge.ts";
 import { NATIVE_SUBSCRIPTIONS } from "../core/contracts/subscriptions.ts";
 import { nativeSubscriptionId, nativeSubscriptionConnected, nativeSubscriptionModel, nativeSubscriptionModels, refreshSubscriptionModels } from "../agent/subscription-bridge.ts";
@@ -150,6 +151,9 @@ export function catalogProviders(): CatalogProvider[] {
 	}
 	providers.push({ id: "chatgpt", envVar: "", keyPresent: chatGPTConnected() });
 	providers.push(...NATIVE_SUBSCRIPTIONS.map((p) => ({ id: p.logicalId, envVar: "", keyPresent: nativeSubscriptionConnected(p.providerId) })));
+	// The e2e stub providers (LH_E2E=1 only; empty otherwise) federate
+	// like keyed providers, so the UI's catalog reaches their models.
+	providers.push(...e2eProviders().map((p) => ({ id: p.id, envVar: "", keyPresent: true })));
 	return providers.sort((a, b) => a.id.localeCompare(b.id));
 }
 
