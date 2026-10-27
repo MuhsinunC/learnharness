@@ -47,9 +47,9 @@ import { applyParkedDismissal } from "./dismissal-park.ts";
 import { registerTurn, rememberTurnFailure, unregisterTurn } from "./turn-runs.ts";
 import { persistTurn, triggerExtraction, TurnPersistenceError } from "./turn-service.ts";
 import { hasProbeDone, danglingQuestionOf } from "../core/native-messages.ts";
-import { composeInstructions } from "../agent/teacher-agent.ts";
-import { ensureCompacted, kickCompaction, effectiveThresholdTokens, holdCompactionGate } from "./compaction.ts";
-import { explainUnrecoverable, isContextOverflowMessage, recoverContext, recoveryAttempted, recoveryDeps } from "./context-recovery.ts";
+import { awaitCompaction, ensureCompacted, kickCompaction, effectiveThresholdTokens, holdCompactionGate, keepRecentTokensFor, sessionKind, systemPromptTokensFor } from "./compaction.ts";
+import { contextWindowFor, explainOverflow, learnStatedLimit, overflowExplanation, recoverContext, recoveryAttempted, recoveryDeps } from "./context-recovery.ts";
+import { contextOverflowState } from "../core/context-overflow.ts";
 import { refreshConnectionCatalog } from "./model-catalog.ts";
 import { emit } from "../core/events.ts";
 import { settledTurnResponse } from "./turn-runs.ts";
@@ -182,21 +182,38 @@ function recoverFromOverflow(
 	buildAgent?: (opts: AgentBuildOptions & { teaching: boolean }) => TeachingAgent,
 ): void {
 	const record = stores.chatStore.getChat(chatId);
-	if (!record || !isContextOverflowMessage(record.messages.at(-1))) return;
+	if (!record || contextOverflowState(record.messages.at(-1)) !== "repairable") return;
+	// Every path ends in a learner-visible outcome: a recovered reply or a
+	// plain explanation (Repair stays offered unless nothing can help).
+	const explain = (text: (model: string) => string, model: string, unrecoverable = false) =>
+		explainOverflow(stores.chatStore, chatId, text(model), unrecoverable);
 	let engine: PiEngine;
-	try { engine = piEngineForSpec(conversation, true); } catch { return; }
+	try { engine = piEngineForSpec(conversation, true); } catch { return explain(overflowExplanation.notCondensed, conversation.id); }
 	const modelName = engine.model.name || engine.model.id;
-	if (recoveryAttempted(record.messages)) return explainUnrecoverable(stores.chatStore, chatId, modelName);
-	if (!connectionBackgroundAllowed(conversation.provider)) return;
+	learnStatedLimit(engine, record.messages);
+	if (recoveryAttempted(record.messages)) return explain(overflowExplanation.stillTooLong, modelName, true);
+	if (!connectionBackgroundAllowed(conversation.provider)) return explain(overflowExplanation.backgroundOff, modelName);
 	const deps = recoveryDeps(stores.chatStore, record, engine, `This chat had grown too long for ${modelName}; I condensed the older part and continued.`);
-	void holdCompactionGate(chatId, () => recoverContext(deps, chatId))
-		?.then(async (outcome) => {
-			if (outcome === "unchanged") return explainUnrecoverable(stores.chatStore, chatId, modelName);
-			const res = await handleChatInput(chatId, { type: "continue" }, buildAgent);
-			await res.arrayBuffer().catch(() => undefined);
-		})
-		.catch((err) => console.error(`[chat ${chatId}] overflow recovery failed:`, err));
+	const recover = () => holdCompactionGate(chatId, () => recoverContext(deps, chatId));
+	void (async () => {
+		// A compaction already holding the gate: wait for it (bounded), once.
+		let run = recover();
+		if (!run) {
+			await Promise.race([awaitCompaction(chatId), new Promise((resolve) => setTimeout(resolve, GATE_WAIT_MS))]);
+			run = recover();
+		}
+		if (!run) return explain(overflowExplanation.notCondensed, modelName);
+		if ((await run) === "unchanged") return explain(overflowExplanation.stillTooLong, modelName, true);
+		const res = await handleChatInput(chatId, { type: "continue" }, buildAgent);
+		await res.arrayBuffer().catch(() => undefined);
+	})().catch((err) => {
+		console.error(`[chat ${chatId}] overflow recovery failed:`, err);
+		explain(overflowExplanation.notCondensed, modelName);
+	});
 }
+
+/** How long overflow recovery waits for a compaction already holding the gate. */
+const GATE_WAIT_MS = 30_000;
 
 /** The route-facing entry: parse {chatId, input} and run one turn. */
 export async function handleChatRequest(
@@ -307,18 +324,18 @@ export async function handleChatInput(
 	try { conversationEngine = piEngineForSpec(conversation, () => callPurpose.background, lifecycle); }
 	catch { return Response.json({ error: conversation.provider === "chatgpt" ? chatGPTStreamError("model catalog") : isSubscriptionProvider(conversation.provider) ? nativeSubscriptionError(conversation.provider, "model catalog") : "The selected model is unavailable." }, { status: 503 }); }
 	const modelIdForCompaction = `${conversationEngine.model.provider}:${conversationEngine.model.id}`;
+	// The window seam (LH-40): never above a limit the provider stated.
+	const compactionWindow = contextWindowFor(conversationEngine);
 	await ensureCompacted(
 		{
 			chatStore: stores.chatStore,
 			engine: piEngineForSpec(conversation, true),
 			canStart: () => connectionBackgroundAllowed(conversation.provider),
 			modelId: modelIdForCompaction,
-			kind: record.kind === "practice" ? "practice" : hasProbeDone(record.messages) ? "teach" : "probe",
-			thresholdTokens: effectiveThresholdTokens(
-				effective.compaction?.thresholdTokens,
-				conversationEngine.model.contextWindow,
-			),
-			systemPromptTokens: Math.ceil(composeInstructions(record.kind === "practice" ? "practice" : "teacher").length / 4),
+			kind: sessionKind(record),
+			thresholdTokens: effectiveThresholdTokens(effective.compaction?.thresholdTokens, compactionWindow),
+			keepRecentTokens: keepRecentTokensFor(compactionWindow),
+			systemPromptTokens: systemPromptTokensFor(sessionKind(record)),
 		},
 		chatId,
 	);
@@ -691,12 +708,10 @@ export async function handleChatInput(
 							engine: kickEngine,
 							canStart: () => connectionBackgroundAllowed(spec.provider),
 							modelId: kickModelId,
-							kind: freshRecord.kind === "practice" ? "practice" : hasProbeDone(freshRecord.messages) ? "teach" : "probe",
-							thresholdTokens: effectiveThresholdTokens(
-								fresh.compaction?.thresholdTokens,
-								kickEngine.model.contextWindow,
-							),
-							systemPromptTokens: Math.ceil(composeInstructions(freshRecord.kind === "practice" ? "practice" : "teacher").length / 4),
+							kind: sessionKind(freshRecord),
+							thresholdTokens: effectiveThresholdTokens(fresh.compaction?.thresholdTokens, contextWindowFor(kickEngine)),
+							keepRecentTokens: keepRecentTokensFor(contextWindowFor(kickEngine)),
+							systemPromptTokens: systemPromptTokensFor(sessionKind(freshRecord)),
 						};
 					}, chatId);
 			},

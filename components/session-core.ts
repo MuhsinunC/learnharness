@@ -16,6 +16,7 @@
 import type { AgentEvent } from "@earendil-works/pi-agent-core";
 import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import {
+	contextOverflowState,
 	needsContinuation,
 	danglingQuestionOf,
 	answeredCallIds,
@@ -185,7 +186,9 @@ export interface SessionState {
 	/** Completed conversation usage; null after compaction or before first usage. */
 	contextTokens: number | null;
 	status: SessionStatus;
-	error: { message: string } | null;
+	/** repairable: the server-shared classification says Repair can act
+	 *  on this length rejection (LH-40). */
+	error: { message: string; repairable?: boolean } | null;
 	/** Steers sent but not yet drained (composer steering, 2026-10-03):
 	 *  the queued indicator's truth. An entry dies when its id lands in
 	 *  the messages (the drain's verbatim events upsert the real card) —
@@ -299,7 +302,7 @@ export class SessionModel {
 		const providerError =
 			latest !== undefined &&
 			!this.incompleteUsageIds.has(latest.id) && (!live || latest.id === this.liveFailureId)
-				? { message: latest.errorMessage ?? "An error occurred." }
+				? { message: latest.errorMessage ?? "An error occurred.", repairable: contextOverflowState(latest) === "repairable" }
 				: null;
 		return {
 			messages: projectView(messages, live),

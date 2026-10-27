@@ -4,7 +4,9 @@
  * configured window is larger than the model's real one, so the threshold
  * compaction never fired — is compacted toward the window the provider
  * actually enforces, then the turn is retried ONCE (chat-handler). The
- * learner's "Repair this chat" action runs the same compaction.
+ * learner's "Repair this chat" action runs the same compaction. The limit
+ * a rejection states is remembered per model (learnedContextLimits), so
+ * the threshold compaction fires before the next rejection.
  *
  * Nothing is ever deleted: the rejected reply stays in the record (pi
  * drops errored assistants on the wire), and full history stays behind a
@@ -14,49 +16,76 @@
  *
  * Shape of a recovery: one model summary sized for the target window; if
  * that fails, comes back empty, or still does not fit, a deterministic
- * marker (lesson topic, plan tree verbatim, the learner's dropped lines)
- * with a progressively shorter kept tail. Fit is judged by chars/4 over
- * the projection — never the usage anchor, which describes the last
+ * marker (lesson topic, the prior summary verbatim, plan tree, the
+ * learner's dropped lines) with a progressively shorter kept tail. Fit is
+ * judged by chars/4 — never the usage anchor, which describes the last
  * request that SUCCEEDED.
  */
 
-import { isContextOverflow, type AssistantMessage } from "@earendil-works/pi-ai";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	activeCompactionOf,
 	buildCompactionPrompt,
+	COMPACTED_HISTORY_HEADER,
 	compactionCutIndex,
+	contextOverflowState,
 	derivePlanStatusesLh,
 	derivedNodeStatus,
+	estimateMessageTokens,
 	estimateTokens,
-	hasProbeDone,
-	isContextOverflowText,
 	keptIndexFor,
 	newCompactionMarker,
+	overflowProviderText,
 	planTreeToText,
 	reportedContextLimit,
-	toLlmMessages,
 	type ChatRecord,
 	type CompactionDetails,
 	type LhMarkerMessage,
 	type LhMessage,
 } from "../core/index.ts";
 import { emit } from "../core/events.ts";
-import { composeInstructions } from "../agent/teacher-agent.ts";
 import type { ChatStore } from "../core/ports.ts";
-import { holdCompactionGate, saveCompactionMarker, subagentSummarizer, summarySpan, type CompactionDeps } from "./compaction.ts";
+import {
+	heuristicContextTokens,
+	holdCompactionGate,
+	saveCompactionMarker,
+	sessionKind,
+	subagentSummarizer,
+	systemPromptTokensFor,
+	summarySpan,
+	type CompactionDeps,
+} from "./compaction.ts";
 import { piEngineForSpec, type PiEngine } from "../agent/models.ts";
 import { resolveConversationSpec } from "../core/settings-resolution.ts";
 import { modelsNotConfigured } from "../core/settings.ts";
 import { effectiveSettings, stores } from "./stores.ts";
 import { isTurnRunning } from "./turn-liveness.ts";
 
-/** THE WINDOW SEAM: the context window this app believes the engine's
- *  model has — LH-38's per-(provider, model) custom window when set
- *  (piEngineForSpec applies it), else the catalog default. Exactly what
- *  may be wrong; recovery reads it through nothing else. */
+const modelIdOf = (engine: PiEngine) => `${engine.model.provider}:${engine.model.id}`;
+
+/** The limit providers stated for this model (`provider:id`), if any. */
+function learnedContextLimit(modelId: string): number | undefined {
+	return stores.settingsStore.readSettings()?.learnedContextLimits?.[modelId];
+}
+
+/** Remember the limit the chat's newest rejection states for its model —
+ *  its own settings key, never the user's window. */
+export function learnStatedLimit(engine: PiEngine, messages: readonly LhMessage[]): void {
+	const stated = reportedContextLimit(lastOverflowText(messages));
+	const modelId = modelIdOf(engine);
+	if (!stated || learnedContextLimit(modelId) === stated) return;
+	const record = stores.settingsStore.readSettings() ?? { version: 1 };
+	stores.settingsStore.writeSettings({ ...record, learnedContextLimits: { ...record.learnedContextLimits, [modelId]: stated } });
+}
+
+/** THE WINDOW SEAM: the window this app may trust for the engine's
+ *  model — LH-38's per-(provider, model) custom window when set
+ *  (piEngineForSpec applies it), else the catalog default; never above a
+ *  limit the provider has stated. The threshold compaction and recovery
+ *  both read it here. */
 export function contextWindowFor(engine: PiEngine): number | undefined {
-	return engine.model.contextWindow;
+	const learned = learnedContextLimit(modelIdOf(engine));
+	if (learned === undefined) return engine.model.contextWindow;
+	return Math.min(engine.model.contextWindow ?? Infinity, learned);
 }
 
 /** Share of the target window a recovered request may fill: the rest is
@@ -66,34 +95,25 @@ const RECOVERY_FILL = 0.6;
 /** Per-line cap for the learner's dropped lines in the fallback marker. */
 const FALLBACK_LINE_CHARS = 300;
 
-export function isContextOverflowMessage(message: LhMessage | undefined): message is AssistantMessage & LhMessage {
-	if (message?.role !== "assistant" || message.stopReason !== "error") return false;
-	return isContextOverflow(message as AssistantMessage) || isContextOverflowText(message.errorMessage);
-}
+const isSuccessfulReply = (m: LhMessage) => m.role === "assistant" && m.stopReason !== "error" && m.stopReason !== "aborted";
 
-/** Recovery already ran for this overflow: the active marker is a
- *  recovery marker and no reply has succeeded since. The one-retry guard —
- *  read from the record, so it holds across restarts and entry points. */
+/** One overflow episode gets one compact-and-retry: true when a recovery
+ *  marker landed after the last successful reply. Read from the record,
+ *  so it holds across restarts, entry points and threshold markers. */
 export function recoveryAttempted(messages: readonly LhMessage[]): boolean {
-	const active = activeCompactionOf(messages);
-	if (!active?.details.notice) return false;
-	return !messages
-		.slice(messages.indexOf(active) + 1)
-		.some((m) => m.role === "assistant" && m.stopReason !== "error" && m.stopReason !== "aborted");
+	let i = messages.length - 1;
+	while (i >= 0 && !isSuccessfulReply(messages[i]!)) i--;
+	return messages
+		.slice(i + 1)
+		.some((m) => m.role === "custom" && m.customType === "compaction" && !!(m.details as Partial<CompactionDetails>).notice);
 }
 
-/** The newest context-length rejection in the record (its text may state the real limit). */
-export function lastOverflowError(messages: readonly LhMessage[]): string | undefined {
+/** The provider's text of the newest length rejection (it may state the real limit). */
+function lastOverflowText(messages: readonly LhMessage[]): string | undefined {
 	for (let i = messages.length - 1; i >= 0; i--) {
-		const m = messages[i]!;
-		if (isContextOverflowMessage(m)) return m.errorMessage;
+		if (contextOverflowState(messages[i]) !== null) return overflowProviderText(messages[i]);
 	}
 	return undefined;
-}
-
-/** What the next request would carry, by chars/4 over the projection. */
-function requestTokens(messages: readonly LhMessage[], systemPromptTokens: number): number {
-	return estimateTokens(toLlmMessages(messages as readonly AgentMessage[]) as unknown as readonly LhMessage[]) + systemPromptTokens;
 }
 
 /** The window to fit: the limit the rejection states; otherwise the
@@ -113,28 +133,40 @@ function lessonTopic(record: ChatRecord): string {
 	return `Current lesson topic: ${record.title}${current ? ` (plan step "${current.title}", ${current.id})` : ""}.`;
 }
 
-/** The deterministic marker body: what the record states for certain
- *  about the dropped span, clipped to the summary's share. */
-function droppedSpanSummary(record: ChatRecord, dropped: readonly LhMessage[], maxChars: number): string {
+const middleTruncate = (text: string, max: number) =>
+	text.length <= max ? text : `${text.slice(0, Math.ceil(max / 2))}\n…[middle omitted]…\n${text.slice(text.length - Math.floor(max / 2))}`;
+
+/** The deterministic marker body: what the record states for certain —
+ *  the prior summary verbatim (middle-truncated only if it alone exceeds
+ *  the share), then the plan tree, then the learner's dropped lines. */
+function droppedSpanSummary(record: ChatRecord, previous: LhMarkerMessage | null, dropped: readonly LhMessage[], maxChars: number): string {
+	const prior = previous?.content.replace(`${COMPACTED_HISTORY_HEADER}\n\n`, "");
+	const head = [
+		"The older part of this session was dropped to fit the model's context window; no model summary could be written. What the record states for certain:",
+		...(prior ? ["## The earlier summary (still authoritative)", middleTruncate(prior, maxChars)] : []),
+	].join("\n\n");
 	const learner = dropped
 		.filter((m) => m.role === "user")
 		.map((m) => {
 			const text = typeof m.content === "string" ? m.content : m.content.map((c) => (c.type === "text" ? c.text : "")).join(" ");
 			return `- ${text.length > FALLBACK_LINE_CHARS ? `${text.slice(0, FALLBACK_LINE_CHARS)}…` : text}`;
 		});
-	const text = [
-		"The older part of this session was dropped to fit the model's context window; no model summary could be written. What the record states for certain:",
+	const rest = [
 		"## The plan dependency tree",
 		planTreeToText(record.tree, record.messages) ?? "No plan tree exists in this session.",
 		"## What the learner said in the dropped part (newest last)",
 		learner.length ? learner.join("\n") : "Nothing.",
 	].join("\n\n");
-	return text.length > maxChars ? `${text.slice(0, maxChars)}…[truncated]` : text;
+	const room = maxChars - head.length;
+	if (room <= 0) return head;
+	return `${head}\n\n${rest.length > room ? `${rest.slice(0, room)}…[truncated]` : rest}`;
 }
 
-export interface RecoveryDeps extends Omit<CompactionDeps, "thresholdTokens" | "canStart"> {
+export interface RecoveryDeps extends Omit<CompactionDeps, "thresholdTokens" | "canStart" | "keepRecentTokens"> {
 	/** The window to fit (recoveryWindowTokens). */
 	windowTokens: number;
+	/** The rejected request's estimate (chars/4), measured once. */
+	failedRequestTokens: number;
 	/** The learner-facing line the moment divider shows. */
 	notice: string;
 }
@@ -147,33 +179,40 @@ export type RecoveryOutcome = "summarized" | "truncated" | "unchanged";
 /** Everything a recovery needs, resolved from the record and the chat's
  *  engine (the turn handler and the repair route share it). */
 export function recoveryDeps(chatStore: ChatStore, record: ChatRecord, engine: PiEngine, notice: string): RecoveryDeps {
-	const modelId = `${engine.model.provider}:${engine.model.id}`;
-	const kind = record.kind === "practice" ? "practice" : hasProbeDone(record.messages) ? "teach" : "probe";
-	// The prompt the retried turn will actually carry (the threshold run's
-	// teacher-prompt approximation is 2.6x the prober's: too coarse here).
-	const systemPromptTokens = Math.ceil(composeInstructions(kind === "teach" ? "teacher" : kind === "probe" ? "prober" : "practice").length / 4);
+	const kind = sessionKind(record);
+	const systemPromptTokens = systemPromptTokensFor(kind);
+	const failedRequestTokens = heuristicContextTokens(record.messages, systemPromptTokens);
 	return {
 		chatStore,
 		engine,
-		modelId,
+		modelId: modelIdOf(engine),
 		kind,
 		systemPromptTokens,
-		windowTokens: recoveryWindowTokens(
-			lastOverflowError(record.messages),
-			contextWindowFor(engine),
-			requestTokens(record.messages, systemPromptTokens),
-		),
+		failedRequestTokens,
+		windowTokens: recoveryWindowTokens(lastOverflowText(record.messages), contextWindowFor(engine), failedRequestTokens),
 		notice,
 	};
 }
 
-/** Recovery could not help: rewrite the newest rejection into a plain
- *  explanation (the provider's text stays in parentheses). Never retries. */
-export function explainUnrecoverable(chatStore: ChatStore, chatId: string, modelName: string): void {
+/** The plain explanations that replace a rejection recovery could not fix. */
+export const overflowExplanation = {
+	stillTooLong: (model: string) => `This chat is still too long for ${model}, even after condensing its older part. Start a new session, or pick a model with a larger context window.`,
+	backgroundOff: (model: string) => `This chat grew too long for ${model}. Condensing it automatically needs background use for this connection: turn background use on, or press Repair this chat.`,
+	notCondensed: (model: string) => `This chat grew too long for ${model} and could not be condensed automatically. Press Repair this chat to condense it.`,
+};
+
+/** Rewrite the chat's trailing rejection into a plain explanation, built
+ *  from the provider's own text every time (never nested). Unrecoverable
+ *  marks it so Repair is no longer offered. */
+export function explainOverflow(chatStore: ChatStore, chatId: string, explanation: string, unrecoverable: boolean): void {
 	const record = chatStore.getChat(chatId);
 	const failed = record?.messages.at(-1);
-	if (!record || !isContextOverflowMessage(failed)) return;
-	failed.errorMessage = `This chat is still too long for ${modelName}, even after condensing its older part. Start a new session, or pick a model with a larger context window. (${failed.errorMessage})`;
+	if (!record || failed?.role !== "assistant" || contextOverflowState(failed) === null) return;
+	const providerText = overflowProviderText(failed) ?? "";
+	Object.assign(failed, {
+		errorMessage: `${explanation} (${providerText})`,
+		contextOverflow: unrecoverable ? { providerText, unrecoverable: true } : { providerText },
+	});
 	chatStore.saveMessages(chatId, record.messages);
 	emit("record-changed", { chatId });
 }
@@ -187,26 +226,27 @@ export async function recoverContext(deps: RecoveryDeps, chatId: string): Promis
 	// The cut walks what precedes the trailing rejections: cutting AT one
 	// would push the learner's last message into the summary.
 	let end = messages.length;
-	while (end > 0 && isContextOverflowMessage(messages[end - 1])) end--;
+	while (end > 0 && contextOverflowState(messages[end - 1]) !== null) end--;
 	const base = messages.slice(0, end);
 	const previous = activeCompactionOf(messages);
 	const floor = previous ? Math.max(keptIndexFor(messages, previous), 0) : 0;
 
 	const fit = Math.floor(deps.windowTokens * RECOVERY_FILL);
 	const budget = Math.max(fit - deps.systemPromptTokens, 0);
-	const tokensBefore = requestTokens(messages, deps.systemPromptTokens);
 	const topic = lessonTopic(record);
 	const markerAt = (cut: number, body: string) => {
 		const details: CompactionDetails = {
 			firstKeptMessageId: messages[cut]!.id,
-			tokensBefore,
+			tokensBefore: deps.failedRequestTokens,
 			model: deps.modelId,
 			at: new Date().toISOString(),
 			notice: deps.notice,
 		};
 		return newCompactionMarker(`${topic}\n\n${body}`, details);
 	};
-	const fits = (marker: LhMessage) => requestTokens([...messages, marker], deps.systemPromptTokens) <= fit;
+	// The next request: system prompt + the marker (the summary head) + the kept tail.
+	const fits = (marker: LhMarkerMessage, cut: number) =>
+		deps.systemPromptTokens + estimateMessageTokens(marker) + estimateTokens(messages.slice(cut)) <= fit;
 	const cutFor = (keep: number) => {
 		const cut = compactionCutIndex(base, Math.max(Math.floor(keep), 1));
 		return cut > floor && cut < base.length ? cut : null;
@@ -216,7 +256,7 @@ export async function recoverContext(deps: RecoveryDeps, chatId: string): Promis
 	try {
 		// The model summary: half the budget for the kept tail, half for the
 		// summary; the summarizer's own request is clipped to the window too
-		// (it runs on the same over-window model), oldest text first.
+		// (it runs on the same over-window model), oldest transcript first.
 		const cut = cutFor(budget / 2);
 		if (cut !== null) {
 			const planTreeText = planTreeToText(record.tree, messages);
@@ -224,13 +264,12 @@ export async function recoverContext(deps: RecoveryDeps, chatId: string): Promis
 			const maxWords = Math.max(Math.floor((budget / 2) * 0.6), 50);
 			const room = fit * 4 - buildCompactionPrompt({ spanText: "", planTreeText, kind, maxWords }).length;
 			if (room > 0) {
-				const span = summarySpan(messages, cut);
-				const spanText = span.length > room ? `…[older part omitted]\n\n${span.slice(-room)}` : span;
 				try {
 					const summarize = deps.summarize ?? subagentSummarizer;
+					const spanText = summarySpan(messages, cut, room);
 					const { summary, usage } = await summarize(buildCompactionPrompt({ spanText, planTreeText, kind, maxWords }), deps.engine);
 					const marker = summary.trim() ? markerAt(cut, summary.trim()) : null;
-					if (marker && fits(marker)) {
+					if (marker && fits(marker, cut)) {
 						saveCompactionMarker(deps, chatId, messages, marker, usage);
 						return "summarized";
 					}
@@ -245,8 +284,8 @@ export async function recoverContext(deps: RecoveryDeps, chatId: string): Promis
 		for (const keep of [budget / 2, budget / 4, 1]) {
 			const at = cutFor(keep);
 			if (at === null) continue;
-			fallback = markerAt(at, droppedSpanSummary(record, base.slice(floor, at), Math.max((budget / 2) * 4, 1_000)));
-			if (fits(fallback)) break;
+			fallback = markerAt(at, droppedSpanSummary(record, previous, base.slice(floor, at), Math.max((budget / 2) * 4, 1_000)));
+			if (fits(fallback, at)) break;
 		}
 		if (!fallback) return "unchanged";
 		saveCompactionMarker(deps, chatId, messages, fallback, null);
@@ -262,21 +301,29 @@ export async function recoverContext(deps: RecoveryDeps, chatId: string): Promis
 export async function handleRepairRequest(chatId: string): Promise<Response> {
 	const record = stores.chatStore.getChat(chatId);
 	if (!record) return Response.json({ error: "Unknown chat" }, { status: 404 });
-	if (isTurnRunning(chatId)) return Response.json({ error: "A turn is running for this session" }, { status: 409 });
+	if (isTurnRunning(chatId)) return Response.json({ error: "A turn is running for this session. Try again when it ends." }, { status: 409 });
 	// Only a chat whose last reply was rejected for length: a healthy chat
 	// has no stated limit to aim at, and a repaired one ends in its marker.
-	if (!isContextOverflowMessage(record.messages.at(-1))) {
-		return Response.json({ error: "This chat is not broken: its last reply did not fail for length." }, { status: 409 });
+	const state = contextOverflowState(record.messages.at(-1));
+	if (state !== "repairable") {
+		const error = state === "unrecoverable"
+			? "This chat cannot be condensed any further. Start a new session, or pick a model with a larger context window."
+			: "This chat is not broken: its last reply did not fail for length.";
+		return Response.json({ error }, { status: 409 });
 	}
 	const spec = resolveConversationSpec(record.settings, effectiveSettings().models.strong);
 	if (!spec) return Response.json(modelsNotConfigured(["strong"]), { status: 503 });
 	let engine: PiEngine;
 	try { engine = piEngineForSpec(spec, false); }
 	catch { return Response.json({ error: "The selected model is unavailable." }, { status: 503 }); }
-	const notice = `This chat had grown too long for ${engine.model.name || engine.model.id}; I condensed the older part.`;
+	const modelName = engine.model.name || engine.model.id;
+	learnStatedLimit(engine, record.messages);
+	const notice = `This chat had grown too long for ${modelName}; I condensed the older part.`;
 	const run = holdCompactionGate(chatId, () => recoverContext(recoveryDeps(stores.chatStore, record, engine, notice), chatId));
-	if (!run) return Response.json({ error: "This session is already compacting" }, { status: 409 });
-	const outcome = await run;
-	if (outcome === "unchanged") return Response.json({ error: "Nothing older in this chat can be condensed." }, { status: 422 });
-	return Response.json({ ok: true, outcome });
+	if (!run) return Response.json({ error: "This session is already being condensed. Try again in a moment." }, { status: 409 });
+	if ((await run) === "unchanged") {
+		explainOverflow(stores.chatStore, chatId, overflowExplanation.stillTooLong(modelName), true);
+		return Response.json({ error: "Nothing older in this chat can be condensed." }, { status: 422 });
+	}
+	return Response.json({ ok: true });
 }

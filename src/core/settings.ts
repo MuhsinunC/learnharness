@@ -382,6 +382,10 @@ export interface UserSettings {
 	/** Custom context windows per `provider:id` (LH-38, core/context-windows.ts);
 	 *  absent pair = the catalog default. */
 	contextWindows?: Record<string, number>;
+	/** Limits providers stated in context-length rejections, per
+	 *  `provider:id` (LH-40, server-written, never the user's value): the
+	 *  threshold compaction uses min(window, learned limit). */
+	learnedContextLimits?: Record<string, number>;
 	[key: string]: unknown;
 }
 
@@ -667,6 +671,9 @@ export function sanitizeUserSettings(raw: unknown): UserSettings | null {
 	}
 	if (r.contextWindows !== null && typeof r.contextWindows === "object" && !Array.isArray(r.contextWindows)) {
 		out.contextWindows = sanitizeContextWindows(r.contextWindows as Record<string, unknown>);
+	}
+	if (r.learnedContextLimits !== null && typeof r.learnedContextLimits === "object" && !Array.isArray(r.learnedContextLimits)) {
+		out.learnedContextLimits = sanitizeContextWindows(r.learnedContextLimits as Record<string, unknown>);
 	}
 	// Unknown top-level keys ride along untouched (forward-compat). One
 	// known-DEAD key is stripped instead of riding: `chat` (the old
