@@ -42,7 +42,6 @@ import {
 	type LhMessage,
 } from "../core/index.ts";
 import { emit } from "../core/events.ts";
-import { catalogContextLimits } from "./model-catalog.ts";
 import { composeInstructions } from "../agent/teacher-agent.ts";
 import type { ChatStore } from "../core/ports.ts";
 import { holdCompactionGate, saveCompactionMarker, subagentSummarizer, summarySpan, type CompactionDeps } from "./compaction.ts";
@@ -52,11 +51,12 @@ import { modelsNotConfigured } from "../core/settings.ts";
 import { effectiveSettings, stores } from "./stores.ts";
 import { isTurnRunning } from "./turn-liveness.ts";
 
-/** THE WINDOW SEAM: the context window this app believes a model has
- *  (`provider:id`). LH-38's per-(provider, model) setting plugs in here;
- *  recovery reads the window through nothing else. */
-export function contextWindowFor(modelId: string): number | undefined {
-	return catalogContextLimits().get(modelId);
+/** THE WINDOW SEAM: the context window this app believes the engine's
+ *  model has — LH-38's per-(provider, model) custom window when set
+ *  (piEngineForSpec applies it), else the catalog default. Exactly what
+ *  may be wrong; recovery reads it through nothing else. */
+export function contextWindowFor(engine: PiEngine): number | undefined {
+	return engine.model.contextWindow;
 }
 
 /** Share of the target window a recovered request may fill: the rest is
@@ -160,7 +160,7 @@ export function recoveryDeps(chatStore: ChatStore, record: ChatRecord, engine: P
 		systemPromptTokens,
 		windowTokens: recoveryWindowTokens(
 			lastOverflowError(record.messages),
-			contextWindowFor(modelId),
+			contextWindowFor(engine),
 			requestTokens(record.messages, systemPromptTokens),
 		),
 		notice,

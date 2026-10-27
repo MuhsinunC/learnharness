@@ -8,7 +8,8 @@ import { launchChrome, type HeadlessChrome } from "./harness/chrome.ts";
 import { reply, startStubProvider, type StubProvider, type StubRequest, type StubResponder } from "./harness/stub-provider.ts";
 
 // LH-40: a chat that outgrows the model's REAL window recovers. The stub
-// model is registered with a 1.5M window (the misconfiguration), so the
+// model's catalog window is small, but the learner set a custom 1.5M
+// window for it (LH-38's setting, the owner's "1.5M by mistake"), so the
 // threshold compaction never fires; the stub enforces the real limit on
 // the serialized messages and answers past it with pi-ai's real
 // context-length 400, stating LIMIT_CHARS / 4 tokens.
@@ -26,6 +27,8 @@ const SUMMARY = [
 	"The learner asked to keep going.",
 ].join("\n");
 const SUMMARIZER = "You are the session-compaction summarizer";
+/** Registered as openrouter: /api/models and the threshold see keyed providers only (LH-38's e2e does the same). */
+const STUB = "openrouter";
 const HEADER = "[SESSION HISTORY COMPACTED]";
 const TREE = {
 	nodes: [
@@ -54,8 +57,10 @@ const lastLearnerText = (req: StubRequest) => {
 };
 /** The reply names the learner message it answers, so a test can tell replies apart. */
 const answer = (text: string) => `Answering "${text}". ${FILLER}`;
-const limited = (limitChars: number): StubResponder => (req) => {
-	if (size(req) > limitChars) return reply.contextLength(Math.floor(limitChars / 4));
+/** Bedrock's wording: a length rejection that states no limit. */
+const BEDROCK_400 = reply.http(400, { message: "Input is too long for requested model." });
+const limited = (limitChars: number, rejection = reply.contextLength(Math.floor(limitChars / 4))): StubResponder => (req) => {
+	if (size(req) > limitChars) return rejection;
 	return reply.text(req.system.startsWith(SUMMARIZER) ? SUMMARY : answer(lastLearnerText(req)));
 };
 const isTurnRequest = (req: StubRequest) => !req.system.startsWith(SUMMARIZER);
@@ -68,12 +73,22 @@ let chrome: HeadlessChrome;
 
 before(async () => {
 	stub = await startStubProvider(limited(LIMIT_CHARS));
-	const slot = { model: { provider: "e2e-stub", id: "stub-a" } };
+	const slot = { model: { provider: STUB, id: "stub-a" } };
 	server = await bootServer({
 		ticket: "lh-40",
-		providers: [{ id: "e2e-stub", baseUrl: stub.baseUrl, models: [{ id: "stub-a", contextWindow: 1_500_000 }] }],
-		settings: { version: 1, models: { strong: slot, cheap: slot, vision: slot }, graph: { enabled: false } },
+		// Catalog default 4,000 (the threshold would compact every turn);
+		// the custom 1.5M is what the engine runs (LH-38).
+		providers: [{ id: STUB, baseUrl: stub.baseUrl, models: [{ id: "stub-a", contextWindow: 4_000, maxTokens: 2_048 }] }],
+		settings: {
+			version: 1,
+			models: { strong: slot, cheap: slot, vision: slot },
+			contextWindows: { [`${STUB}:stub-a`]: 1_500_000 },
+			graph: { enabled: false },
+		},
 	});
+	// A dummy key makes the stub a keyed provider, so the catalog (and the
+	// threshold compaction) sees its window, as for a real provider.
+	await server.json(`/api/keys/OPENROUTER_API_KEY`, { method: "PUT", body: { value: "e2e-dummy-key-not-real" } });
 	chrome = await launchChrome("lh-40");
 });
 
@@ -146,7 +161,7 @@ function breakChat(id: string): void {
 			role: "assistant",
 			content: [],
 			api: "openai-completions",
-			provider: "e2e-stub",
+			provider: STUB,
 			model: "stub-a",
 			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
 			stopReason: "error",
@@ -295,6 +310,30 @@ test("(d) recovery never loops: when even the smallest request is too big, the l
 			final.messages.at(-1)!.errorMessage!,
 			/^This chat is still too long for stub-a, even after condensing its older part\. Start a new session, or pick a model with a larger context window\./,
 		);
+	} finally {
+		stub.setResponder(limited(LIMIT_CHARS));
+	}
+});
+
+test("(e) a custom window above the real limit: the chat overflows, then recovers, even when the rejection states no limit", async () => {
+	// The misconfiguration is what runs: the custom 1.5M over the 4,000 default.
+	const catalog = await server.json<{ models: Array<{ provider: string; id: string; contextWindow: number; defaultContextWindow: number }> }>("/api/models");
+	const pair = catalog.models.find((m) => m.provider === STUB && m.id === "stub-a");
+	assert.deepEqual([pair?.contextWindow, pair?.defaultContextWindow], [1_500_000, 4_000]);
+	const id = await newChat("Series");
+	await grow(id, 5);
+	assert.equal((await chat(id)).messages.filter((m) => m.customType === "compaction").length, 0, "no threshold compaction under the 1.5M window");
+	stub.setResponder(limited(LIMIT_CHARS, BEDROCK_400));
+	try {
+		const start = stub.requests.length;
+		await send(id, "Keep going, part 6.");
+		const done = await settled(id, "the recovered reply", (c) => recoveryMarkers(c).length > 0 && isReply(c.messages.at(-1)));
+		const turnRequests = stub.requests.slice(start).filter(isTurnRequest);
+		assert.equal(turnRequests.length, 2, "the rejected turn and exactly one retry");
+		assert.ok(size(turnRequests[0]!) > LIMIT_CHARS);
+		assert.ok(size(turnRequests[1]!) <= LIMIT_CHARS, `the retried request fits (${size(turnRequests[1]!)} chars)`);
+		assert.match(JSON.stringify(done.messages.at(-1)!.content), /Answering \\"Keep going, part 6\.\\"/);
+		assert.equal(recoveryMarkers(done).length, 1);
 	} finally {
 		stub.setResponder(limited(LIMIT_CHARS));
 	}
