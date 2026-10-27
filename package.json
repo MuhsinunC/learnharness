@@ -13,9 +13,9 @@
 	"private": true,
 	"main": "electron/main.cjs",
 	"scripts": {
-		"dev": "next dev",
+		"dev": "node scripts/web-server.mjs dev",
 		"build": "next build",
-		"start": "next start",
+		"start": "node scripts/web-server.mjs start",
 		"test": "NODE_ENV=test tsx --test tests/*.test.ts tests/*.test.tsx",
 		"test:migrate": "bash tests/migrate/run.sh",
 		"test:e2e": "NODE_ENV=test tsx --test --test-concurrency=1 tests/e2e/*.e2e.ts",
