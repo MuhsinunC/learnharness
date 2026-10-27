@@ -551,9 +551,10 @@ function resultIdsFrom(messages: readonly AgentMessage[]): Set<string> {
  * - markers flatten to a user message carrying their content (the
  *   canonical text single-sourced in core/contracts); plan blocks are
  *   UI-only and filtered.
- * - dangling tool calls (an aborted turn's unanswered questions) get the
- *   synthesized interrupted result — the provider protocol's hard
- *   invariant: a tool call must be followed by its result.
+ * - dangling calls from successfully generated assistant messages (for
+ *   example, an unanswered question) get a synthesized interrupted result.
+ *   Error/aborted generations do not: Pi drops those assistant messages,
+ *   so manufacturing their results would leave orphan results on the wire.
  *
  * Contract (pi-agent-core): never throws — an unknown shape passes
  * through untouched rather than killing the loop.
@@ -619,11 +620,12 @@ export function toLlmMessages(messages: readonly AgentMessage[]): Message[] {
 		// Strip the record id: the wire carries the native shape only.
 		const { id: _id, ...native } = m as LhMessage;
 		out.push(native as Message);
-		// Dangling-call synthesis: an assistant message whose toolCalls have
-		// no results in the remaining tail (abort mid-question) — the
-		// provider rejects unanswered calls outright.
+		// Repair unanswered calls from completed generations, not calls in
+		// failed generations. Pi filters error/aborted assistants itself;
+		// adding results for their unexecuted calls would leave orphans.
 		if (role === "assistant") {
 			const assistant = m as AssistantMessage;
+			if (assistant.stopReason === "error" || assistant.stopReason === "aborted") continue;
 			const calls = assistant.content.filter((b) => b.type === "toolCall");
 			if (calls.length === 0) continue;
 			const answered = resultIdsFrom(messages.slice(i + 1));

@@ -19,6 +19,7 @@ import {
 	needsContinuation,
 	danglingQuestionOf,
 	answeredCallIds,
+	failedResponseAtEnd,
 	measuredContextTokens,
 	newAnswerResult,
 	newNextMessage,
@@ -286,12 +287,12 @@ export class SessionModel {
 				? { executions: this.executions, inFlight: true, streamingIds: this.streamingIds }
 				: undefined;
 		const messages = [...this.base, ...this.tail];
-		const latest = messages.at(-1);
-		// One rule for live and restored failures: only the final completed
-		// assistant can own the banner. While trying again, hide the old
-		// failure from the first Thinking frame, but show a new failure at end.
+		const latest = failedResponseAtEnd(messages);
+		// Presentation/compaction markers do not resolve a failure. While
+		// trying again, hide the old banner from the first Thinking frame,
+		// but show a new completed failure from this consume immediately.
 		const providerError =
-			latest?.role === "assistant" && latest.stopReason === "error" &&
+			latest !== undefined &&
 			!this.incompleteUsageIds.has(latest.id) && (!live || latest.id === this.liveFailureId)
 				? { message: latest.errorMessage ?? "An error occurred." }
 				: null;

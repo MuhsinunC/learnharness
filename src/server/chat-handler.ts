@@ -193,6 +193,17 @@ export async function handleChatInput(
 		return Response.json({ error: "Unknown chat" }, { status: 404 });
 	}
 
+	// Refuse an ineligible Retry before catalog refresh, compaction, or any
+	// turn/write effects. Revalidate after the awaited gates below too.
+	if (input.type === "retry") {
+		try {
+			retryDrops(record.messages);
+		} catch (err) {
+			if (err instanceof ChatInputError) return Response.json({ error: err.message }, { status: 400 });
+			throw err;
+		}
+	}
+
 	// THE UNIVERSAL TURN GATE (BYOK, owner, 2026-09-22): a turn needs the
 	// CONVERSATION chain — the chat's own model override over the strong
 	// slot — and there is no factory floor; when both are empty the turn
@@ -228,18 +239,6 @@ export async function handleChatInput(
 		const envelope = providerKeyMissingEnvelope(conversation.provider, ["strong"]);
 		console.info(`[chat ${chatId}] turn refused — ${JSON.stringify(envelope)}`);
 		return Response.json(envelope, { status: 503 });
-	}
-
-	// THE RETRY GATE (issue #110): a retry with no failure to retry
-	// refuses here, BEFORE compaction and beginTurn — no effects. The
-	// trim itself re-validates on the record compaction re-reads below.
-	if (input.type === "retry") {
-		try {
-			retryDrops(record.messages);
-		} catch (err) {
-			if (err instanceof ChatInputError) return Response.json({ error: err.message }, { status: 400 });
-			throw err;
-		}
 	}
 
 	// THE COMPACTION GATE (owner round 14, 2026-10-05 — the structural
@@ -280,18 +279,17 @@ export async function handleChatInput(
 	const compactedRecord = stores.chatStore.getChat(chatId);
 	if (!compactedRecord) return Response.json({ error: "Unknown chat" }, { status: 404 });
 	record = compactedRecord;
-	// THE RETRY TRIM: recomputed on the current record (the awaits above
-	// let other writers land), still before beginTurn. The trimmed record
-	// reaches disk through the write-ahead.
+	// Recompute Retry eligibility on current truth, still before beginTurn.
+	// A compaction marker or another writer may have landed during awaits.
+	// These omissions affect ONLY the agent context, never the saved record.
+	let retryOmissions = new Set<string>();
 	if (input.type === "retry") {
-		let drop: Set<string>;
 		try {
-			drop = retryDrops(record.messages);
+			retryOmissions = retryDrops(record.messages);
 		} catch (err) {
 			if (err instanceof ChatInputError) return Response.json({ error: err.message }, { status: 400 });
 			throw err;
 		}
-		record = { ...record, messages: record.messages.filter((m) => !drop.has(m.id)) };
 	}
 
 	// The input's native appends (pure; the honest 400 for an answer with no
@@ -350,8 +348,13 @@ export async function handleChatInput(
 	// ride this same write-ahead - the pump de-queued them at fire, so this
 	// is the ONLY copy ever appended.)
 	const merged = [...record.messages, ...appends];
+	// Retry preserves every persisted attempt. Pi needs a non-assistant
+	// tail to start continue(), so its temporary history omits the trailing
+	// failures only. Count that SAME temporary prefix at settlement, or the
+	// retained failures would make persistTurn skip genuinely new output.
+	const agentMessages = input.type === "retry" ? merged.filter((m) => !retryOmissions.has(m.id)) : merged;
 	const stagedAutomatic = isSubscriptionProvider(conversation.provider) && input.type === "steers";
-	let persistBaseCount = stagedAutomatic ? record.messages.length : merged.length;
+	let persistBaseCount = stagedAutomatic ? record.messages.length : agentMessages.length;
 	try {
 		if (!stagedAutomatic) stores.chatStore.saveMessages(chatId, merged);
 	} catch (err) {
@@ -390,7 +393,7 @@ export async function handleChatInput(
 	// the session is still probing: build the PROBER (quiz/ask + probe_done).
 	// Both share this whole composition (write-ahead persist, liveness,
 	// steers, usage, extraction) — only the agent differs.
-	const teaching = hasProbeDone(merged);
+	const teaching = hasProbeDone(agentMessages);
 	// BYOK (owner, 2026-09-22): the conversation chain was resolved by the
 	// turn gate above (chat.model override → strong slot → refused) — the
 	// engine build is pure from here; thinking levels clamp natively.
@@ -409,7 +412,7 @@ export async function handleChatInput(
 	// sub-agent JOB tools (research/demo/visual/pdf; adjudicated with the
 	// user: quiz/ask/fs/plan/probe_done are always-on).
 	if (isSubscriptionProvider(conversation.provider)) requestCycle = new SubscriptionRequestCycle({
-		initialMessages: asAgentMessages(merged),
+		initialMessages: asAgentMessages(agentMessages),
 		staged: stagedAutomatic ? asAgentMessages(appends) : undefined,
 		foregroundOwed: !callPurpose.background,
 		purpose: callPurpose,
@@ -425,7 +428,7 @@ export async function handleChatInput(
 		engine,
 		callPurpose,
 		requestCycle,
-		messages: asAgentMessages(merged),
+		messages: asAgentMessages(agentMessages),
 		onUsage: collectUsage,
 		toolToggles: effective.agent.tools,
 		// Debug (owner, 2026-10-04): teacher/prober raw provider events under
@@ -521,7 +524,7 @@ export async function handleChatInput(
 		// Debug recorder run marker (owner, 2026-10-04): correlates the
 		// JSONL event stream with the record's turns; no-op unless
 		// LH_PROVIDER_EVENTS=1.
-		providerEventNote(chatId, "turn", `run start (base: ${merged.length} messages)`);
+		providerEventNote(chatId, "turn", `run start (base: ${agentMessages.length} messages)`);
 		const handle = runPiTurn({
 			agent: constructed,
 			requestCycle,
@@ -561,8 +564,8 @@ export async function handleChatInput(
 				settleSteers(chatId, persisted, true, constructed);
 			},
 			onFinish: (turnMessages, isAborted) => {
-				// Wave B: the record write is the agent's own final state —
-				// the new messages are the slice past the merged base.
+				// Wave B: append only messages past the temporary agent prefix.
+				// Retry's saved record still includes its earlier failed attempts.
 				const stamped = persistTurn(stores.chatStore, chatId, persistBaseCount, turnMessages, isAborted);
 				noteSteersDurable(chatId, stores.chatStore.getChat(chatId)?.messages ?? stamped);
 				// usage log append (idempotent per turn id) — the stats bar

@@ -471,13 +471,6 @@ export function Chat({
 	const busy = localStream || turnInFlight;
 	const busyRef = useRef(busy);
 	busyRef.current = busy;
-	// A failed model call (issue #110): the banner offers Retry, which
-	// re-runs the turn from the saved input — the only path back, since an
-	// answered question cannot be answered again. Offered from "error" too:
-	// a dropped stream leaves the model there, and send() recovers from it.
-	const retryable = (status === "ready" || status === "error") && !busy && endsInFailedTurn(nativeMessages);
-	const retryFailedTurn = () => void send({ type: "retry" });
-
 	// The attach handoff (stream-reattach wave): the moment a resumed
 	// stream takes over the rendering — the SDK left "ready", so
 	// submitted/streaming means chunks are flowing — localStream covers
@@ -698,6 +691,12 @@ export function Chat({
 	// server's registry mutex is the structural gate; this is the
 	// affordance).
 	const [compacting, setCompacting] = useState(initiallyCompacting);
+	// A failed model response (issue #110): Retry keeps the saved input
+	// and completed work, without another learner message. Offered from
+	// "error" too: a dropped stream leaves the model there, and send()
+	// recovers from it. Later compaction requires new input instead.
+	const retryable = (status === "ready" || status === "error") && !busy && !compacting && endsInFailedTurn(nativeMessages);
+	const retryFailedTurn = () => void send({ type: "retry" });
 	const canSend =
 		(text.trim().length > 0 || dictation.active) && !pending && !activeProblem && !compacting;
 
