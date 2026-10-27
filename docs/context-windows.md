@@ -10,13 +10,24 @@ thinking level doesn't affect the window.
 - **Maximum** is the known working limit from
   `src/core/context-windows.ts` (`KNOWN_MAX_CONTEXT_WINDOWS`). When the table
   has no entry for the pair, Maximum equals Default.
-- Enter or **Save** commits the value. An empty field resets the pair to Default.
+- **Minimum** is `min(48,384, Default)`: `COMPACTION_THRESHOLD_FLOOR` (32k) plus
+  `COMPACTION_RESERVE_TOKENS` (16,384), the smallest window whose compaction
+  trigger (`window − 16k`) stays at the threshold floor. A lower value is
+  refused in the field, and the route answers 400 `below_minimum`.
+- Enter, or clicking away, commits the value; the field always shows what is
+  stored. An empty field, or the Default itself, resets the pair to Default,
+  so no pin equal to the Default is stored.
 - A value above Maximum opens a confirm modal. **Confirm** stays disabled until
   the "I know what I'm doing" box is checked. **Cancel** or Esc keeps the
   stored value.
 - `PUT /api/settings/context-windows` refuses an above-maximum value with
-  409 `above_maximum` unless `confirmAboveMax: true` is set. The generic
-  `PUT /api/settings/[section]` route can't write the map at all.
+  409 `above_maximum` unless `confirmAboveMax: true` is set. When the client's
+  catalog is stale and the server answers 409, the field opens the same modal
+  at the server's maximum. The generic `PUT /api/settings/[section]` route
+  can't write the map at all.
+- `tokens: null` clears a pair without a catalog check, so a pair whose model
+  left the catalog (a disconnected subscription, a dropped pi-ai id) can still
+  be cleared.
 - The value is stored in `settings.json` under `contextWindows`, keyed `provider:id`.
 
 ## Where the window is used
@@ -24,9 +35,9 @@ thinking level doesn't affect the window.
 | Consumer | Path |
 |---|---|
 | Composer footer "used / window" | `/api/models` `contextWindow` (custom over default) → `catalogLimits` → stats bar |
-| Compaction trigger, `min(threshold, window − 16k)` | `catalogContextLimits()` in `src/server/model-catalog.ts` |
+| Compaction trigger, `min(threshold, window − 16k)` | the engine model's `contextWindow` (below) |
 | Activity dock job limits | `catalogContextLimits()` |
-| Engine model, and pi-ai's max-tokens clamp (`window − context − 4096`) | `setContextWindowLookup` → `piEngineForSpec` in `src/agent/models.ts`; native subscription transports carry it across (`src/agent/subscription-stream.ts`). The claude-code stream has no max-tokens surface |
+| Engine model, and pi-ai's max-tokens clamp (`window − context − 4096`) | `ResolvedModelSpec.contextWindow`, set in `src/server/chat-handler.ts` (`withContextWindow`) from the same settings read as the spec, for the turn, the compaction kick and every role engine (jobs, extraction) → `piEngineForSpec` in `src/agent/models.ts`; native subscription transports carry it across (`src/agent/subscription-stream.ts`). The claude-code stream has no max-tokens surface |
 
 With the default 150k threshold, a window **above** the default doesn't move
 the compaction trigger. Only a window below about 166k lowers it. To compact
