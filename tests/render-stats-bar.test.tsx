@@ -120,6 +120,8 @@ describe("catalogLimits (the stats-bar live-limits join, pure)", () => {
 		supportedLevels: [],
 		cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
 		maxTokens: 32_768,
+		defaultContextWindow: over.contextWindow,
+		maxContextWindow: over.contextWindow,
 		...over,
 	});
 	const catalog: Pick<ModelCatalogResponse, "models"> = {

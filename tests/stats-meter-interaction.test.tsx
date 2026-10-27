@@ -15,7 +15,7 @@ test("meter keeps its measured numerator across selected-model/catalog changes, 
 	const originalFetch = globalThis.fetch;
 	let selected = "a";
 	const catalog: ModelCatalogResponse = {
-		models: ["a", "b"].map((id, i) => ({ id, provider: "fixture", name: id, input: ["text"], reasoning: false, supportedLevels: ["off"], maxTokens: 1000, contextWindow: 100_000 * (i + 1), cost: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 } })),
+		models: ["a", "b"].map((id, i) => ({ id, provider: "fixture", name: id, input: ["text"], reasoning: false, supportedLevels: ["off"], maxTokens: 1000, contextWindow: 100_000 * (i + 1), defaultContextWindow: 100_000 * (i + 1), maxContextWindow: 100_000 * (i + 1), cost: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 } })),
 		providers: [], defaults: null, slots: { strong: null, cheap: null, vision: null }, rolePins: {} as ModelCatalogResponse["rolePins"],
 	};
 	globalThis.fetch = async (input) => {
