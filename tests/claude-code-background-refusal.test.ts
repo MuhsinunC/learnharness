@@ -88,7 +88,8 @@ it("a refusing job preserves its original error when the teacher wake returns 50
 		sweep();
 		await waitFor(() => stores.jobStore.getJob(job.id)?.status === "error");
 		assert.equal(stores.jobStore.getJob(job.id)?.error, providerKeyMissing("claude-code", ["cheap"]).error);
-		assert.equal(stores.jobStore.getJob(job.id)?.activity, "delivery failed");
+		assert.equal(stores.jobStore.getJob(job.id)?.activity, "failed");
+		assert.equal(stores.jobStore.getJob(job.id)?.delivery?.status, "pending");
 	});
 });
 
@@ -102,7 +103,7 @@ it("production respawn delivers a failure result for an available provider's mis
 		const chat = stores.chatStore.createChat("Missing catalog model");
 		const job = stores.jobStore.createJob({ chatId: chat.id, kind: "research", toolCallId: "missing-model" });
 		sweep();
-		await waitFor(() => stores.jobStore.getJob(job.id)?.status === "error");
+		await waitFor(() => stores.jobStore.getJob(job.id)?.status === "error" && wakes > 0);
 		const done = stores.jobStore.getJob(job.id)!;
 		assert.equal(done.error, "claude-code catalog has no model no-such-model");
 		assert.equal(done.activity, "failed");
@@ -114,7 +115,7 @@ it("production respawn delivers a failure result for an available provider's mis
 	}
 });
 
-it("a parked refusal stays live and stale recovery does not queue duplicate steers", async () => {
+it("a parked refusal stays pending and stale recovery does not queue duplicate steers", async () => {
 	await withDisabledPin(async () => {
 		const { isJobLive } = await import("../src/agent/subagents/aborts.ts");
 		setTurnRunner(async () => 200);
@@ -133,7 +134,8 @@ it("a parked refusal stays live and stale recovery does not queue duplicate stee
 			const state = (globalThis as { __lhWakePipeline?: { queues: Map<string, unknown[]> } }).__lhWakePipeline!;
 			assert.equal(state.queues.get(chat.id)?.length, 1);
 			assert.notEqual(stores.jobStore.getJob(job.id)?.activity, "recovering: re-delivering");
-			assert.equal(isJobLive(job.id), true);
+			assert.equal(isJobLive(job.id), false);
+			assert.equal(stores.jobStore.getJob(job.id)?.delivery?.status, "pending");
 		} finally {
 			stores.chatStore.saveMessages(chat.id, []);
 			await waitFor(() => stores.jobStore.getJob(job.id)?.status === "error" && !isJobLive(job.id));
