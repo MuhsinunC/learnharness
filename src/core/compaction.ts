@@ -332,8 +332,10 @@ export function serializeForSummary(messages: readonly LhMessage[]): string {
 			if (blocks.length > 0) lines.push(`[TUTOR] ${blocks.join("\n")}`);
 		} else if (role === "toolResult") {
 			const result = m as ToolResultMessage;
+			// An image block is pixels, never summary text (LH-39): its
+			// base64 would only eat the summarizer's room.
 			const text = result.content
-				.map((c) => (c.type === "text" ? c.text : JSON.stringify(c)))
+				.map((c) => (c.type === "text" ? c.text : c.type === "image" ? "[image]" : JSON.stringify(c)))
 				.join("\n");
 			lines.push(
 				`[RESULT for ${result.toolName}${result.isError ? " (error)" : ""}] ${
