@@ -46,7 +46,6 @@ import { emit } from "../core/events.ts";
 import type { ChatStore } from "../core/ports.ts";
 import {
 	heuristicContextTokens,
-	holdCompactionGate,
 	saveCompactionMarker,
 	sessionKind,
 	subagentSummarizer,
@@ -54,11 +53,9 @@ import {
 	summarySpan,
 	type CompactionDeps,
 } from "./compaction.ts";
-import { piEngineForSpec, type PiEngine } from "../agent/models.ts";
-import { resolveConversationSpec } from "../core/settings-resolution.ts";
-import { modelsNotConfigured } from "../core/settings.ts";
-import { effectiveSettings, stores } from "./stores.ts";
-import { isTurnRunning } from "./turn-liveness.ts";
+import type { PiEngine } from "../agent/models.ts";
+import { stores } from "./stores.ts";
+import { updateSettings } from "../store/settings.ts";
 
 const modelIdOf = (engine: PiEngine) => `${engine.model.provider}:${engine.model.id}`;
 
@@ -73,15 +70,14 @@ export function learnStatedLimit(engine: PiEngine, messages: readonly LhMessage[
 	const stated = reportedContextLimit(lastOverflowText(messages));
 	const modelId = modelIdOf(engine);
 	if (!stated || learnedContextLimit(modelId) === stated) return;
-	const record = stores.settingsStore.readSettings() ?? { version: 1 };
-	stores.settingsStore.writeSettings({ ...record, learnedContextLimits: { ...record.learnedContextLimits, [modelId]: stated } });
+	updateSettings((record) => ({ ...record, learnedContextLimits: { ...record.learnedContextLimits, [modelId]: stated } }));
 }
 
 /** THE WINDOW SEAM: the window this app may trust for the engine's
- *  model — LH-38's per-(provider, model) custom window when set
- *  (piEngineForSpec applies it), else the catalog default; never above a
- *  limit the provider has stated. The threshold compaction and recovery
- *  both read it here. */
+ *  model — LH-38's per-(provider, model) custom window when set (the spec
+ *  carries it: chat-handler's withContextWindow), else the catalog
+ *  default; never above a limit the provider has stated. The threshold
+ *  compaction and recovery both read it here. */
 export function contextWindowFor(engine: PiEngine): number | undefined {
 	const learned = learnedContextLimit(modelIdOf(engine));
 	if (learned === undefined) return engine.model.contextWindow;
@@ -293,37 +289,4 @@ export async function recoverContext(deps: RecoveryDeps, chatId: string): Promis
 	} finally {
 		emit("compaction-changed", { chatId, running: false });
 	}
-}
-
-/** POST /api/chats/[id]/repair — "Repair this chat": the same recovery,
- *  on the learner's request, for a chat whose last reply failed for
- *  length; saved, and the learner sends again. */
-export async function handleRepairRequest(chatId: string): Promise<Response> {
-	const record = stores.chatStore.getChat(chatId);
-	if (!record) return Response.json({ error: "Unknown chat" }, { status: 404 });
-	if (isTurnRunning(chatId)) return Response.json({ error: "A turn is running for this session. Try again when it ends." }, { status: 409 });
-	// Only a chat whose last reply was rejected for length: a healthy chat
-	// has no stated limit to aim at, and a repaired one ends in its marker.
-	const state = contextOverflowState(record.messages.at(-1));
-	if (state !== "repairable") {
-		const error = state === "unrecoverable"
-			? "This chat cannot be condensed any further. Start a new session, or pick a model with a larger context window."
-			: "This chat is not broken: its last reply did not fail for length.";
-		return Response.json({ error }, { status: 409 });
-	}
-	const spec = resolveConversationSpec(record.settings, effectiveSettings().models.strong);
-	if (!spec) return Response.json(modelsNotConfigured(["strong"]), { status: 503 });
-	let engine: PiEngine;
-	try { engine = piEngineForSpec(spec, false); }
-	catch { return Response.json({ error: "The selected model is unavailable." }, { status: 503 }); }
-	const modelName = engine.model.name || engine.model.id;
-	learnStatedLimit(engine, record.messages);
-	const notice = `This chat had grown too long for ${modelName}; I condensed the older part.`;
-	const run = holdCompactionGate(chatId, () => recoverContext(recoveryDeps(stores.chatStore, record, engine, notice), chatId));
-	if (!run) return Response.json({ error: "This session is already being condensed. Try again in a moment." }, { status: 409 });
-	if ((await run) === "unchanged") {
-		explainOverflow(stores.chatStore, chatId, overflowExplanation.stillTooLong(modelName), true);
-		return Response.json({ error: "Nothing older in this chat can be condensed." }, { status: 422 });
-	}
-	return Response.json({ ok: true });
 }
