@@ -42,7 +42,7 @@ import {
 } from "../core/settings-resolution.ts";
 import { contextWindowKey } from "../core/context-windows.ts";
 import { ProviderKeyMissingError, ROLE_SLOT, modelsNotConfigured, providerKeyMissing as providerKeyMissingEnvelope, type ProviderKeyMissing } from "../core/settings.ts";
-import { beginTurn, endTurn } from "./turn-liveness.ts";
+import { beginTurn, endTurn, isTurnRunning } from "./turn-liveness.ts";
 import { applyParkedDismissal } from "./dismissal-park.ts";
 import { registerTurn, rememberTurnFailure, unregisterTurn } from "./turn-runs.ts";
 import { persistTurn, triggerExtraction, TurnPersistenceError } from "./turn-service.ts";
@@ -214,6 +214,40 @@ function recoverFromOverflow(
 
 /** How long overflow recovery waits for a compaction already holding the gate. */
 const GATE_WAIT_MS = 30_000;
+
+/** POST /api/chats/[id]/repair — "Repair this chat": the same recovery,
+ *  on the learner's request, for a chat whose last reply failed for
+ *  length; saved, and the learner sends again. */
+export async function handleRepairRequest(chatId: string): Promise<Response> {
+	const record = stores.chatStore.getChat(chatId);
+	if (!record) return Response.json({ error: "Unknown chat" }, { status: 404 });
+	if (isTurnRunning(chatId)) return Response.json({ error: "A turn is running for this session. Try again when it ends." }, { status: 409 });
+	// Only a chat whose last reply was rejected for length: a healthy chat
+	// has no stated limit to aim at, and a repaired one ends in its marker.
+	const state = contextOverflowState(record.messages.at(-1));
+	if (state !== "repairable") {
+		const error = state === "unrecoverable"
+			? "This chat cannot be condensed any further. Start a new session, or pick a model with a larger context window."
+			: "This chat is not broken: its last reply did not fail for length.";
+		return Response.json({ error }, { status: 409 });
+	}
+	const effective = effectiveSettings();
+	const spec = resolveConversationSpec(record.settings, effective.models.strong);
+	if (!spec) return Response.json(modelsNotConfigured(["strong"]), { status: 503 });
+	let engine: PiEngine;
+	try { engine = piEngineForSpec(withContextWindow(spec, effective.contextWindows), false); }
+	catch { return Response.json({ error: "The selected model is unavailable." }, { status: 503 }); }
+	const modelName = engine.model.name || engine.model.id;
+	learnStatedLimit(engine, record.messages);
+	const notice = `This chat had grown too long for ${modelName}; I condensed the older part.`;
+	const run = holdCompactionGate(chatId, () => recoverContext(recoveryDeps(stores.chatStore, record, engine, notice), chatId));
+	if (!run) return Response.json({ error: "This session is already being condensed. Try again in a moment." }, { status: 409 });
+	if ((await run) === "unchanged") {
+		explainOverflow(stores.chatStore, chatId, overflowExplanation.stillTooLong(modelName), true);
+		return Response.json({ error: "Nothing older in this chat can be condensed." }, { status: 422 });
+	}
+	return Response.json({ ok: true });
+}
 
 /** The route-facing entry: parse {chatId, input} and run one turn. */
 export async function handleChatRequest(

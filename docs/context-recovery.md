@@ -121,7 +121,8 @@ of the teacher's). The settings UI does not show the learned limit.
 
 Recovery and the threshold compaction read the window only through
 `contextWindowFor(engine)` in `src/server/context-recovery.ts`. It starts
-from `engine.model.contextWindow`, where `piEngineForSpec` applies LH-38's
-per-(provider, model) custom window (the user's value when set, else the
-catalog default; this also covers providers with no key, which
-`catalogContextLimits()` skips), and caps it at the learned limit.
+from `engine.model.contextWindow`, which carries LH-38's per-(provider,
+model) custom window (the resolved spec's `contextWindow`, set by
+chat-handler's `withContextWindow`; the user's value when set, else the
+catalog default), and caps it at the learned limit. The repair route
+builds its engine the same way.
