@@ -233,6 +233,39 @@ test("blocked session recovery opens its ordinary picker, never changes Strong o
 	assert.equal(selected, `other:${b.id}`); assert.deepEqual(globals, { strong: body.slots.strong });
 });
 
+for (const result of ["override", "legacy", "http-failure", "network-failure"] as const) test(`known catalog never enforces provisional Strong on a pending session; session read ${result}`, async () => {
+	installFetch(); const available = { ...b, provider: "other" }; const body = catalog();
+	body.models = [available]; body.providers = [{ id: "other", envVar: "OTHER_KEY", keyPresent: true }];
+	// Global Strong is unavailable, but this existing session owns a valid
+	// model. Resolve global settings first while keeping its record pending.
+	const globals: ModelsSettings = { strong: { model: { provider: a.provider, id: a.id }, thinkingLevel: "xhigh" } };
+	let resolveSession!: (response: Response) => void;
+	let rejectSession!: (reason: Error) => void;
+	const sessionRead = new Promise<Response>((resolve, reject) => { resolveSession = resolve; rejectSession = reject; });
+	const requestsOnly = globalThis.fetch;
+	globalThis.fetch = async (input, init) => {
+		if (input === "/api/settings") return Response.json({ settings: { models: globals } });
+		if (input === "/api/chats/fixture") return sessionRead;
+		return requestsOnly(input, init);
+	};
+	await warm(body); const identities: Array<string | undefined> = [];
+	await render(<><Reader /><StatsBar turns={[]} chatId="fixture" onModelChange={(id) => { identities.push(id); }} /></>);
+	assert.ok(snapshot.catalog, "catalog is already known, not the deferred unknown-catalog case");
+	assert.equal(element("stats-model").textContent, "—▾");
+	assert.equal(identities.at(-1), undefined);
+	assert.equal(selectedModelUnavailable(snapshot.catalog, identities.at(-1)), false, "pending session cannot block Send using global Strong");
+	await act(async () => {
+		if (result === "network-failure") rejectSession(new Error("fixture connection failure"));
+		else if (result === "http-failure") resolveSession(Response.json({ error: "fixture unavailable" }, { status: 503 }));
+		else resolveSession(Response.json(result === "legacy" ? {} : { settings: { model: { provider: available.provider, id: available.id }, thinkingLevel: "medium" } }));
+	});
+	const expected = result === "legacy" ? `${a.provider}:${a.id}` : result === "override" ? `other:${b.id}` : undefined;
+	assert.equal(identities.at(-1), expected);
+	assert.equal(selectedModelUnavailable(snapshot.catalog, identities.at(-1)), result === "legacy", "only a confirmed legacy record may inherit the unavailable Strong pin");
+	assert.equal(document.querySelector('[data-testid="model-menu"]'), null);
+	assert.deepEqual(writes, []);
+});
+
 test("availability and setup completeness never conflate missing metadata, disconnected providers or saved identities", () => {
 	const body = catalog(false);
 	assert.equal(savedSlotsConfigured(body.slots), true);

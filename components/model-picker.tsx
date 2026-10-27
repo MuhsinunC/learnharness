@@ -43,7 +43,9 @@ export function catalogLimits(catalog: Pick<ModelCatalogResponse, "models">): Ma
 export function ModelControl({ chatId, onModelChange }: { chatId?: string; onModelChange?: (model: string | undefined) => void }) {
 	const { catalog, refresh } = useModelCatalog();
 	const [models, setModels] = useState<ModelsSettings | undefined>();
-	const [session, setSession] = useState<ChatSettings | undefined>();
+	// A successful read with no settings is a legacy session; undefined
+	// means no session record is known yet, not permission to inherit Strong.
+	const [session, setSession] = useState<{ settings?: ChatSettings }>();
 	const [open, setOpen] = useState<"model" | "thinking" | null>(null);
 	const [error, setError] = useState<string | null>(null);
 	const containerRef = useRef<HTMLDivElement>(null);
@@ -58,8 +60,8 @@ export function ModelControl({ chatId, onModelChange }: { chatId?: string; onMod
 	const readRecord = useCallback(() => {
 		if (chatId) {
 			fetch(`/api/chats/${chatId}`)
-				.then((r) => r.json() as Promise<{ settings?: ChatSettings }>)
-				.then((body) => setSession(body.settings))
+				.then((r) => { if (!r.ok) throw new Error(`session read failed: ${r.status}`); return r.json() as Promise<{ settings?: ChatSettings }>; })
+				.then((body) => setSession({ settings: body.settings }))
 				.catch(() => {
 					/* same read-only posture as a models-section failure */
 				});
@@ -83,15 +85,17 @@ export function ModelControl({ chatId, onModelChange }: { chatId?: string; onMod
 	});
 
 	// Dual-bound truth: chat mode displays the session's own record,
-	// falling back to the strong slot for legacy unstamped sessions —
-	// EXACTLY what resolveConversationSpec runs. Draft mode is the strong
-	// slot itself.
+	// falling back to Strong only for a successfully read legacy unstamped
+	// session — EXACTLY what resolveConversationSpec runs. An unresolved or
+	// failed record read must not report a provisional global preference as
+	// this session's identity (including to the Send guard). Draft mode is
+	// the strong slot itself.
 	const strong = models?.strong;
 	const override: ChatSettings | undefined = chatId
-		? {
-				model: session?.model ?? strong?.model,
-				thinkingLevel: session?.thinkingLevel ?? strong?.thinkingLevel,
-			}
+		? session ? {
+				model: session.settings?.model ?? strong?.model,
+				thinkingLevel: session.settings?.thinkingLevel ?? strong?.thinkingLevel,
+			} : undefined
 		: strong;
 	const effectiveId = override?.model?.id;
 	const effectiveProvider = override?.model?.provider;
@@ -195,7 +199,7 @@ export function ModelControl({ chatId, onModelChange }: { chatId?: string; onMod
 					return;
 				}
 				const stored = (await res.json().catch(() => null)) as { settings?: ChatSettings } | null;
-				setSession(stored?.settings ?? next);
+				setSession({ settings: stored?.settings ?? next });
 				setOpen(null);
 			} catch {
 				setError("Could not reach the server — try again.");
