@@ -21,8 +21,8 @@ const TICKET = "lh-39";
 const LONG = "Here is a long passage of notes about the topic. ".repeat(1_700);
 const VIEW_AGAIN = "Please look at the first image again.";
 
-/** A tiny valid PNG of one solid color — distinct bytes per color. */
-function png(r: number, g: number, b: number): Buffer {
+/** A valid PNG of one solid color (4×4 unless sized) — distinct bytes per color. */
+function png(r: number, g: number, b: number, width = 4, height = 4): Buffer {
 	const chunk = (type: string, data: Buffer) => {
 		const body = Buffer.concat([Buffer.from(type), data]);
 		const out = Buffer.alloc(12 + data.length);
@@ -32,14 +32,15 @@ function png(r: number, g: number, b: number): Buffer {
 		return out;
 	};
 	const ihdr = Buffer.alloc(13);
-	ihdr.writeUInt32BE(4, 0);
-	ihdr.writeUInt32BE(4, 4);
+	ihdr.writeUInt32BE(width, 0);
+	ihdr.writeUInt32BE(height, 4);
 	ihdr.set([8, 2, 0, 0, 0], 8);
-	const row = Buffer.from([0, ...Array.from({ length: 4 }, () => [r, g, b]).flat()]);
+	const row = Buffer.alloc(1 + width * 3);
+	for (let x = 0; x < width; x++) row.set([r, g, b], 1 + x * 3);
 	return Buffer.concat([
 		Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
 		chunk("IHDR", ihdr),
-		chunk("IDAT", zlib.deflateSync(Buffer.concat([row, row, row, row]))),
+		chunk("IDAT", zlib.deflateSync(Buffer.concat(Array.from({ length: height }, () => row)))),
 		chunk("IEND", Buffer.alloc(0)),
 	]);
 }
@@ -277,10 +278,21 @@ test("(e) a model that can't read images says so; the per-model override turns i
 	assert.equal(refused.status, 400);
 	assert.equal((await refused.json()).code, "images_unsupported");
 
-	// The per-pair override persists on disk and lifts the gate.
-	await server.json("/api/settings/imageSupport", { method: "PUT", body: { "e2e-stub": { "text-only": true } } });
-	const onDisk = JSON.parse(fs.readFileSync(path.join(dataDir, "settings.json"), "utf8"));
+	// Settings → Agent → Models → "Image input": turn it on for this
+	// model. The override persists on disk and lifts the gate.
+	await page.click("[data-testid=settings-entry]");
+	await page.click("[data-testid=settings-nav-agent]");
+	await page.waitForSelector("[data-testid=image-support-row] select:not([disabled])", { timeout: 60_000 });
+	await page.select("[data-testid=image-support-model]", "e2e-stub:text-only");
+	assert.equal(await page.$eval("[data-testid=image-support-value]", (el) => (el as HTMLSelectElement).value), "default");
+	await page.select("[data-testid=image-support-value]", "on");
+	const onDisk = await until(() => {
+		const record = JSON.parse(fs.readFileSync(path.join(dataDir, "settings.json"), "utf8"));
+		return record.imageSupport?.["e2e-stub"]?.["text-only"] === true ? record : null;
+	}, "the override on disk");
 	assert.deepEqual(onDisk.imageSupport, { "e2e-stub": { "text-only": true } });
+	await page.keyboard.press("Escape");
+	await until(() => page.$("[data-testid=settings-dialog]").then((d) => d === null), "the settings dialog to close");
 	await fileEvent(page, "paste", IMAGES.pasted, "screenshot.png");
 	await page.waitForSelector("[data-testid=attachment-chip]", { timeout: 30_000 });
 	await page.close();
@@ -307,4 +319,69 @@ test("the wire carries at most 20 images per request, newest first", async () =>
 	assert.equal(sent.length, 20);
 	assert.ok(!sent.includes(many[0]!.toString("base64")), "the oldest image rides as a reference");
 	assert.match(JSON.stringify(req.messages), new RegExp(`Image attached by the learner: ${idOf(many[0]!)}`));
+});
+
+/** The pixel size of a PNG payload (IHDR), or null for other formats. */
+function pngSize(b64: string): { width: number; height: number } | null {
+	const bytes = Buffer.from(b64, "base64");
+	return bytes.readUInt32BE(0) === 0x89504e47 ? { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) } : null;
+}
+
+test("a 4000×3000 screenshot is downscaled to 2000 px before it is stored", async () => {
+	const { id } = await server.json<{ id: string }>("/api/chats", { body: { title: "Big screenshot" } });
+	const page = await chrome.browser.newPage();
+	await openChat(page, id);
+	await fileEvent(page, "paste", png(200, 120, 40, 4000, 3000), "retina.png");
+	await page.waitForSelector("[data-testid=attachment-chip]", { timeout: 60_000 });
+	const before = stub.requests.length;
+	await sendFromComposer(page, "What does this show?");
+	const chat = await settled(id, 1);
+	const sent = imagesIn(stub.requests.slice(before).find((r) => !isSummary(r))!);
+	assert.equal(sent.length, 1);
+	assert.deepEqual(pngSize(sent[0]!), { width: 2000, height: 1500 });
+	const stored = (chat.messages[0]!.attachments as Array<{ id: string }>)[0]!.id;
+	assert.deepEqual(pngSize(fs.readFileSync(path.join(dataDir, "attachments", stored)).toString("base64")), { width: 2000, height: 1500 });
+	await page.close();
+});
+
+test("a refused send puts its images back with the text", async () => {
+	// gpt-5.5 reads images, but no OpenAI key exists: the send refuses
+	// (provider_key_missing) and the draft returns to the composer.
+	const { id } = await server.json<{ id: string }>("/api/chats", { body: { title: "Refused" } });
+	await server.json(`/api/chats/${id}/settings`, { method: "PUT", body: { model: { provider: "openai", id: "gpt-5.5" } } });
+	const page = await chrome.browser.newPage();
+	await openChat(page, id);
+	await fileEvent(page, "paste", IMAGES.dropped, "diagram.png");
+	await page.waitForSelector("[data-testid=attachment-chip]", { timeout: 30_000 });
+	await sendFromComposer(page, "Explain this diagram");
+	// The refusal flow ran: it opens setup, and the record kept nothing.
+	await page.waitForSelector("[data-testid=setup-backdrop]", { timeout: 60_000 });
+	const record = await server.json<{ messages: Array<{ role: string }> }>(`/api/chats/${id}`);
+	assert.equal(record.messages.filter((m) => m.role === "user").length, 0);
+	await until(async () => {
+		const value = await page.$eval("[data-testid=composer] textarea", (el) => (el as HTMLTextAreaElement).value);
+		const chips = await page.$$("[data-testid=attachment-chip]");
+		return value === "Explain this diagram" && chips.length === 1;
+	}, "the text and the image chip to come back");
+	await page.close();
+});
+
+test("the new-session page takes a pasted image into the first message", async () => {
+	const page = await chrome.browser.newPage();
+	await page.goto(`${server.url}/chat/new`, { waitUntil: "domcontentloaded", timeout: 180_000 });
+	await page.waitForFunction(
+		() => Object.keys(document.querySelector("[data-testid=composer] textarea") ?? {}).some((k) => k.startsWith("__reactProps")),
+		{ timeout: 180_000 },
+	);
+	const image = png(90, 90, 200);
+	await fileEvent(page, "paste", image, "first.png");
+	await page.waitForSelector("[data-testid=attachment-chip]", { timeout: 30_000 });
+	const before = stub.requests.length;
+	await sendFromComposer(page, "Teach me what this shows");
+	await page.waitForFunction(() => /\/chat\/(?!new)[^/?]+/.test(location.pathname), { timeout: 60_000 });
+	const id = await page.evaluate(() => location.pathname.split("/").pop()!);
+	const chat = await settled(id, 1);
+	assert.deepEqual((chat.messages[0]!.attachments as Array<{ id: string }>).map((a) => a.id), [idOf(image)]);
+	assert.ok(stub.requests.slice(before).some((r) => imagesIn(r).includes(image.toString("base64"))), "the image reached the provider");
+	await page.close();
 });
