@@ -152,8 +152,10 @@ export function catalogProviders(): CatalogProvider[] {
 	providers.push({ id: "chatgpt", envVar: "", keyPresent: chatGPTConnected() });
 	providers.push(...NATIVE_SUBSCRIPTIONS.map((p) => ({ id: p.logicalId, envVar: "", keyPresent: nativeSubscriptionConnected(p.providerId) })));
 	// The e2e stub providers (LH_E2E=1 only; empty otherwise) federate
-	// like keyed providers, so the UI's catalog reaches their models.
-	providers.push(...e2eProviders().map((p) => ({ id: p.id, envVar: "", keyPresent: true })));
+	// like keyed providers, so the UI's catalog reaches their models. A
+	// stub under a real provider's id (openrouter) keeps that id's key gate.
+	const known = new Set(providers.map((p) => p.id));
+	providers.push(...e2eProviders().filter((p) => !known.has(p.id)).map((p) => ({ id: p.id, envVar: "", keyPresent: true })));
 	return providers.sort((a, b) => a.id.localeCompare(b.id));
 }
 
