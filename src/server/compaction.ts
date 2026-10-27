@@ -60,7 +60,7 @@ const SUMMARIZER_SYSTEM_PROMPT =
 export type Summarizer = (prompt: string, engine: PiEngine) => Promise<{ summary: string; usage: Usage }>;
 
 /** The production summarizer over the sub-agent seam. */
-async function subagentSummarizer(prompt: string, engine: PiEngine): Promise<{ summary: string; usage: Usage }> {
+export async function subagentSummarizer(prompt: string, engine: PiEngine): Promise<{ summary: string; usage: Usage }> {
 	let usage: Usage = {
 		input: 0,
 		output: 0,
@@ -167,6 +167,69 @@ export function projectedContextTokens(messages: readonly LhMessage[], systemPro
 	return estimateTokens(toLlmMessages(messages as readonly AgentMessage[]) as unknown as readonly LhMessage[]) + systemPromptTokens;
 }
 
+// ─── shared by the threshold run and overflow recovery ──────────────────────
+
+/** The summarizer's input for a cut: the span from the PREVIOUS kept
+ *  boundary through the cut, led by the prior summary (chained
+ *  compactions summarize the old summary + what rode after it). */
+export function summarySpan(messages: readonly LhMessage[], cut: number): string {
+	const previous = activeCompactionOf(messages);
+	const prevKept = previous ? messages.findIndex((m) => m.id === previous.details.firstKeptMessageId) : -1;
+	if (!previous || prevKept <= 0) return serializeForSummary(messages.slice(0, cut));
+	// The separately supplied prior summary replaces all summary markers
+	// in this span. Without a resolved prior boundary, retain the existing
+	// legacy fallback rather than silently discarding summary-only context.
+	const spanText = serializeForSummary(messages.slice(prevKept, cut).filter((m) => m.role !== "custom" || m.customType !== "compaction"));
+	return `[SYSTEM NOTE — prior compaction summary, still authoritative where not superseded]\n${previous.content}\n\n${spanText}`;
+}
+
+/** Append the marker, log the summary's usage (when a model wrote it),
+ *  and notify. */
+export function saveCompactionMarker(
+	deps: Pick<CompactionDeps, "chatStore" | "modelId">,
+	chatId: string,
+	messages: readonly LhMessage[],
+	marker: LhMarkerMessage,
+	usage: Usage | null,
+): void {
+	deps.chatStore.saveMessages(chatId, [...messages, marker]);
+	// The money channel: the summary is a real model call on the
+	// session's own engine — its usage keys to the marker (provenance:
+	// the transcript shows the compaction divider at the marker).
+	if (usage) {
+		deps.chatStore.appendTurnUsage(chatId, {
+			id: crypto.randomUUID(),
+			messageId: marker.id,
+			at: (marker.details as CompactionDetails).at,
+			model: deps.modelId,
+			steps: [
+				{
+					inputTokens: usage.input,
+					outputTokens: usage.output,
+					cacheReadTokens: usage.cacheRead,
+					cacheWriteTokens: usage.cacheWrite,
+					cacheWrite1hTokens: usage.cacheWrite1h ?? 0,
+					reasoningTokens: usage.reasoning ?? 0,
+				},
+			],
+		});
+	}
+	// Notify-then-fetch: the record gained the marker (the client's
+	// dividers appear) and the status event ends the send gate.
+	emit("record-changed", { chatId });
+}
+
+/** Run `work` holding the chat's compaction gate, so every turn start
+ *  awaits it (overflow recovery shares the mutex). Registered
+ *  synchronously; the entry is gone by the time the returned promise
+ *  settles. null when a compaction already holds the gate. */
+export function holdCompactionGate<T>(chatId: string, work: () => Promise<T>): Promise<T> | null {
+	if (state().inFlight.has(chatId)) return null;
+	const run = work();
+	state().inFlight.set(chatId, run.then(() => undefined, () => undefined));
+	return run.finally(() => state().inFlight.delete(chatId));
+}
+
 // ─── the compaction run ─────────────────────────────────────────────────────
 
 /** Run one compaction for the chat (the registry mutex is HELD by the
@@ -200,25 +263,8 @@ async function compact(deps: CompactionDeps, chatId: string): Promise<void> {
 		return;
 	}
 
-	// The span: from the PREVIOUS kept boundary through the cut.
-	let spanStart = 0;
-	let priorSummary: string | null = null;
-	if (previous && prevKept > 0) {
-		spanStart = prevKept;
-		priorSummary = previous.content;
-	}
-	const span = messages.slice(spanStart, cut);
-	// The separately supplied prior summary replaces all summary markers
-	// in this span. Without a resolved prior boundary, retain the existing
-	// legacy fallback rather than silently discarding summary-only context.
-	const summaryMessages = priorSummary
-		? span.filter((m) => m.role !== "custom" || m.customType !== "compaction")
-		: span;
-	const spanText = serializeForSummary(summaryMessages);
-	const fullSpan = priorSummary ? `[SYSTEM NOTE — prior compaction summary, still authoritative where not superseded]\n${priorSummary}\n\n${spanText}` : spanText;
-
 	const prompt = buildCompactionPrompt({
-		spanText: fullSpan,
+		spanText: summarySpan(messages, cut),
 		planTreeText: planTreeToText(record.tree, messages),
 		kind: deps.kind,
 	});
@@ -237,30 +283,7 @@ async function compact(deps: CompactionDeps, chatId: string): Promise<void> {
 			model: deps.modelId,
 			at: new Date().toISOString(),
 		};
-		const marker = newCompactionMarker(trimmed, details);
-		deps.chatStore.saveMessages(chatId, [...messages, marker]);
-		// The money channel: the summary is a real model call on the
-		// session's own engine — its usage keys to the marker (provenance:
-		// the transcript shows the compaction divider at the marker).
-		deps.chatStore.appendTurnUsage(chatId, {
-			id: crypto.randomUUID(),
-			messageId: marker.id,
-			at: details.at,
-			model: deps.modelId,
-			steps: [
-				{
-					inputTokens: usage.input,
-					outputTokens: usage.output,
-					cacheReadTokens: usage.cacheRead,
-					cacheWriteTokens: usage.cacheWrite,
-					cacheWrite1hTokens: usage.cacheWrite1h ?? 0,
-					reasoningTokens: usage.reasoning ?? 0,
-				},
-			],
-		});
-		// Notify-then-fetch: the record gained the marker (the client's
-		// dividers appear) and the status event ends the send gate.
-		emit("record-changed", { chatId });
+		saveCompactionMarker(deps, chatId, messages, newCompactionMarker(trimmed, details), usage);
 	} catch (err) {
 		// A failed compaction leaves the record untouched — the next
 		// turn-start gate retries (the same self-healing law as the

@@ -254,6 +254,10 @@ export interface CompactionDetails {
 	model?: string;
 	/** ISO timestamp of the compaction moment. */
 	at: string;
+	/** Set by context-overflow recovery (LH-40): the learner-facing line
+	 *  the moment divider shows. Its presence also marks the marker as a
+	 *  recovery, which the one-retry guard reads. */
+	notice?: string;
 }
 
 /** Build the compaction marker. Content is the FULL model-facing text
@@ -377,6 +381,8 @@ export function buildCompactionPrompt(input: {
 	planTreeText: string | null;
 	/** The session kind (wording: tutor vs practice agent). */
 	kind: "teach" | "practice" | "probe";
+	/** A hard length cap (overflow recovery: the summary must fit a small window). */
+	maxWords?: number;
 }): string {
 	const planSection =
 		input.planTreeText ?? "No plan tree exists in this session (nothing was persisted).";
@@ -398,7 +404,7 @@ ${planSection}
 ## The current moment
 What is happening RIGHT NOW at the cut: any question or problem awaiting the learner's answer, any commitment the agent has made that a later turn must honor, and the immediate next step.
 
-Rules: no praise, no filler, no speculation beyond the transcript. Every claim about the learner must be traceable to what they actually said or answered. Keep every identifier (proposition ids, node ids, file paths) exact.
+Rules: no praise, no filler, no speculation beyond the transcript. Every claim about the learner must be traceable to what they actually said or answered. Keep every identifier (proposition ids, node ids, file paths) exact.${input.maxWords ? ` Keep the whole summary under ${input.maxWords} words.` : ""}
 
 TRANSCRIPT TO SUMMARIZE:
 

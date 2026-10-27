@@ -35,6 +35,7 @@ import { JobsContext } from "@/components/jobs-context";
 import { StatsBar } from "@/components/stats-bar";
 import { useServerEvent, useServerResync } from "@/components/server-events";
 import {
+	isContextOverflowText,
 	isProviderKeyRefusal,
 	firstSourceTextParts,
 	messageAnchorId,
@@ -806,6 +807,20 @@ export function Chat({
 		// sync must never automatically replace a reply that failed to save.
 		continueIfOwed(record.messages);
 	}, [chatId, setMessages, continueIfOwed]);
+
+	// "Repair this chat" (LH-40): a context-length failure gets the
+	// overflow recovery's compaction on demand; the record sync drops the
+	// banner (the recovery marker now ends the record).
+	const [repairing, setRepairing] = useState(false);
+	const repairChat = useCallback(async () => {
+		setRepairing(true);
+		try {
+			const res = await fetch(`/api/chats/${chatId}/repair`, { method: "POST" });
+			if (res.ok) await syncFromServer();
+		} finally {
+			setRepairing(false);
+		}
+	}, [chatId, syncFromServer]);
 
 	// The settled terminal's other half (stream-reattach wave): the
 	// transport resolved turn-settled — no turn running, the record is
@@ -1666,12 +1681,24 @@ export function Chat({
 							)}
 							{openingError && <p role="alert" className="text-sm text-destructive">{OPENING_PROMPT_FAILURE}</p>}
 							{error && (
-								<div className="flex items-center justify-between gap-3 rounded-lg border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm">
-									<span>Something went wrong: {refusalBannerText(error.message)}</span>
-									{retryable && (
+								<div data-testid="chat-error" className="flex items-center gap-3 rounded-lg border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm">
+									<span className="min-w-0 flex-1">Something went wrong: {refusalBannerText(error.message)}</span>
+									{/* An over-context failure needs Repair; retrying the same context fails again. */}
+									{retryable && !isContextOverflowText(error.message) && (
 										<Button variant="outline" size="xs" data-testid="retry-failed-turn" onClick={retryFailedTurn}>
 											Retry
 										</Button>
+									)}
+									{isContextOverflowText(error.message) && (
+										<button
+											type="button"
+											data-testid="repair-chat"
+											disabled={repairing}
+											onClick={() => void repairChat()}
+											className="shrink-0 rounded-md border border-border px-2 py-1 text-xs font-medium transition-colors hover:bg-accent disabled:opacity-50"
+										>
+											{repairing ? "Repairing…" : "Repair this chat"}
+										</button>
 									)}
 								</div>
 							)}
