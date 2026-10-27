@@ -26,7 +26,7 @@ thinking level doesn't affect the window.
 | Composer footer "used / window" | `/api/models` `contextWindow` (custom over default) → `catalogLimits` → stats bar |
 | Compaction trigger, `min(threshold, window − 16k)` | `catalogContextLimits()` in `src/server/model-catalog.ts` |
 | Activity dock job limits | `catalogContextLimits()` |
-| Engine model, and pi-ai's max-tokens clamp (`window − context − 4096`) | `setContextWindowLookup` → `piEngineForSpec` in `src/agent/models.ts` |
+| Engine model, and pi-ai's max-tokens clamp (`window − context − 4096`) | `setContextWindowLookup` → `piEngineForSpec` in `src/agent/models.ts`; native subscription transports carry it across (`src/agent/subscription-stream.ts`). The claude-code stream has no max-tokens surface |
 
 With the default 150k threshold, a window **above** the default doesn't move
 the compaction trigger. Only a window below about 166k lowers it. To compact
@@ -54,12 +54,26 @@ for ChatGPT + gpt-6.1-terra only takes effect once pi-ai adds the model.
 | chatgpt:gpt-6-astra, gpt-6-sol, gpt-6-luna, gpt-5.6-sol | 272k | 920k | Upstream catalog says 872k. Raised to 920k after a context-limit bisection through the Codex backend on a subscription login: about 920.9k input tokens accepted, about 922k rejected (2026-09-26) |
 | chatgpt:gpt-5.6-terra, gpt-5.6-luna | 272k | 872k | Codex CLI bundled catalog, `max_context_window` |
 | openai:gpt-6.1-sol, gpt-6-astra, gpt-6-sol, gpt-6-luna, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna | 272k | 1.05M | OpenAI API model pages: "1,050,000 context window". Prompts above 272K input tokens are billed at 2x input and 1.5x output ([gpt-6.1-sol](https://developers.openai.com/api/docs/models/gpt-6.1-sol), [gpt-6-sol](https://developers.openai.com/api/docs/models/gpt-6-sol), [gpt-6-astra](https://developers.openai.com/api/docs/models/gpt-6-astra), [gpt-6-luna](https://developers.openai.com/api/docs/models/gpt-6-luna), [gpt-5.6-sol](https://developers.openai.com/api/docs/models/gpt-5.6-sol), [gpt-5.6-terra](https://developers.openai.com/api/docs/models/gpt-5.6-terra), [gpt-5.6-luna](https://developers.openai.com/api/docs/models/gpt-5.6-luna), checked 2026-10-27) |
-| every other pair (Anthropic, OpenRouter, ...) | pi-ai `contextWindow` | = Default | No documented higher limit found |
+| anthropic:claude-fable-5-1, fable-5, opus-5-5, opus-5, opus-4-8, opus-4-7, opus-4-6, sonnet-5-5, sonnet-5, sonnet-4-6, haiku-5-5 | 1M | 1M | pi-ai `contextWindow`, matching [Anthropic's context-window docs](https://platform.claude.com/docs/en/build-with-claude/context-windows): "have a 1M-token context window … 1M is the default: you don't need a beta header" (checked 2026-10-27) |
+| anthropic:claude-opus-4-5, sonnet-4-5, haiku-4-5 | 200k | 200k | Same docs: "Other Claude models, including Claude Sonnet 4.5 (deprecated), have a 200k-token context window" |
+| claude-code:claude-fable-5-1, fable-5, opus-5-5, opus-5, opus-4-8, opus-4-7, sonnet-5 | 1M | 1M | `claudeCodeCatalog` in `src/agent/claude-code/models.ts`: `MEASURED_ONE_M` ids run as `<id>[1m]` |
+| claude-code:claude-opus-4-6, sonnet-4-6 | 200k | 200k | Same file: these run at 1M only on the Max plan (opus-4-6) or with long-context extra usage (`PLAN_GATED_ONE_M`). The fork's settings are `plan: "pro"` with no extra usage, so the CLI runs the plain id at 200k |
+| claude-code:claude-sonnet-5-5, haiku-5-5, opus-4-5, sonnet-4-5, haiku-4-5 | 200k | 200k | Same file: not in either 1M table, so the CLI runs the plain id at 200k, even though the API model supports 1M (sonnet-5-5, haiku-5-5) |
+| every other pair (OpenRouter, ...) | pi-ai `contextWindow` | = Default | No documented higher limit found |
 
 The Codex catalogs also give `effective_context_window_percent: 95`. LearnHarness
 doesn't apply that factor, and its own 16k compaction reserve plays a similar role.
 
 ### Caveats
+
+- **Claude Code (`claude-code`).** The window the CLI actually runs comes from
+  the model id it's given (`claudeCodeModelId`: `<id>` for 200k, `<id>[1m]`
+  for 1M), and this setting doesn't change that id. The claude-code stream
+  also ignores max tokens (`src/agent/claude-code/stream.ts`). So a custom
+  claude-code window moves only LearnHarness's own budget: the footer and the
+  compaction trigger. That's why Maximum = Default there, and a value above it
+  goes through the warning modal. To let a 200k claude-code model run at 1M,
+  the `[1m]` tables have to change; this setting can't do it.
 
 - LearnHarness sends ChatGPT requests to `https://api.openai.com/v1` with the
   subscription token (`src/agent/chatgpt-stream.ts`). The Codex maxima above
