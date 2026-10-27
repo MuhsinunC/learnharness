@@ -20,12 +20,12 @@ import {
 	type VisualToolInput,
 } from "../../core/contracts.ts";
 import { registerJobAbort, unregisterJobAbort } from "./aborts.ts";
+import { authFailureText, modelLabel, providerAuthError, retryRejectedText, strongFallback, type ProviderAuthError } from "./auth-fallback.ts";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ModelRole } from "../../../config.ts";
 import { ProviderKeyMissingError, ROLE_SLOT, modelsNotConfigured, type ModelSlotName, type ProviderKeyMissing } from "../../core/settings.ts";
-import { AUTH_PROVIDER_KEYS } from "../../core/auth-keys.ts";
 import type { ChatStore, JobStore } from "../../core/ports.ts";
 import { runDemoBuilder } from "./demo-builder.ts";
 import { runPdfReaderAgent } from "./pdf-reader.ts";
@@ -196,27 +196,6 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 		return testOverride[KIND_ROLE[kind]]?.current ?? deps.engineFor?.(KIND_ROLE[kind]);
 	}
 
-	/** The strong slot's engine as the auth fallback for a cheap or vision
-	 *  job (LH-37): the teacher's model, usually a subscription that needs
-	 *  no API key. A string is why it can't take over (learner-readable). */
-	function fallbackEngine(kind: JobKind, failed: PiEngine): PiEngine | string {
-		const tier = ROLE_SLOT[KIND_ROLE[kind]];
-		let strong: PiEngine | undefined;
-		try {
-			strong = deps.engineFor?.("teacher");
-		} catch {
-			return ""; // the strong slot names a model the catalog lacks
-		}
-		if (tier === "strong" || !strong) return "";
-		if (strong.model.provider === failed.model.provider && strong.model.id === failed.model.id) return "";
-		if (tier === "vision" && !strong.model.input.includes("image"))
-			return `Your Strong model (${modelLabel(strong)}) can't read images, so it can't take over.`;
-		if (deps.providerKeyMissing?.(strong.model.provider, "strong")) return "";
-		if (deps.backgroundAllowed && !deps.backgroundAllowed(strong.model.provider))
-			return `Your Strong model (${modelLabel(strong)}) could run this job instead, but background use is off for that sign-in. Turn on background use for it in Settings → Providers, or pick another ${SLOT_LABEL[tier]} model.`;
-		return strong;
-	}
-
 	const KIND_RUNNERS: Record<
 		JobKind,
 		(jobId: string, engine: PiEngine, input: JobToolInput | undefined, loop: LoopContext) => Promise<JobResult | undefined>
@@ -355,7 +334,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 			let outcome = await attempt(engine);
 			let authFailure: string | undefined;
 			if (outcome.authError && !timedOut && stillRunning(jobId)) {
-				const fallback = fallbackEngine(job.kind, engine);
+				const fallback = strongFallback(tier, engine, deps);
 				if (typeof fallback === "string") {
 					authFailure = authFailureText(tier, engine, outcome.authError, fallback);
 				} else {
@@ -363,7 +342,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 					jobStore.updateJob(jobId, { error: undefined, activity: `retrying on ${modelLabel(fallback)}` });
 					const retry = await attempt(fallback);
 					if (retry.authError)
-						authFailure = authFailureText(tier, engine, outcome.authError, `Retrying on your Strong model (${modelLabel(fallback)}) was rejected too: ${describeAuthError(retry.authError)}.`);
+						authFailure = authFailureText(tier, engine, outcome.authError, retryRejectedText(fallback, retry.authError));
 					outcome = retry;
 				}
 			}
@@ -645,69 +624,6 @@ function isVisualFailure(result: VisualResult): boolean {
 /** The pdf-reader's failure brief (mirrors the research failure shape). */
 function isPdfFailure(result: PdfResult): boolean {
 	return /^PDF failed:/i.test(result.brief);
-}
-
-// ─── provider auth failures (LH-37) ─────────────────────────────────────────
-
-/** A model call the provider refused on credentials. */
-interface ProviderAuthError {
-	status?: number;
-	/** The provider's own message, unwrapped from its JSON body. */
-	detail: string;
-}
-
-const AUTH_TEXT = /invalid[ _-]?api[ _-]?key|incorrect api key|check the api[ _-]?key|authentication_error|unauthori[sz]ed/i;
-
-/**
- * Classify a failed call's errorMessage. pi-ai formats HTTP failures as
- * `<status> <sdk message>` or `<status>: <body>` (utils/error-body.js), e.g.
- * Baseten's bad key: `403 "please check the api-key you provided"`. The
- * status survives only inside that string.
- */
-function providerAuthError(message: string | undefined): ProviderAuthError | undefined {
-	if (!message) return undefined;
-	const match = /^(\d{3})(?::\s*|\s+)/.exec(message);
-	const status = match ? Number(match[1]) : undefined;
-	if (status !== 401 && status !== 403 && !AUTH_TEXT.test(message)) return undefined;
-	const rest = match ? message.slice(match[0].length) : message;
-	let detail = rest;
-	try {
-		const body = JSON.parse(rest) as unknown;
-		const inner = typeof body === "object" && body !== null ? (body as { message?: unknown; error?: unknown }) : undefined;
-		const text = typeof body === "string" ? body : inner?.message ?? (inner?.error as { message?: unknown } | undefined)?.message ?? inner?.error;
-		if (typeof text === "string") detail = text;
-	} catch {
-		// Not JSON: keep the text as the provider sent it.
-	}
-	return { status, detail: detail.slice(0, 300) };
-}
-
-function describeAuthError(error: ProviderAuthError): string {
-	return `${error.status ? `HTTP ${error.status}, ` : ""}"${error.detail}"`;
-}
-
-const SLOT_LABEL: Record<ModelSlotName, string> = { strong: "Strong", cheap: "Cheap", vision: "Vision" };
-
-function providerLabel(provider: string): string {
-	if (provider === "chatgpt") return "ChatGPT";
-	return AUTH_PROVIDER_KEYS.find((p) => p.id === provider)?.label ?? provider;
-}
-
-function modelLabel(engine: PiEngine): string {
-	return `${providerLabel(engine.model.provider)} · ${engine.model.name || engine.model.id}`;
-}
-
-/** The learner-readable failure: which slot and model, what the provider
- *  said, and where to fix it. `extra` reports the fallback's outcome. */
-function authFailureText(tier: ModelSlotName, engine: PiEngine, error: ProviderAuthError, extra: string): string {
-	const slot = SLOT_LABEL[tier];
-	return [
-		`The ${slot} model (${modelLabel(engine)}) was rejected by ${providerLabel(engine.model.provider)}: ${describeAuthError(error)}.`,
-		extra,
-		`Go to Settings → Providers to fix the key, or Settings → Agent → Models to switch the ${slot} model to your ChatGPT/Claude sign-in.`,
-	]
-		.filter(Boolean)
-		.join(" ");
 }
 
 function formatLimit(ms: number): string {
