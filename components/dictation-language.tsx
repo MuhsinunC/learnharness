@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent }
 import { DICTATION_LANGUAGES, type DictationLanguage } from "@/src/core";
 import { MenuShell } from "@/components/menu-shell";
 import { Hint } from "@/components/ui/hint";
-import { SettingsMenuTrigger } from "@/components/settings/controls";
+import { SettingsMenuTrigger, SettingsRow } from "@/components/settings/controls";
 import { SearchMenuList } from "@/components/settings/search-menu-list";
 import { useDictationActive } from "@/components/dictation-state";
 import { useDictationLanguage } from "@/components/dictation-preference";
@@ -14,13 +14,9 @@ type LanguagePreference = ReturnType<typeof useDictationLanguage>;
 export function DictationLanguageSetting() {
 	const preference = useDictationLanguage();
 	const active = useDictationActive();
-	return <div
-		data-testid="row-dictation-language"
-		className={`flex items-center justify-between gap-3 rounded-sm px-1 py-1.5${active ? " opacity-40" : ""}`}
-	>
-		<span className="font-ui text-xs text-foreground">Language</span>
+	return <SettingsRow label="Language" testid="row-dictation-language" dimmed={active}>
 		<DictationLanguagePicker preference={preference} disabled={active} />
-	</div>;
+	</SettingsRow>;
 }
 
 function DictationLanguagePicker({ preference, disabled }: {

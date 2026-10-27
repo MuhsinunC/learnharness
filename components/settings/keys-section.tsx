@@ -493,12 +493,12 @@ export function KeysSection({
 				{label === "Dictation" && <>
 					<DictationLanguageSetting />
 					<p data-testid="dictation-setup-hint" className="px-1 text-[11px] leading-relaxed text-muted-foreground/70">
-						Create a Deepgram key with the <a
-							href="https://developers.deepgram.com/reference/auth/tokens/grant"
+						Create a <a
+							href="https://console.deepgram.com/"
 							target="_blank"
 							rel="noreferrer"
 							className="underline underline-offset-2 hover:text-foreground"
-						>Member role or higher</a>, then add it above.
+						>Deepgram API key</a> with the Member role or higher, then add it above.
 					</p>
 				</>}
 			</SettingsGroup>)}

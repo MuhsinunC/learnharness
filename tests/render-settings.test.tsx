@@ -21,6 +21,7 @@ import { SettingsDialogBody, SettingsDialogProvider } from "../components/settin
 import { KEYBOARD_ACTIONS } from "../src/core/index.ts";
 import { DictationLanguageSetting } from "../components/dictation-language.tsx";
 import { SettingsMenuTrigger } from "../components/settings/controls.tsx";
+import { SubscriptionConnections } from "../components/settings/subscription-connections.tsx";
 
 /** The full opening tag of the element carrying a testid — attribute
  *  order in React output is not contractual, so assertions run on the
@@ -86,6 +87,25 @@ describe("the shared settings dropdown trigger", () => {
 		assert.ok(!unavailable.includes('disabled=""'));
 		assert.ok(unavailable.includes("cursor-not-allowed"));
 		assert.ok(!unavailable.includes("hover:border-muted-foreground/50"));
+	});
+});
+
+describe("Providers settings-label typography", () => {
+	it("Language uses the standard sans SettingsRow label without changing its mono trigger", () => {
+		const html = renderToStaticMarkup(<DictationLanguageSetting />);
+		assert.ok(html.includes('<span class="block font-prose text-(length:--lh-prose-size)">Language</span>'));
+		assert.ok(tagOf(html, "dictation-language").includes("font-ui text-xs"));
+	});
+
+	it("only Providers subscription labels use sans; setup labels retain their compact mono styling", () => {
+		const settings = renderToStaticMarkup(<SubscriptionConnections />);
+		const setup = renderToStaticMarkup(<SubscriptionConnections setup />);
+		for (const label of ["ChatGPT", "GitHub Copilot", "Grok"]) {
+			assert.ok(settings.includes(`<span class="font-prose text-(length:--lh-prose-size) text-foreground">${label}</span>`), `${label}: settings sans label`);
+			assert.ok(setup.includes(`<span class="font-ui text-xs text-foreground">${label}</span>`), `${label}: unchanged setup label`);
+		}
+		assert.equal((settings.match(/>Connect<\/button>/g) ?? []).length, 3);
+		assert.equal((setup.match(/>Connect<\/button>/g) ?? []).length, 3);
 	});
 });
 

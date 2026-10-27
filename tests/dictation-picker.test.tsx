@@ -229,10 +229,12 @@ for (const source of ["none", "file", "env"] as const) test(`Language is below t
 	assert.equal(rows[0]!.getAttribute("data-testid"), "key-deepgram_api_key");
 	assert.equal(rows[1]!.getAttribute("data-testid"), "row-dictation-language");
 	assert.equal(rows[2]!.getAttribute("data-testid"), "dictation-setup-hint");
-	assert.equal(byTest("dictation-setup-hint").textContent, "Create a Deepgram key with the Member role or higher, then add it above.");
+	assert.equal(byTest("dictation-setup-hint").textContent, "Create a Deepgram API key with the Member role or higher, then add it above.");
 	assert.match(byTest("dictation-setup-hint").className, /text-muted-foreground/);
-	assert.equal(byTest("dictation-setup-hint").querySelector("a")!.href, "https://developers.deepgram.com/reference/auth/tokens/grant");
-	assert.match(rows[1]!.querySelector("span")!.className, /font-ui text-xs/);
+	assert.equal(byTest("dictation-setup-hint").querySelector("a")!.href, "https://console.deepgram.com/");
+	assert.equal(byTest("dictation-setup-hint").querySelector("a")!.textContent, "Deepgram API key");
+	assert.equal(byTest("dictation-setup-hint").querySelectorAll("a").length, 1);
+	assert.match(rows[1]!.querySelector(".font-prose")!.className, /text-\(length:--lh-prose-size\)/);
 	assert.equal(trigger().disabled, false, "language is independent of key ownership");
 	await click(byTest("key-deepgram_api_key-row"));
 	if (source !== "env") assert.ok(byTest("key-deepgram_api_key-editor"));
