@@ -83,7 +83,7 @@ import {
 } from "@/src/core";
 import { ReadingThinkingField } from "@/components/reading-thinking";
 import { currentUserThinkingOpen, setAllUserThinkingOpen } from "@/components/thinking-block";
-import { type AttachmentRef } from "@/src/core";
+import { IMAGES_UNSUPPORTED_CODE, type AttachmentRef } from "@/src/core";
 
 /** One width for everything: transcript, cards, and the bottom blob share this column. */
 /**
@@ -163,6 +163,19 @@ export function parseProviderKeyRefusal(message: string | undefined): boolean {
 		return body.code === "provider_key_missing" && typeof body.error === "string" && isProviderKeyRefusal(body.error);
 	} catch {
 		return false;
+	}
+}
+
+/** The image gate's send refusal (LH-39): the chat's model can't read
+ *  images. Its words, for the composer's notice; null for anything else.
+ *  Exported pure for tests. */
+export function parseImagesRefusal(message: string | undefined): string | null {
+	if (!message) return null;
+	try {
+		const body = JSON.parse(message) as { code?: unknown; error?: unknown };
+		return body.code === IMAGES_UNSUPPORTED_CODE && typeof body.error === "string" ? body.error : null;
+	} catch {
+		return null;
 	}
 }
 
@@ -586,6 +599,12 @@ export function Chat({
 	const catalogRef = useRef(catalog);
 	catalogRef.current = catalog;
 	const [selectedModel, setSelectedModel] = useState<string | undefined>();
+	// The stats bar's model report also clears the image notice (LH-39).
+	const { modelChanged: attachModelChanged } = attach;
+	const modelChanged = useCallback((model: string | undefined) => {
+		setSelectedModel(model);
+		attachModelChanged(model);
+	}, [attachModelChanged]);
 	const [setupOpen, setSetupOpen] = useState(false);
 	/** The last explicitly-sent draft (composer send): the
 	 *  refusal flow restores it into the composer, where it waits for the
@@ -677,15 +696,22 @@ export function Chat({
 		// otherwise setup derives its exclusive provider/loading stage.
 		// Subscription refusals keep their banner and restart instructions.
 		const action = providerRefusalAction(error.message);
-		if (!missing && !action) return; // a real error keeps the honest banner
+		// A model that can't read images (LH-39): the draft and its chips
+		// come back with the refusal as the composer's notice (no banner,
+		// no setup — the remedy is another model or the override). A
+		// refused steer has no orphan to drop, and a refetch mid-turn
+		// would wipe the live stream.
+		const images = parseImagesRefusal(error.message);
+		if (!missing && !action && !images) return; // a real error keeps the honest banner
+		const refetch = !(images && busy);
 		// ORDER MATTERS: clearError() flips this effect's own dep (`error`)
 		// and would cancel the in-flight work below — so the banner dismiss,
 		// the draft restore, and the dialog open all land TOGETHER after the
 		// record refetch (the honest truth minus the refused send).
 		let cancelled = false;
 		void (async () => {
-			const res = await fetch(`/api/chats/${encodeURIComponent(chatId)}`);
-			if (!cancelled && res.ok) {
+			const res = refetch ? await fetch(`/api/chats/${encodeURIComponent(chatId)}`) : null;
+			if (!cancelled && res?.ok) {
 				const record = (await res.json().catch(() => null)) as { messages?: LhMessage[] } | null;
 				if (Array.isArray(record?.messages)) setMessages(record.messages);
 			}
@@ -696,6 +722,11 @@ export function Chat({
 				draftRef.current = null;
 			}
 			recoverFromError();
+			if (images) {
+				clearError();
+				attach.showNotice(images);
+				return;
+			}
 			if (action === "notice") return;
 			clearError();
 			if (action === "setup" && catalogRef.current?.providers.some((p) => p.keyPresent)) openModelPicker();
@@ -1288,6 +1319,7 @@ export function Chat({
 		if (!textRef.current.trim() && attach.items.length === 0) return;
 		if (busy) {
 			const { text: t, refs } = await attach.takePaths(textRef.current.trim());
+			draftRef.current = { text: t, refs }; // an image refusal puts it back
 			applyText("");
 			attach.clear();
 			void steer(t, refs);
@@ -1753,7 +1785,7 @@ export function Chat({
 					compactionRunning={compacting}
 					onSubmitThinking={submitThinking}
 					chatId={chatId}
-					onModelChange={setSelectedModel}
+					onModelChange={modelChanged}
 					plan={hasPlan ? <PlanMarginalia messages={messages} /> : undefined}
 					onOpenPlan={() => setPlanOpen(true)}
 					requiresReveal={requiresReveal}

@@ -69,22 +69,31 @@ export function expandLearnerPath(raw: string): string {
  *  composer downscales what it gets, but a 64 MB screenshot is no image. */
 const MAX_PATH_READ_BYTES = 64 * 1024 * 1024;
 
-/** Read the image at a learner-given path (for the composer to fit and
- *  upload — nothing is stored here). Image formats only, by magic bytes. */
-export function readImageFile(raw: string): { bytes: Buffer; name: string; mimeType: string } {
+/** Read the image at a learner-given path (nothing is stored here).
+ *  Async, so a large file never blocks the request thread, and capped:
+ *  the read stops at MAX_PATH_READ_BYTES even if the file grew after the
+ *  stat. Image formats only, by magic bytes. */
+export async function readImageFile(raw: string): Promise<{ bytes: Buffer; name: string; mimeType: string }> {
 	const file = expandLearnerPath(raw);
-	let stat: fs.Stats;
+	let handle: fs.promises.FileHandle;
 	try {
-		stat = fs.statSync(file);
+		handle = await fs.promises.open(file, "r");
 	} catch {
 		throw new AttachmentError(`no file at ${file}`);
 	}
-	if (!stat.isFile()) throw new AttachmentError(`${file} is not a file`);
-	if (stat.size > MAX_PATH_READ_BYTES) throw new AttachmentError(`${file} is too large to attach`);
-	const bytes = fs.readFileSync(file);
-	const ext = sniffImageExt(bytes);
-	if (!ext) throw new AttachmentError(`only ${Object.keys(ATTACHMENT_MIME).join(", ")} images can be attached`);
-	return { bytes, name: path.basename(file), mimeType: ATTACHMENT_MIME[ext]! };
+	try {
+		const stat = await handle.stat();
+		if (!stat.isFile()) throw new AttachmentError(`${file} is not a file`);
+		if (stat.size > MAX_PATH_READ_BYTES) throw new AttachmentError(`${file} is too large to attach`);
+		const buffer = Buffer.alloc(stat.size);
+		const { bytesRead } = await handle.read(buffer, 0, stat.size, 0);
+		const bytes = buffer.subarray(0, bytesRead);
+		const ext = sniffImageExt(bytes);
+		if (!ext) throw new AttachmentError(`only ${Object.keys(ATTACHMENT_MIME).join(", ")} images can be attached`);
+		return { bytes, name: path.basename(file), mimeType: ATTACHMENT_MIME[ext]! };
+	} finally {
+		await handle.close();
+	}
 }
 
 export function attachmentExists(id: string): boolean {

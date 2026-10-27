@@ -567,10 +567,11 @@ function resultIdsFrom(messages: readonly AgentMessage[]): Set<string> {
  *   PIXELS ride only for messages after the active compaction marker
  *   (everything before it, kept tail included, is compacted history —
  *   references only; a tool result's inline images there become a note),
- *   within the per-request budget (newest first), and only when the
- *   caller injects `loadImage` (the live agent does; the token estimate
- *   and summarizer paths do not). Until the budget fills, the prefix
- *   stays byte-stable between compactions, so prompt caches hold.
+ *   within the per-request budget (every image block counts; newest
+ *   first; a stored image once, at its first occurrence), and only when
+ *   the caller injects `loadImage` (the live agent does; the token
+ *   estimate and summarizer paths do not). Until the budget fills, the
+ *   prefix stays byte-stable between compactions, so prompt caches hold.
  *
  * Contract (pi-agent-core): never throws — an unknown shape passes
  * through untouched rather than killing the loop.
@@ -615,29 +616,61 @@ export function toLlmMessages(
 	const leading =
 		(messages[0] as { role?: string } | undefined)?.role === "system" ? (messages[0] as Message) : null;
 	// THE PIXEL BUDGET (LH-39): only messages after the active compaction
-	// marker carry pixels, newest first, one copy per image, within the
-	// provider's per-request limits. Everything else is reference text.
+	// marker carry pixels, within the provider's per-request limits. Every
+	// image block counts — stored images (attachments, view_image) and the
+	// images tool results carry inline (the read tool's). The scan runs
+	// newest first, so over budget the oldest become text. A stored image
+	// goes once, at its FIRST occurrence in the scanned window: a later
+	// duplicate (re-attached, view_image) never moves pixels out of an
+	// earlier message, so the prefix stays byte-stable until the budget
+	// fills.
 	const pixelsFrom = active ? lhMessages.findIndex((m) => m.id === active.id) + 1 : 0;
-	const pixels = new Map<string, ImageContent>();
-	if (loadImage) {
-		const seen = new Set<string>();
+	const stored = new Map<string, { at: number; image: ImageContent }>();
+	const inline = new Set<string>();
+	{
+		const left = new Set<string>();
+		let count = 0;
 		let chars = 0;
-		for (let i = messages.length - 1; i >= pixelsFrom && pixels.size < MAX_WIRE_IMAGES; i--) {
-			for (const id of attachmentIdsOf(messages[i]!).reverse()) {
-				if (seen.has(id) || pixels.size >= MAX_WIRE_IMAGES) continue;
-				seen.add(id);
+		const fits = (data: string) => count < MAX_WIRE_IMAGES && chars + data.length <= MAX_WIRE_IMAGE_BASE64;
+		for (let i = messages.length - 1; i >= pixelsFrom && count < MAX_WIRE_IMAGES; i--) {
+			const m = messages[i]!;
+			const content = (m as { role?: string }).role === "toolResult" ? (m as ToolResultMessage).content : undefined;
+			if (Array.isArray(content)) {
+				for (let k = content.length - 1; k >= 0; k--) {
+					const block = content[k]!;
+					if (block.type !== "image" || !fits(block.data)) continue;
+					count++;
+					chars += block.data.length;
+					inline.add(`${i}:${k}`);
+				}
+			}
+			if (!loadImage) continue;
+			for (const id of attachmentIdsOf(m).reverse()) {
+				const seen = stored.get(id);
+				if (seen) {
+					seen.at = i;
+					continue;
+				}
+				if (left.has(id)) continue;
 				let loaded: ImageContent | null = null;
 				try { loaded = loadImage(id); }
 				catch { /* never throw at the wire: the reference text still names it */ }
-				if (!loaded || chars + loaded.data.length > MAX_WIRE_IMAGE_BASE64) continue;
+				if (!loaded || !fits(loaded.data)) {
+					left.add(id);
+					continue;
+				}
+				count++;
 				chars += loaded.data.length;
-				pixels.set(`${i}:${id}`, loaded);
+				stored.set(id, { at: i, image: loaded });
 			}
 		}
 	}
+	// Taken once: the same id twice in one message still rides once.
 	const image = (i: number, id: string): ImageContent[] => {
-		const loaded = pixels.get(`${i}:${id}`);
-		return loaded ? [loaded] : [];
+		const hit = stored.get(id);
+		if (hit?.at !== i) return [];
+		stored.delete(id);
+		return [hit.image];
 	};
 	const out: Message[] = [];
 	if (leading) out.push(leading);
@@ -674,11 +707,16 @@ export function toLlmMessages(
 			});
 			continue;
 		}
-		// Compacted history keeps no pixels from any tool either (the read
-		// tool persists image files it reads inline).
-		if (role === "toolResult" && i < pixelsFrom && (native as ToolResultMessage).content.some((c) => c.type === "image")) {
+		// A tool's inline images (the read tool persists the image files it
+		// reads) ride only inside the budget; compacted history and the
+		// over-budget oldest get a note instead.
+		if (role === "toolResult" && Array.isArray((native as ToolResultMessage).content) && (native as ToolResultMessage).content.some((c, k) => c.type === "image" && !inline.has(`${i}:${k}`))) {
 			const result = native as ToolResultMessage;
-			out.push({ ...result, content: result.content.map((c) => (c.type === "image" ? { type: "text" as const, text: COMPACTED_TOOL_IMAGE_TEXT } : c)) });
+			const note = i < pixelsFrom ? COMPACTED_TOOL_IMAGE_TEXT : OVER_BUDGET_TOOL_IMAGE_TEXT;
+			out.push({
+				...result,
+				content: result.content.map((c, k) => (c.type === "image" && !inline.has(`${i}:${k}`) ? { type: "text" as const, text: note } : c)),
+			});
 			continue;
 		}
 		const viewed = role === "toolResult" && (native as ToolResultMessage).toolName === VIEW_IMAGE_TOOL
@@ -717,6 +755,8 @@ export function toLlmMessages(
 
 /** The image a tool returned, as compacted history shows it. */
 const COMPACTED_TOOL_IMAGE_TEXT = "[An image this tool returned was dropped when earlier context was summarized; read it again to see it.]";
+/** The same image left out of a request that already carries its limit. */
+const OVER_BUDGET_TOOL_IMAGE_TEXT = "[An image this tool returned was left out of this request to stay within the image limit; read it again to see it.]";
 
 /** The store ids a message carries pixels for at the wire: a user
  *  message's attachments, or a view_image result's image. */
