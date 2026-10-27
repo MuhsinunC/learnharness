@@ -14,7 +14,10 @@
 
 /** Known working maximum context windows, keyed `provider:id`. OpenAI API:
  *  the model pages' documented window. ChatGPT subscription models: the
- *  Codex model catalog's max_context_window. */
+ *  Codex model catalog's max_context_window. Claude has no rows: the
+ *  anthropic catalog already carries Anthropic's documented windows, and
+ *  claude-code's catalog window is the one its CLI model id runs at
+ *  (agent/claude-code/models.ts), which this setting does not change. */
 export const KNOWN_MAX_CONTEXT_WINDOWS: Readonly<Record<string, number>> = {
 	"openai:gpt-6.1-sol": 1_050_000,
 	"openai:gpt-6-astra": 1_050_000,
