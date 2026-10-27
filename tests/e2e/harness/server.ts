@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -75,6 +75,31 @@ export async function until<T>(probe: () => T | Promise<T>, label: string, timeo
 	throw new Error(`timed out after ${timeoutMs} ms waiting for ${label}${last ? ` (last error: ${String(last)})` : ""}`);
 }
 
+/** Every descendant pid of `pid` (pgrep -P, recursively). */
+function descendants(pid: number): number[] {
+	const out = spawnSync("pgrep", ["-P", String(pid)], { encoding: "utf8" }).stdout ?? "";
+	return out.split("\n").filter(Boolean).map(Number).flatMap((kid) => [kid, ...descendants(kid)]);
+}
+
+function alive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function signal(pids: number[], sig: NodeJS.Signals): void {
+	for (const pid of pids) {
+		try {
+			process.kill(pid, sig);
+		} catch {
+			// already gone
+		}
+	}
+}
+
 export async function bootServer(opts: BootOptions): Promise<LhServer> {
 	const base = path.join(os.homedir(), ".cache", "lh-e2e", opts.ticket);
 	fs.mkdirSync(base, { recursive: true });
@@ -133,9 +158,14 @@ export async function bootServer(opts: BootOptions): Promise<LhServer> {
 		log: () => output,
 		stop: async () => {
 			if (child.exitCode === null && child.pid) {
-				process.kill(child.pid, "SIGTERM");
-				const killed = await Promise.race([exited.then(() => true), new Promise<false>((r) => setTimeout(() => r(false), 10_000))]);
-				if (!killed && child.exitCode === null) process.kill(child.pid, "SIGKILL");
+				// `next dev` forks next-server workers. Collect the tree before
+				// signalling (an orphan is reparented and pgrep -P loses it),
+				// then signal exactly those pids.
+				const pids = [child.pid, ...descendants(child.pid)];
+				signal(pids, "SIGTERM");
+				const deadline = Date.now() + 10_000;
+				while (pids.some(alive) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 200));
+				signal(pids.filter(alive), "SIGKILL");
 				await exited;
 			}
 			if (process.env.LH_E2E_KEEP !== "1") fs.rmSync(root, { recursive: true, force: true });
