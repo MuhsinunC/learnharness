@@ -7,13 +7,22 @@
  * allowed only behind an explicit confirmation (the settings modal; the
  * write route enforces it). Sources: docs/context-windows.md.
  *
- * Pure and client-safe: the settings UI and the server's write guard
- * read the same table. Extend it by adding `provider:id` rows.
+ * Pure: GET /api/models projects Default and Maximum from it for the
+ * settings UI, and the write route guards with the same numbers. Extend
+ * it by adding `provider:id` rows.
  */
 
-/** Known working maximum context windows, keyed `provider:id`. ChatGPT
- *  subscription models: the Codex model catalog's max_context_window. */
+/** Known working maximum context windows, keyed `provider:id`. OpenAI API:
+ *  the model pages' documented window. ChatGPT subscription models: the
+ *  Codex model catalog's max_context_window. */
 export const KNOWN_MAX_CONTEXT_WINDOWS: Readonly<Record<string, number>> = {
+	"openai:gpt-6.1-sol": 1_050_000,
+	"openai:gpt-6-astra": 1_050_000,
+	"openai:gpt-6-sol": 1_050_000,
+	"openai:gpt-6-luna": 1_050_000,
+	"openai:gpt-5.6-sol": 1_050_000,
+	"openai:gpt-5.6-terra": 1_050_000,
+	"openai:gpt-5.6-luna": 1_050_000,
 	"chatgpt:gpt-6.1-sol": 872_000,
 	"chatgpt:gpt-6.1-terra": 872_000,
 	"chatgpt:gpt-6-astra": 920_000,
