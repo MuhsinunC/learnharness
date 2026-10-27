@@ -48,6 +48,15 @@ if (exists(leakedData)) {
 	process.exit(1);
 }
 
+// 2a) Safety: a .git/ in the standalone means output tracing swept the
+// repository (an fs call on a runtime path without /* turbopackIgnore */
+// does this, PR #78): it would ship the history and fails codesign.
+if (exists(path.join(STANDALONE, ".git"))) {
+	console.error("[build-server] REFUSING: standalone contains .git/ — output tracing swept the repository.");
+	console.error("             Mark fs calls on runtime paths with /* turbopackIgnore: true */.");
+	process.exit(1);
+}
+
 // 2b) Safety: the repo's dev SECRETS must never ride along either — the
 // same trace sweep that catches data/ shipped the repo-root auth.json
 // (the DEV BYOK key store, 0600) byte-identical into the DMG (caught in

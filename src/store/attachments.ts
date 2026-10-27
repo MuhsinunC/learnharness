@@ -28,6 +28,11 @@ import {
 /** A refusal the routes report verbatim (400). */
 export class AttachmentError extends Error {}
 
+// turbopackIgnore on every fs call here: store paths and learner paths are
+// runtime values, and without the comment Next's output file tracing treats
+// them as "anything under the project", sweeping .git, tests and docs into
+// the standalone server (the desktop build then failed codesign on .git's
+// read-only pack files, PR #78 CI; scripts/build-server.mjs now refuses it).
 function fileFor(id: string): string {
 	if (!isAttachmentId(id)) throw new AttachmentError(`invalid attachment id: ${id}`);
 	return path.join(PATHS.attachments, id);
@@ -45,11 +50,11 @@ export function saveAttachment(bytes: Uint8Array, name?: string): AttachmentRef 
 	if (!ext) throw new AttachmentError(`only ${Object.keys(ATTACHMENT_MIME).join(", ")} images can be attached`);
 	const id = `${createHash("sha256").update(bytes).digest("hex")}.${ext}`;
 	const file = fileFor(id);
-	if (!fs.existsSync(file)) {
-		fs.mkdirSync(PATHS.attachments, { recursive: true });
+	if (!fs.existsSync(/* turbopackIgnore: true */ file)) {
+		fs.mkdirSync(/* turbopackIgnore: true */ PATHS.attachments, { recursive: true });
 		const tmp = path.join(PATHS.attachments, `.${randomUUID()}.tmp`);
-		fs.writeFileSync(tmp, bytes);
-		fs.renameSync(tmp, file);
+		fs.writeFileSync(/* turbopackIgnore: true */ tmp, bytes);
+		fs.renameSync(/* turbopackIgnore: true */ tmp, file);
 	}
 	return { id, mimeType: attachmentMime(id), ...(name ? { name } : {}) };
 }
@@ -61,8 +66,8 @@ export function expandLearnerPath(raw: string): string {
 	if (/^(['"]).*\1$/.test(p)) p = p.slice(1, -1);
 	if (p.startsWith("file://")) return fileURLToPath(p);
 	p = p.replace(/\\ /g, " ");
-	if (p === "~" || p.startsWith("~/")) p = path.join(os.homedir(), p.slice(1));
-	return path.resolve(os.homedir(), p);
+	if (p === "~" || p.startsWith("~/")) p = path.join(/* turbopackIgnore: true */ os.homedir(), p.slice(1));
+	return path.resolve(/* turbopackIgnore: true */ os.homedir(), p);
 }
 
 /** Files larger than this are not read for an attach at all: the
@@ -77,7 +82,7 @@ export async function readImageFile(raw: string): Promise<{ bytes: Buffer; name:
 	const file = expandLearnerPath(raw);
 	let handle: fs.promises.FileHandle;
 	try {
-		handle = await fs.promises.open(file, "r");
+		handle = await fs.promises.open(/* turbopackIgnore: true */ file, "r");
 	} catch {
 		throw new AttachmentError(`no file at ${file}`);
 	}
@@ -97,13 +102,13 @@ export async function readImageFile(raw: string): Promise<{ bytes: Buffer; name:
 }
 
 export function attachmentExists(id: string): boolean {
-	return isAttachmentId(id) && fs.existsSync(fileFor(id));
+	return isAttachmentId(id) && fs.existsSync(/* turbopackIgnore: true */ fileFor(id));
 }
 
 /** The stored bytes, or null when the id is malformed or absent. */
 export function readAttachment(id: string): Buffer | null {
 	if (!attachmentExists(id)) return null;
-	return fs.readFileSync(fileFor(id));
+	return fs.readFileSync(/* turbopackIgnore: true */ fileFor(id));
 }
 
 /** The wire hydrator toLlmMessages takes: pi's ImageContent, or null. */
