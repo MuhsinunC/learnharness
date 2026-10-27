@@ -1,6 +1,7 @@
 import type { PiEngine } from "../models.ts";
 import type { ModelRole } from "../../../config.ts";
 import { AUTH_PROVIDER_KEYS } from "../../core/auth-keys.ts";
+import { NATIVE_SUBSCRIPTIONS } from "../../core/contracts/subscriptions.ts";
 import type { ModelSlotName, ProviderKeyMissing } from "../../core/settings.ts";
 
 /**
@@ -51,7 +52,12 @@ const SLOT_LABEL: Record<ModelSlotName, string> = { strong: "Strong", cheap: "Ch
 
 function providerLabel(provider: string): string {
 	if (provider === "chatgpt") return "ChatGPT";
-	return AUTH_PROVIDER_KEYS.find((p) => p.id === provider)?.label ?? provider;
+	if (provider === "claude-code") return "Claude";
+	return (
+		NATIVE_SUBSCRIPTIONS.find((p) => p.logicalId === provider)?.label ??
+		AUTH_PROVIDER_KEYS.find((p) => p.id === provider)?.label ??
+		provider
+	);
 }
 
 export function modelLabel(engine: PiEngine): string {
