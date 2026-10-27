@@ -9,9 +9,10 @@ import { reply, startStubProvider, type StubProvider } from "./harness/stub-prov
 
 // LH-38: the per-(provider, model) context window. Settings > Agent >
 // Context shows one row per slot model; saves above the known Maximum go
-// through the confirm modal; the value persists on disk, survives a
-// restart, sticks per pair, and reaches the footer and the engine.
-// Stub models carry no known-max entry, so Maximum = Default here.
+// through the confirm modal, saves below the Minimum are refused; the
+// value persists on disk, survives a restart, sticks per pair, and
+// reaches the footer and the engine. Stub models carry no known-max
+// entry, so Maximum = Default here; Minimum is 48,384 (min(floor, Default)).
 //
 // /api/models federates keyed providers only, so the stub registers under
 // a key-gated id (openrouter) and a dummy key is saved after each boot.
@@ -87,6 +88,15 @@ function diskWindows(): Record<string, number> | undefined {
 	return diskSettings().contextWindows;
 }
 
+/** Write a window straight into settings.json (a record from before a fix,
+ *  or a pair whose model has since left the catalog). */
+function writeDiskWindow(pair: string, tokens: number): void {
+	const file = path.join(dataDir, "settings.json");
+	const record = JSON.parse(fs.readFileSync(file, "utf-8"));
+	record.contextWindows = { ...record.contextWindows, [pair]: tokens };
+	fs.writeFileSync(file, JSON.stringify(record, null, "\t"));
+}
+
 async function openAgentSettings(): Promise<void> {
 	await page.goto(server.url, { waitUntil: "domcontentloaded", timeout: 180_000 });
 	// Clicks before hydration land on inert markup: retry until it opens.
@@ -112,19 +122,37 @@ async function waitInput(pair: string, value: string): Promise<void> {
 	await until(async () => (await inputValue(pair)) === value, `${pair} input to read "${value}"`);
 }
 
-async function typeWindow(pair: string, value: string, commit: "enter" | "save"): Promise<void> {
+async function typeWindow(pair: string, value: string, commit: "enter" | "blur"): Promise<void> {
 	await typeIn(rowSel(pair), value, commit);
 }
 
-/** Replace the field's text inside `container`, then commit. */
-async function typeIn(container: string, value: string, commit: "enter" | "save"): Promise<void> {
+/** Replace the field's text inside `container`, then commit: Enter, or a
+ *  click on the Context group's corner (the field commits on blur). */
+async function typeIn(container: string, value: string, commit: "enter" | "blur"): Promise<void> {
 	const input = `${container} [data-testid="input-context-window"]`;
+	await page.waitForSelector(input, { timeout: 60_000 });
 	await page.click(input);
 	await page.keyboard.press("End");
 	for (let i = 0; i < 12; i++) await page.keyboard.press("Backspace");
 	await page.type(input, value);
 	if (commit === "enter") await page.keyboard.press("Enter");
-	else await page.click(`${container} [data-testid="save-context-window"]`);
+	else {
+		const box = await (await page.$('[data-testid="group-context"]'))!.boundingBox();
+		await page.mouse.click(box!.x + 4, box!.y + 4);
+	}
+}
+
+/** The data-testid of the focused element, or of the dialog it sits in. */
+function focusedTestid(): Promise<string> {
+	return page.evaluate(() => {
+		const el = document.activeElement as HTMLElement | null;
+		const own = el?.dataset.testid;
+		return own ?? (el?.closest("[data-testid]") as HTMLElement | null)?.dataset.testid ?? "";
+	});
+}
+
+function focusInDialog(): Promise<boolean> {
+	return page.evaluate(() => !!document.activeElement?.closest('[data-testid="context-window-dialog"]'));
 }
 
 async function footerReads(denominator: string): Promise<void> {
@@ -161,19 +189,63 @@ test("(a) a value at or below the maximum saves directly and shows", async () =>
 	await until(() => diskWindows()?.[A] === 80_000, "80000 on disk");
 	assert.equal(await page.$(dialogSel), null, "no modal at or below the maximum");
 	await waitInput(A, "80000");
-	await typeWindow(A, "100000", "save"); // exactly the maximum: still no modal
-	await until(() => diskWindows()?.[A] === 100_000, "100000 on disk");
+	// Exactly the Default (and here the maximum): no modal, and no pin — the
+	// pair clears back to its default.
+	await typeWindow(A, "100000", "blur");
+	await until(() => diskWindows() !== undefined && !(A in diskWindows()!), "A cleared on disk");
 	assert.equal(await page.$(dialogSel), null);
+	await waitInput(A, "");
+	const pinned = await server.json<{ settings: { contextWindows: Record<string, number> } }>("/api/settings/context-windows", { method: "PUT", body: { provider: STUB, id: "stub-a", tokens: 100_000 } });
+	assert.equal(A in pinned.settings.contextWindows, false, "the route stores no pin equal to the Default either");
+
+	// A pin equal to the Default from an older record shows as a value and
+	// clears with an empty commit.
+	writeDiskWindow(A, 100_000);
 	await openAgentSettings();
-	await waitInput(A, ""); // equal to Default reads as the default placeholder
+	await waitInput(A, "100000");
+	await typeWindow(A, "", "enter");
+	await until(() => !(A in (diskWindows() ?? {})), "the old pin cleared");
+	await waitInput(A, "");
 	await typeWindow(A, "80000", "enter");
 	await until(() => diskWindows()?.[A] === 80_000, "80000 on disk again");
 	await openAgentSettings();
 	await waitInput(A, "80000");
 });
 
+test("(a2) clicking away commits; the field never shows an unsaved value", async () => {
+	await typeWindow(A, "90000", "blur");
+	await until(() => diskWindows()?.[A] === 90_000, "90000 on disk after blur");
+	await waitInput(A, "90000");
+	// A refused value (below the minimum) snaps back to what is stored.
+	await typeWindow(A, "1000", "blur");
+	await waitInput(A, "90000");
+	assert.equal(diskWindows()?.[A], 90_000);
+	await typeWindow(A, "80000", "enter");
+	await until(() => diskWindows()?.[A] === 80_000, "back to 80000");
+	await waitInput(A, "80000");
+});
+
+test("(a3) below the minimum is refused in the field and by the server", async () => {
+	await typeWindow(A, "40000", "enter");
+	await until(async () => (await page.$eval(rowSel(A), (el) => el.textContent ?? "")).includes("Minimum: 48.4k"), "the minimum error");
+	await waitInput(A, "80000");
+	assert.equal(await page.$(dialogSel), null);
+	assert.equal(diskWindows()?.[A], 80_000);
+	const raw = await server.api("/api/settings/context-windows", { method: "PUT", body: { provider: STUB, id: "stub-a", tokens: 40_000 } });
+	assert.equal(raw.status, 400);
+	const body = (await raw.json()) as { code: string; minimum: number };
+	assert.equal(body.code, "below_minimum");
+	assert.equal(body.minimum, 48_384);
+	assert.equal(diskWindows()?.[A], 80_000);
+	const atFloor = await server.api("/api/settings/context-windows", { method: "PUT", body: { provider: STUB, id: "stub-a", tokens: 48_384 } });
+	assert.equal(atFloor.status, 200, "the minimum itself saves");
+	await server.json("/api/settings/context-windows", { method: "PUT", body: { provider: STUB, id: "stub-a", tokens: 80_000 } });
+	assert.equal(diskWindows()?.[A], 80_000);
+});
+
 test("(b) above the maximum: the modal gates the save behind the checkbox", async () => {
-	await typeWindow(A, "150000", "save");
+	await openAgentSettings();
+	await typeWindow(A, "150000", "enter");
 	await page.waitForSelector(dialogSel);
 	assert.match(await page.$eval(dialogSel, (el) => el.textContent ?? ""), /it may stop compacting/);
 	assert.equal(await page.$eval('[data-testid="context-window-confirm"]', (el) => (el as HTMLButtonElement).disabled), true);
@@ -203,7 +275,7 @@ test("(c) above the maximum: Cancel (and Esc) keep the old value", async () => {
 	await waitInput(A, "150000");
 	assert.equal(diskWindows()?.[A], 150_000);
 
-	await typeWindow(A, "250000", "save");
+	await typeWindow(A, "250000", "blur");
 	await page.waitForSelector(dialogSel);
 	await page.keyboard.press("Escape");
 	await until(async () => (await page.$(dialogSel)) === null, "Esc to close the modal");
@@ -211,6 +283,74 @@ test("(c) above the maximum: Cancel (and Esc) keep the old value", async () => {
 	await waitInput(A, "150000");
 	await openAgentSettings();
 	await waitInput(A, "150000");
+	assert.equal(diskWindows()?.[A], 150_000);
+});
+
+test("(c2) the modal takes focus, keeps Tab inside, and works from the keyboard", async () => {
+	await typeWindow(A, "200000", "enter");
+	await page.waitForSelector(dialogSel);
+	await until(async () => (await focusedTestid()) === "context-window-understood", "focus on the checkbox");
+	// Enter in the dialog never re-runs the field's save.
+	await page.keyboard.press("Enter");
+	assert.equal((await page.$$(dialogSel)).length, 1);
+	assert.equal(diskWindows()?.[A], 150_000);
+	for (let i = 0; i < 5; i++) {
+		await page.keyboard.press("Tab");
+		assert.ok(await focusInDialog(), `Tab ${i + 1} stays inside the dialog`);
+	}
+	await page.keyboard.down("Shift");
+	for (let i = 0; i < 3; i++) {
+		await page.keyboard.press("Tab");
+		assert.ok(await focusInDialog(), `Shift+Tab ${i + 1} stays inside the dialog`);
+	}
+	await page.keyboard.up("Shift");
+	// Disabled Confirm is out of the cycle: checkbox → Cancel → checkbox.
+	await page.focus('[data-testid="context-window-understood"]');
+	await page.keyboard.press("Space");
+	await page.keyboard.press("Tab");
+	await page.keyboard.press("Tab");
+	assert.equal(await focusedTestid(), "context-window-confirm");
+	await page.keyboard.press("Enter");
+	await until(() => diskWindows()?.[A] === 200_000, "200000 on disk from the keyboard");
+	await until(async () => (await page.$(dialogSel)) === null, "the modal to close");
+	await server.json("/api/settings/context-windows", { method: "PUT", body: { provider: STUB, id: "stub-a", tokens: 150_000, confirmAboveMax: true } });
+});
+
+test("(c3) a server above_maximum refusal opens the modal at the server's maximum", async () => {
+	// A stale client catalog: /api/models claims A's maximum is 1M, so the
+	// field writes without confirmation and the server answers 409.
+	const onRequest = async (request: import("puppeteer-core").HTTPRequest) => {
+		if (new URL(request.url()).pathname !== "/api/models") return void request.continue();
+		const catalog = await server.json<{ models: Array<{ provider: string; id: string; maxContextWindow: number }> }>("/api/models");
+		for (const m of catalog.models) if (m.provider === STUB && m.id === "stub-a") m.maxContextWindow = 1_000_000;
+		await request.respond({ status: 200, contentType: "application/json", body: JSON.stringify(catalog) });
+	};
+	await page.setRequestInterception(true);
+	page.on("request", onRequest);
+	try {
+		await openAgentSettings();
+		assert.match(await rowText(A), /Maximum: 1M/);
+		await typeWindow(A, "300000", "enter");
+		await page.waitForSelector(dialogSel);
+		assert.match(await page.$eval(dialogSel, (el) => el.textContent ?? ""), /above the known maximum \(100k\)/);
+		assert.equal(diskWindows()?.[A], 150_000);
+		await page.click('[data-testid="context-window-cancel"]');
+		await until(async () => (await page.$(dialogSel)) === null, "the modal to close");
+	} finally {
+		page.off("request", onRequest);
+		await page.setRequestInterception(false);
+	}
+	await openAgentSettings();
+	await waitInput(A, "150000");
+});
+
+test("(c4) a pair whose model left the catalog can still be cleared", async () => {
+	const gone = `${STUB}:gone-model`;
+	writeDiskWindow(gone, 90_000);
+	const refused = await server.api("/api/settings/context-windows", { method: "PUT", body: { provider: STUB, id: "gone-model", tokens: 90_000 } });
+	assert.equal(refused.status, 400, "a value still needs a catalog entry");
+	await server.json("/api/settings/context-windows", { method: "PUT", body: { provider: STUB, id: "gone-model", tokens: null } });
+	assert.equal(gone in (diskWindows() ?? {}), false);
 	assert.equal(diskWindows()?.[A], 150_000);
 });
 
@@ -285,13 +425,13 @@ test("(g) the composer's model picker edits a model that is in no slot", async (
 	await openMenu();
 	await page.waitForSelector(field);
 	assert.match(await page.$eval(field, (el) => el.textContent ?? ""), /Default: 64k · Maximum: 64k/);
-	await typeIn(field, "30000", "enter");
-	await until(() => diskWindows()?.[D] === 30_000, "D = 30000 on disk");
-	await footerReads("30k");
+	await typeIn(field, "50000", "enter");
+	await until(() => diskWindows()?.[D] === 50_000, "D = 50000 on disk");
+	await footerReads("50k");
 
 	// The same modal and guard as Settings; clicking inside the modal must
 	// not close the menu (and the field) underneath it.
-	await typeIn(field, "250000", "save");
+	await typeIn(field, "250000", "enter");
 	await page.waitForSelector(dialogSel);
 	assert.equal(await page.$eval('[data-testid="context-window-confirm"]', (el) => (el as HTMLButtonElement).disabled), true);
 	await page.click('[data-testid="context-window-understood"]');
