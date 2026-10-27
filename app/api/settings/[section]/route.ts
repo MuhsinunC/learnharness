@@ -37,10 +37,9 @@ import {
 	clampModelsLevels,
 	effectiveSettings,
 	promptOverrides,
-	readSettingsRecord,
+	updateSettingsRecord,
 	validateChatSettings,
 	validateModelsSettings,
-	writeSettingsRecord,
 	type SettingsBodyResult,
 } from "@/src/server";
 
@@ -124,8 +123,6 @@ export async function PUT(request: Request, ctx: { params: Promise<{ section: st
 
 	// Read-modify-write ONE section of the record; everything else rides
 	// along untouched (other sections, unknown keys — sanitize preserves).
-	const record = readSettingsRecord() ?? { version: 1 };
-	const next = { ...record, [section]: sectionOut };
-	writeSettingsRecord(next);
+	const next = updateSettingsRecord((record) => ({ ...record, [section]: sectionOut }));
 	return Response.json({ settings: next });
 }

@@ -25,6 +25,8 @@ export interface ModelCatalogEntry {
 	/** The window that runs: the user's custom value for this pair, else
 	 *  the catalog default (LH-38, core/context-windows.ts). */
 	contextWindow: number;
+	/** The user's stored value for this pair; absent = no custom value. */
+	customContextWindow?: number;
 	/** The catalog's own window (shown as "Default"). */
 	defaultContextWindow: number;
 	/** The known working maximum (shown as "Maximum"); saving above it

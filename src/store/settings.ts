@@ -58,6 +58,14 @@ export function writeSettings(raw: unknown): UserSettings {
 	return settings;
 }
 
+/** Read-modify-write the record in one step — the settings routes' one
+ *  writer path. Synchronous on purpose: with no await between the read
+ *  and the write, two requests in this process can never interleave and
+ *  drop each other's change, so no lock is needed (keep `mutate` sync). */
+export function updateSettings(mutate: (record: UserSettings) => UserSettings): UserSettings {
+	return writeSettings(mutate(readSettings() ?? { version: 1 }));
+}
+
 /** The typed adapter (core/ports.ts SettingsStore), for the composition root. */
 export const settingsStore: SettingsStore = {
 	readSettings,

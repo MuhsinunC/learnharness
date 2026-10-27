@@ -49,7 +49,7 @@ import type {
 } from "../core/contracts/models.ts";
 import type { EffectiveModelSpec, EffectiveSlot } from "../core/settings-resolution.ts";
 import { AUTH_PROVIDER_KEYS } from "../core/auth-keys.ts";
-import { contextWindowKey, maxContextWindow } from "../core/context-windows.ts";
+import { contextWindowKey, maxContextWindow, minContextWindow } from "../core/context-windows.ts";
 import { BACKGROUND_MODEL_ROLES, MODEL_SLOTS, type BackgroundModelRole, type ModelSlotName, type ModelsSettings } from "../core/settings.ts";
 
 bootClaudeCodeProvider();
@@ -163,22 +163,22 @@ function customContextWindows(): Record<string, number> {
 	return settingsStore.readSettings()?.contextWindows ?? {};
 }
 
-/** The pair's custom context window, or undefined for the catalog
- *  default — the engine seam (agent/models.ts setContextWindowLookup). */
-export function customContextWindow(provider: string, id: string): number | undefined {
-	return customContextWindows()[contextWindowKey(provider, id)];
-}
-
-/** One pair's Default and Maximum (core/context-windows.ts) — undefined
- *  when the pair is not in its provider's catalog. */
-export function contextWindowBounds(provider: string, id: string): { defaultWindow: number; maxWindow: number } | undefined {
+/** One pair's Default, Minimum and Maximum (core/context-windows.ts) —
+ *  undefined when the pair is not in its provider's catalog. */
+export function contextWindowBounds(provider: string, id: string): { defaultWindow: number; minWindow: number; maxWindow: number } | undefined {
 	const model = connectionModel(provider, id);
-	return model ? { defaultWindow: model.contextWindow, maxWindow: maxContextWindow(provider, id, model.contextWindow) } : undefined;
+	if (!model) return undefined;
+	return {
+		defaultWindow: model.contextWindow,
+		minWindow: minContextWindow(model.contextWindow),
+		maxWindow: maxContextWindow(provider, id, model.contextWindow),
+	};
 }
 
 /** Project one catalog model to the client DTO. `contextWindow` is the
  *  window that runs (custom over default). */
 export function toModelDto(model: Model<Api>, custom: Record<string, number> = {}): ModelDto {
+	const customWindow = custom[contextWindowKey(model.provider, model.id)];
 	return {
 		id: model.id,
 		name: model.name,
@@ -192,7 +192,8 @@ export function toModelDto(model: Model<Api>, custom: Record<string, number> = {
 			cacheRead: model.cost.cacheRead,
 			cacheWrite: model.cost.cacheWrite,
 		},
-		contextWindow: custom[contextWindowKey(model.provider, model.id)] ?? model.contextWindow,
+		contextWindow: customWindow ?? model.contextWindow,
+		...(customWindow !== undefined ? { customContextWindow: customWindow } : {}),
 		defaultContextWindow: model.contextWindow,
 		maxContextWindow: maxContextWindow(model.provider, model.id, model.contextWindow),
 		maxTokens: model.maxTokens,
