@@ -9,6 +9,8 @@ import { AgentSection } from "../components/settings/agent-section.tsx";
 import { providerKeyLabel, classifyKeys } from "../components/settings/keys-section.tsx";
 import { useModelCatalog } from "../components/model-catalog.ts";
 import { notifySettingsSaved } from "../components/settings-signal.ts";
+import { useModelSetup, savedSlotsConfigured, selectedModelUnavailable, openModelPicker } from "../components/setup-cta.tsx";
+import { StatsBar } from "../components/stats-bar.tsx";
 import type { ModelCatalogEntry, ModelCatalogResponse, ModelsSettings } from "../src/core/index.ts";
 
 const dom = parseHTML("<html><body></body></html>");
@@ -40,7 +42,7 @@ function catalog(connected = true): ModelCatalogResponse {
 	};
 }
 function Reader() { snapshot = useModelCatalog(); return null; }
-function setup() { return <SetupDialog open onClose={() => {}} onDone={() => {}} />; }
+function setup(onClose = () => {}, onDone = (_models: ModelsSettings) => {}) { return <SetupDialog open onClose={onClose} onDone={onDone} />; }
 function installFetch() {
 	requests = []; writes = [];
 	globalThis.fetch = async (input, init) => {
@@ -107,22 +109,27 @@ test("cached setup is immediately usable; fresh metadata/untouched slots update 
 	});
 });
 
-test("disconnect invalidates choices, not saved selections or thinking; all-disconnected setup offers Add provider", async () => {
-	installFetch(); await warm(); await render(<><Reader />{setup()}</>); await answer(1, catalog());
+test("zero providers always means exclusive connection stage; reconnect with all saved slots only closes, even if every selection remains unavailable", async () => {
+	installFetch(); await warm();
+	let closed = 0, completed = 0;
+	await render(<><Reader />{setup(() => { closed++; }, () => { completed++; })}</>); await answer(1, catalog());
 	await click("setup-trigger-strong");
-	assert.ok(document.querySelector('[data-testid="model-option-claude-opus-5-5"]'));
 	await act(async () => notifySettingsSaved("keys"));
-	assert.equal(document.querySelector('[data-testid="model-option-claude-opus-5-5"]'), null, "stale choices disappear before the fresh request resolves");
+	assert.ok(element("setup-stage-loading"));
+	assert.equal(document.querySelector('[data-testid="model-option-claude-opus-5-5"]'), null);
 	await answer(2, catalog(false));
-	assert.equal(element("setup-trigger-strong").textContent, "model:free▾");
-	assert.equal(element("setup-thinking-strong").textContent?.trim(), "low▾");
-	assert.ok(element("setup-add-provider")); await click("setup-add-provider"); assert.ok(element("setup-stage-keys"));
-	await click("setup-thinking-strong"); await click("thinking-option-xhigh");
-	assert.equal(element("setup-thinking-strong").textContent?.trim(), "xhigh▾");
-	await click("setup-save"); assert.equal(writes[0]?.strong?.thinkingLevel, "xhigh"); assert.equal(writes[0]?.strong?.model?.id, a.id);
+	assert.ok(element("setup-stage-keys"));
+	assert.equal(document.querySelector('[data-testid="setup-stage-pickers"]'), null);
+	assert.equal(document.querySelector('[data-testid="setup-add-provider"]'), null);
+	assert.equal(document.querySelector('[data-testid="setup-save"]'), null);
+	await act(async () => notifySettingsSaved("keys"));
+	const other = catalog(false); other.providers = [{ id: "other", envVar: "OTHER_KEY", keyPresent: true }];
+	await answer(3, other);
+	assert.equal(closed, 1); assert.equal(completed, 0); assert.deepEqual(writes, []);
+	assert.equal(document.querySelector('[data-testid="setup-dialog"]'), null, "no intermediate picker frame after reconnect");
 });
 
-test("cold reconnect checks saved pins before choosing the key stage, and reopening gets a new draft", async () => {
+test("cold saved disconnected pins still enter the provider stage, without any model-selector frame", async () => {
 	installFetch(); await warm();
 	await act(async () => notifySettingsSaved("keys"));
 	const stages: Array<string | undefined> = [];
@@ -132,14 +139,47 @@ test("cold reconnect checks saved pins before choosing the key stage, and reopen
 		return null;
 	}
 	await render(<><Reader />{setup()}<Probe /></>);
-	assert.ok(element("setup-stage-loading"));
 	await answer(1, catalog(false));
-	assert.deepEqual(stages, ["setup-stage-loading", "setup-stage-pickers"]);
-	await click("setup-thinking-strong"); await click("thinking-option-xhigh");
-	await render(<Reader />);
-	await render(<><Reader />{setup()}</>);
-	assert.equal(element("setup-thinking-strong").textContent?.trim(), "low▾", "a reopened draft uses saved state, not the abandoned edit");
-	await answer(2, catalog(false));
+	assert.deepEqual(stages, ["setup-stage-loading", "setup-stage-keys"]);
+});
+
+for (const count of [0, 1, 2]) test(`connecting with ${count} saved slots only requires the missing slots; stale identities/thinking survive`, async () => {
+	installFetch(); const before = catalog(false);
+	if (count < 1) before.slots.strong = null;
+	if (count < 2) before.slots.cheap = null;
+	before.slots.vision = null;
+	if (before.slots.strong) before.slots.strong.thinkingLevel = "xhigh";
+	await warm(before);
+	let closed = 0; await render(<><Reader />{setup(() => { closed++; })}</>); await answer(1, before);
+	assert.ok(element("setup-stage-keys"));
+	const connected = { ...before, models: [{ ...b, provider: "other" }], providers: [{ id: "other", envVar: "OTHER_KEY", keyPresent: true }] };
+	await act(async () => notifySettingsSaved("keys")); await answer(2, connected);
+	assert.ok(element("setup-stage-pickers")); assert.equal(document.querySelector('[data-testid="setup-stage-keys"]'), null); assert.equal(closed, 0);
+	for (const slot of ["strong", "cheap", "vision"] as const) {
+		if (before.slots[slot]) continue;
+		await click(`setup-trigger-${slot}`); await click("model-option-claude-opus-5-5");
+	}
+	if (count > 0) assert.equal(element("setup-thinking-strong").textContent?.trim(), "xhigh▾");
+	await click("setup-save");
+	for (const slot of ["strong", "cheap", "vision"] as const) {
+		if (before.slots[slot]) assert.deepEqual(writes[0]?.[slot], before.slots[slot]);
+		else assert.equal(writes[0]?.[slot]?.model?.provider, "other");
+	}
+});
+
+test("a partial setup's model/thinking edits survive exclusive provider recovery, but reopening discards the abandoned draft", async () => {
+	installFetch(); const before = catalog(); before.slots.cheap = null; before.slots.vision = null;
+	await warm(before); await render(<><Reader />{setup()}</>); await answer(1, before);
+	await click("setup-trigger-strong"); await click("model-option-claude-opus-5-5");
+	await click("setup-thinking-strong"); await click("thinking-option-medium");
+	await act(async () => notifySettingsSaved("keys")); await answer(2, { ...before, models: [], providers: [] });
+	assert.ok(element("setup-stage-keys")); assert.equal(document.querySelector('[data-testid="setup-stage-pickers"]'), null);
+	await act(async () => notifySettingsSaved("keys")); await answer(3, before);
+	assert.equal(element("setup-trigger-strong").textContent, "claude-opus-5-5▾");
+	assert.equal(element("setup-thinking-strong").textContent?.trim(), "medium▾");
+	await render(<Reader />); await render(<><Reader />{setup()}</>);
+	assert.equal(element("setup-trigger-strong").textContent, "model:free▾");
+	assert.equal(element("setup-thinking-strong").textContent?.trim(), "low▾"); await answer(4, before);
 });
 
 test("Agent opens with cached thinking metadata; refresh and disconnect never clear saved levels", async () => {
@@ -153,6 +193,55 @@ test("Agent opens with cached thinking metadata; refresh and disconnect never cl
 	await act(async () => notifySettingsSaved("keys")); await answer(2, catalog(false));
 	assert.equal(element("slot-thinking-strong").textContent, "low▾");
 	await click("thinking-option-xhigh"); assert.equal(changed?.strong?.thinkingLevel, "xhigh"); assert.equal(changed?.strong?.model?.id, a.id);
+});
+
+test("saved completeness follows ordinary repairs and survives temporary connection invalidation", async () => {
+	installFetch(); let state: ReturnType<typeof useModelSetup>;
+	function StateReader() { state = useModelSetup(false); return null; }
+	await render(<StateReader />); await answer(0, catalog());
+	assert.equal(state!.configured, true);
+	await act(async () => notifySettingsSaved("keys")); assert.equal(state!.configured, true);
+	const partial = catalog(false); partial.slots.vision = null;
+	await answer(1, partial); assert.equal(state!.configured, false); assert.equal(state!.zeroKeys, true);
+	await act(async () => notifySettingsSaved("models")); await answer(2, catalog(false));
+	assert.equal(state!.configured, true); assert.equal(state!.zeroKeys, true, "saved is not connected");
+});
+
+test("blocked session recovery opens its ordinary picker, never changes Strong or substitutes a model", async () => {
+	installFetch(); const available = { ...b, provider: "other" }; const body = catalog();
+	body.models = [available]; body.providers = [{ id: "other", envVar: "OTHER_KEY", keyPresent: true }];
+	body.slots.strong = { model: { provider: "other", id: b.id }, thinkingLevel: "medium" };
+	const globals: ModelsSettings = { strong: body.slots.strong };
+	const session = { model: { provider: a.provider, id: a.id }, thinkingLevel: "xhigh" };
+	const requestsOnly = globalThis.fetch; const sessionWrites: unknown[] = [];
+	globalThis.fetch = async (input, init) => {
+		if (input === "/api/settings") return Response.json({ settings: { models: globals } });
+		if (input === "/api/chats/fixture") return Response.json({ settings: session });
+		if (input === "/api/chats/fixture/settings") { const next = JSON.parse(String(init?.body)); sessionWrites.push(next); return Response.json({ settings: next }); }
+		return requestsOnly(input, init);
+	};
+	await warm(body); let selected: string | undefined;
+	await render(<><Reader /><StatsBar turns={[]} chatId="fixture" onModelChange={(id) => { selected = id; }} /></>);
+	assert.equal(selected, `${a.provider}:${a.id}`, "current session does not inherit a different Strong pin");
+	assert.equal(selectedModelUnavailable(body, selected), true);
+	assert.deepEqual(sessionWrites, []);
+	await act(async () => openModelPicker());
+	assert.ok(element("model-menu")); assert.equal(document.querySelector('[data-testid="setup-dialog"]'), null);
+	assert.equal(document.querySelector('[data-testid="model-option-vendor_model_free"]'), null);
+	await click("model-option-claude-opus-5-5");
+	assert.deepEqual(sessionWrites, [{ model: { provider: "other", id: b.id }, thinkingLevel: "xhigh" }]);
+	assert.equal(selected, `other:${b.id}`); assert.deepEqual(globals, { strong: body.slots.strong });
+});
+
+test("availability and setup completeness never conflate missing metadata, disconnected providers or saved identities", () => {
+	const body = catalog(false);
+	assert.equal(savedSlotsConfigured(body.slots), true);
+	assert.equal(selectedModelUnavailable(body, `${a.provider}:${a.id}`), true);
+	assert.equal(selectedModelUnavailable(undefined, `${a.provider}:${a.id}`), false);
+	assert.equal(selectedModelUnavailable(body, undefined), false);
+	body.models = [b]; body.providers = [{ ...provider, keyPresent: true }];
+	assert.equal(selectedModelUnavailable(body, `${b.provider}:${b.id}`), false);
+	body.slots.cheap = null; assert.equal(savedSlotsConfigured(body.slots), false);
 });
 
 test("shared refresh fences late failure as well as late success, and Retry clears a current error", async () => {

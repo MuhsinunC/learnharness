@@ -5,7 +5,7 @@ import { useChatSession } from "@/components/session";
 import { visibleQueuedSteers } from "@/components/session-core";
 import { SetupDialog } from "@/components/setup-dialog";
 import { Hint } from "@/components/ui/hint";
-import { useZeroKeys, ZeroKeysPill } from "@/components/setup-cta";
+import { useModelSetup, selectedModelUnavailable, openModelPicker, ZeroKeysPill } from "@/components/setup-cta";
 import { useStickToBottomContext, type StickToBottomContext } from "use-stick-to-bottom";
 import {
 	Conversation,
@@ -80,8 +80,6 @@ import {
 } from "@/src/core";
 import { ReadingThinkingField } from "@/components/reading-thinking";
 import { currentUserThinkingOpen, setAllUserThinkingOpen } from "@/components/thinking-block";
-import { slotsConfigured, type ModelsSettings } from "@/src/core";
-import { useSettingsSaved } from "@/components/settings-signal";
 
 /** One width for everything: transcript, cards, and the bottom blob share this column. */
 /**
@@ -567,30 +565,18 @@ export function Chat({
 		textRef.current = v;
 		setText(v);
 	}, []);
-	// The BYOK setup flow (owner, 2026-09-22): the persistent CTA and the
-	// refusal interception share one SetupDialog mount. `configured` is
-	// seeded server-side (slotsConfigured on the record) and flips on Save.
-	const [configured, setConfigured] = useState(initialConfigured);
-	// The zero-keys truth (zero-keys wave): no provider key = the pill
-	// takes precedence over the models CTA (keys come first in the chain).
-	// Reads once on mount, re-reads on the "keys" signal.
-	const zeroKeys = useZeroKeys();
-	// Cross-surface freshness (fix wave): another surface's models write —
-	// setup save, composer pick, a settings write — re-reads the record so
-	// the setup CTA appears/disappears live (it used to lag until reload).
-	useSettingsSaved((section) => {
-		if (section !== "models") return;
-		fetch("/api/settings")
-			.then((r) => r.json() as Promise<{ settings?: { models?: ModelsSettings } | null } | null>)
-			.then((body) => setConfigured(slotsConfigured(body?.settings?.models)))
-			.catch(() => {});
-	});
+	// Saved slot completeness is live, but the session's selected route
+	// comes from its own ordinary model control, never today's Strong pin.
+	const { catalog, configured, zeroKeys } = useModelSetup(initialConfigured);
+	const catalogRef = useRef(catalog);
+	catalogRef.current = catalog;
+	const [selectedModel, setSelectedModel] = useState<string | undefined>();
 	const [setupOpen, setSetupOpen] = useState(false);
 	/** The last explicitly-sent draft (composer send): the
 	 *  refusal flow restores it into the composer, where it waits for the
 	 *  learner to re-send (Save never auto-sends, owner 2026-10-09).
 	 *  Auto-continuations (probe answers) never set it — their refusal
-	 *  opens the dialog with no replay. */
+	 *  opens recovery with no replay. */
 	const draftRef = useRef<string | null>(null);
 
 	// THE BYOK REFUSAL (owner, 2026-09-22): a send that lands the server's
@@ -605,10 +591,17 @@ export function Chat({
 	useEffect(() => {
 		if (!error) return;
 		const missing = parseModelsRefusal(error.message);
+		// The key-refusal twin (zero-keys wave): a pinned model whose
+		// provider key is gone also restores the draft. With another provider
+		// connected, repair belongs to the ordinary current-session picker;
+		// otherwise setup derives its exclusive provider/loading stage.
+		// Subscription refusals keep their banner and restart instructions.
 		const action = providerRefusalAction(error.message);
 		if (!missing && !action) return; // a real error keeps the honest banner
-		// Refetch and restore the draft before dismissing setup refusals.
-		// Subscription refusals keep their banner and restart instructions.
+		// ORDER MATTERS: clearError() flips this effect's own dep (`error`)
+		// and would cancel the in-flight work below — so the banner dismiss,
+		// the draft restore, and the dialog open all land TOGETHER after the
+		// record refetch (the honest truth minus the refused send).
 		let cancelled = false;
 		void (async () => {
 			const res = await fetch(`/api/chats/${encodeURIComponent(chatId)}`);
@@ -622,10 +615,10 @@ export function Chat({
 				draftRef.current = null;
 			}
 			recoverFromError();
-			if (action !== "notice") {
-				clearError();
-				setSetupOpen(true);
-			}
+			if (action === "notice") return;
+			clearError();
+			if (action === "setup" && catalogRef.current?.providers.some((p) => p.keyPresent)) openModelPicker();
+			else setSetupOpen(true);
 		})();
 		return () => {
 			cancelled = true;
@@ -1162,6 +1155,14 @@ export function Chat({
 		if (busy || pending || compacting) return;
 		const t = textRef.current.trim();
 		if (!t) return;
+		if (zeroKeys) {
+			setSetupOpen(true);
+			return;
+		}
+		if (selectedModelUnavailable(catalog, selectedModel)) {
+			openModelPicker();
+			return; // No optimistic send and no change to the learner's draft.
+		}
 		draftRef.current = t; // the refusal flow's preserve-and-replay seam
 		applyText("");
 		void send({ type: "text", text: t });
@@ -1626,6 +1627,7 @@ export function Chat({
 					compactionRunning={compacting}
 					onSubmitThinking={submitThinking}
 					chatId={chatId}
+					onModelChange={setSelectedModel}
 					plan={hasPlan ? <PlanMarginalia messages={messages} /> : undefined}
 					onOpenPlan={() => setPlanOpen(true)}
 					requiresReveal={requiresReveal}
@@ -1729,7 +1731,6 @@ export function Chat({
 			onClose={() => setSetupOpen(false)}
 			onDone={() => {
 				setSetupOpen(false);
-				setConfigured(true);
 				// Save only saves (owner ruling 2026-10-09): the draft went
 				// home into the composer at refusal time and STAYS there —
 				// the learner sends it themselves.
@@ -1864,6 +1865,7 @@ function DockOverlay({
 	composer,
 	onSubmitAnswer,
 	chatId,
+	onModelChange,
 	onReserve,
 	plan,
 	onOpenPlan,
@@ -1900,6 +1902,7 @@ function DockOverlay({
 	onSubmitAnswer: (output: QuestionAnswerData) => void;
 	/** The model control's pass-through (the stats bar hosts it). */
 	chatId: string;
+	onModelChange: (model: string | undefined) => void;
 	/** Reports the dock's settled height (block + gradient) — ChatView's
 	 *  dockReserve state feeds the transcript's spacer from it. */
 	onReserve: (h: number) => void;
@@ -2352,6 +2355,7 @@ function DockOverlay({
 						pricing={pricing}
 						dictationSlot={dictationSlot}
 						chatId={chatId}
+						onModelChange={onModelChange}
 					/>
 					{/* The scroll-down disc (moved here from the Conversation,
 					    owner refinement round 2026-09-24): anchored to the BLOCK's

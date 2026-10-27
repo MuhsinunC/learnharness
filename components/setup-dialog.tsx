@@ -24,8 +24,9 @@
  *   Stage 2 — Strong → Cheap → Vision pickers over the FEDERATED catalog
  *     (keyed providers only), the vision slot filtered to image-capable
  *     models, in the app's shared dropdown language (ModelMenuList).
- *     Saved disconnected selections stay visible; Add provider opens the
- *     connection body when no provider remains. Refreshes preserve edits.
+ *     Saved disconnected selections and edits are retained internally in
+ *     the exclusive provider stage. Connecting with all slots already saved
+ *     closes setup; otherwise the pickers require only the missing slots.
  *     All three required (owner: no skip, no defaults); Save PUTs the
  *     models section and reports onDone(models).
  *
@@ -45,6 +46,7 @@ import { ModelMenuList } from "@/components/settings/model-menu";
 import { MenuShell } from "@/components/menu-shell";
 import { notifySettingsSaved, useSettingsSaved } from "@/components/settings-signal";
 import { useModelCatalog } from "@/components/model-catalog";
+import { savedSlotsConfigured } from "@/components/setup-cta";
 import { Hint } from "@/components/ui/hint";
 import { type ProviderKeyInfo } from "@/components/settings/keys-section";
 import { ProviderMenuList } from "@/components/settings/model-menu";
@@ -247,12 +249,11 @@ export function SetupDialog(props: SetupDialogProps) {
 function OpenSetupDialog({ onClose, onDone }: SetupDialogProps) {
 	const backdropDismiss = useBackdropDismiss(onClose);
 	const { catalog, failed, refresh } = useModelCatalog();
-	const [lastBody, setLastBody] = useState<ModelsBody | undefined>(catalog);
-	const body = catalog ?? lastBody;
+	const providerStageSeen = useRef(false);
+	const connectionCloseRequested = useRef(false);
 	const [picked, setPicked] = useState(() => prefillFromSlots(catalog?.models ?? [], catalog?.slots));
 	const [levels, setLevels] = useState(() => prefillLevels(catalog));
 	const editedSlots = useRef(new Set<ModelSlotName>());
-	const [showKeys, setShowKeys] = useState(false);
 	const [saving, setSaving] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [openMenu, setOpenMenu] = useState<{ slot: ModelSlotName; kind: "model" | "thinking" } | null>(null);
@@ -273,8 +274,8 @@ function OpenSetupDialog({ onClose, onDone }: SetupDialogProps) {
 
 	// The keys signal (zero-keys wave): keys-section saves/deletes AND
 	// THIS dialog's own first-key save dispatch it; the fetch effect below
-	// re-runs on it, so saving a key flips the stage to the pickers with
-	// the widened catalog — no restart, no Settings round-trip.
+	// re-runs on it, so saving a key widens the catalog. Incomplete saved
+	// slots advance to pickers; complete saved slots just close setup.
 	const [keysTick, setKeysTick] = useState(0);
 	useSettingsSaved((section) => {
 		if (section === "keys") setKeysTick((t) => t + 1);
@@ -291,7 +292,6 @@ function OpenSetupDialog({ onClose, onDone }: SetupDialogProps) {
 
 	useEffect(() => {
 		if (!catalog) return;
-		setLastBody(catalog);
 		const pre = prefillFromSlots(catalog.models, catalog.slots);
 		const preLevels = prefillLevels(catalog);
 		// Fresh metadata is always used, but a response cannot reset an
@@ -310,8 +310,17 @@ function OpenSetupDialog({ onClose, onDone }: SetupDialogProps) {
 			}
 			return next;
 		});
-		if (catalog.providers.some((p) => p.keyPresent)) setShowKeys(false);
 	}, [catalog]);
+
+	const stage = setupStage(catalog?.providers ?? null);
+	const closeAfterConnection = stage === "pickers" && providerStageSeen.current && savedSlotsConfigured(catalog?.slots);
+	useEffect(() => {
+		if (stage === "keys") providerStageSeen.current = true;
+		if (closeAfterConnection && !connectionCloseRequested.current) {
+			connectionCloseRequested.current = true;
+			onClose(); // Connection recovery is not a model-settings save.
+		}
+	}, [stage, closeAfterConnection, onClose]);
 
 	// Esc + outside-click — layered dismissal, closable WITHOUT
 	// configuring (browsing stays possible; the gate is the send
@@ -354,14 +363,16 @@ function OpenSetupDialog({ onClose, onDone }: SetupDialogProps) {
 		};
 	}, [onClose, openMenu, keyMenuOpen]);
 
-	const hasSelections = Object.keys(picked).length > 0 || SLOT_ORDER.some((slot) => body?.slots?.[slot]?.model);
-	const stage = hasSelections ? "pickers" : setupStage(body ? body.providers : null);
+	// Do not briefly paint model pickers between successful connection and
+	// closing an already-configured setup. No saved model/thinking writes.
+	if (closeAfterConnection) return null;
+
 	const allPicked = SLOT_ORDER.every((s) => picked[s]);
 
 	/** Stage 1's save: PUT the pasted key, dispatch the keys signal, and
-	 *  CLEAN the local screen — the signal re-fetch widens the catalog and
-	 *  the stage flips to the pickers on its own; the dialog stays mounted
-	 *  the whole way. Shape-gate 400s keep their user-facing line inline. */
+	 *  CLEAN the local key field. The fresh catalog decides whether to
+	 *  close recovery or advance to the missing model slots. Shape-gate
+	 *  400s keep their user-facing line inline. */
 	async function saveKey() {
 		if (!keyProvider || !keyValue.trim() || keySaving) return;
 		setKeySaving(true);
@@ -465,10 +476,6 @@ function OpenSetupDialog({ onClose, onDone }: SetupDialogProps) {
 						<p className="text-xs text-muted-foreground">
 							Pick the model for each tier. All three are required before chats can start.
 						</p>
-						{!body?.providers.some((p) => p.keyPresent) && <>
-							<button type="button" data-testid="setup-add-provider" aria-expanded={showKeys} className="self-start text-xs underline" onClick={() => setShowKeys((v) => !v)}>Add provider</button>
-							{showKeys && keysBody}
-						</>}
 						{SLOT_ORDER.map((slot) => {
 							const entry = picked[slot];
 							const level = levels[slot];
@@ -481,7 +488,7 @@ function OpenSetupDialog({ onClose, onDone }: SetupDialogProps) {
 								<div key={slot} data-testid={`setup-slot-${slot}`} className="flex flex-col gap-1.5">
 									<span className="flex items-center gap-1.5">
 										<span className="font-ui text-sm text-foreground">{SLOT_META[slot].label}</span>
-										{!body?.slots?.[slot]?.model && !picked[slot] && (
+										{!catalog?.slots?.[slot]?.model && !picked[slot] && (
 											<span
 												data-testid={`setup-needed-${slot}`}
 												className="rounded-sm border border-border px-1 py-0.5 text-[10px] font-normal tracking-wide text-muted-foreground"
