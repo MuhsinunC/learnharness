@@ -167,9 +167,8 @@ export function parseProviderKeyRefusal(message: string | undefined): boolean {
 }
 
 /** The image gate's send refusal (LH-39): the chat's model can't read
- *  images. Its words, for the composer's notice; null for anything else.
- *  Exported pure for tests. */
-export function parseImagesRefusal(message: string | undefined): string | null {
+ *  images. Its words, for the composer's notice; null for anything else. */
+function parseImagesRefusal(message: string | undefined): string | null {
 	if (!message) return null;
 	try {
 		const body = JSON.parse(message) as { code?: unknown; error?: unknown };
