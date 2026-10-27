@@ -124,6 +124,10 @@ export interface ResolvedModelSpec {
 	provider: string;
 	id: string;
 	thinkingLevel?: ThinkingLevel;
+	/** The user's custom context window for this pair (LH-38), resolved by
+	 *  the server with the spec; unset = the catalog window. pi-ai clamps
+	 *  maxTokens to model.contextWindow, so the engine's model carries it. */
+	contextWindow?: number;
 }
 
 /** The first entry of the baked default order the model supports (owner,
@@ -182,15 +186,6 @@ function maxOutputTokens(): number | undefined {
 	return value;
 }
 
-/** The user's per-pair context window (LH-38): pi-ai clamps maxTokens to
- *  model.contextWindow, so the engine's model must carry the custom value.
- *  The server injects its settings read here at its composition root —
- *  this layer never imports settings. */
-let contextWindowLookup: (provider: string, id: string) => number | undefined = () => undefined;
-export function setContextWindowLookup(lookup: (provider: string, id: string) => number | undefined): void {
-	contextWindowLookup = lookup;
-}
-
 /** The production engine for a RESOLVED spec (model slots wave,
  *  2026-09-20): provider-aware catalog lookup + thinking clamp. The API
  *  key is resolved by pi-ai itself from the environment per request (the
@@ -206,13 +201,12 @@ export function piEngineForSpec(spec: ResolvedModelSpec, background: boolean | (
 	const routing = spec.provider === "openrouter" ? openRouterRouting(spec.id) : undefined;
 	const cap = maxOutputTokens();
 	const clamp = cap !== undefined && catalogModel.maxTokens > cap;
-	const contextWindow = contextWindowLookup(spec.provider, spec.id);
-	const model = routing || clamp || contextWindow
+	const model = routing || clamp || spec.contextWindow
 		? {
 			...catalogModel,
 			...(routing ? { compat: { ...catalogModel.compat, openRouterRouting: routing } } : {}),
 			...(clamp ? { maxTokens: cap } : {}),
-			...(contextWindow ? { contextWindow } : {}),
+			...(spec.contextWindow ? { contextWindow: spec.contextWindow } : {}),
 		}
 		: catalogModel;
 	// UNSET level → the baked default order (first entry the model

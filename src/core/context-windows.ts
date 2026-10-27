@@ -5,12 +5,16 @@
  * Maximum is the known working limit from the table below, or the
  * Default when no higher limit is known. Values above the Maximum are
  * allowed only behind an explicit confirmation (the settings modal; the
- * write route enforces it). Sources: docs/context-windows.md.
+ * write route enforces it). Minimum is a hard floor: below it compaction
+ * would churn. Sources: docs/context-windows.md.
  *
  * Pure: GET /api/models projects Default and Maximum from it for the
  * settings UI, and the write route guards with the same numbers. Extend
  * it by adding `provider:id` rows.
  */
+
+import { COMPACTION_RESERVE_TOKENS } from "./compaction.ts";
+import { COMPACTION_THRESHOLD_FLOOR } from "./settings.ts";
 
 /** Known working maximum context windows, keyed `provider:id`. OpenAI API:
  *  the model pages' documented window. ChatGPT subscription models: the
@@ -44,4 +48,14 @@ export function contextWindowKey(provider: string, id: string): string {
 /** The known working maximum for a pair — never below its Default. */
 export function maxContextWindow(provider: string, id: string, defaultWindow: number): number {
 	return Math.max(defaultWindow, KNOWN_MAX_CONTEXT_WINDOWS[contextWindowKey(provider, id)] ?? 0);
+}
+
+/** The smallest window that keeps the compaction trigger (window − reserve)
+ *  at or above the threshold floor: 32k + 16,384 = 48,384 tokens. */
+export const CONTEXT_WINDOW_FLOOR = COMPACTION_THRESHOLD_FLOOR + COMPACTION_RESERVE_TOKENS;
+
+/** The lowest window a pair accepts — the floor, or the pair's own
+ *  Default when the model is smaller than that. */
+export function minContextWindow(defaultWindow: number): number {
+	return Math.min(CONTEXT_WINDOW_FLOOR, defaultWindow);
 }
