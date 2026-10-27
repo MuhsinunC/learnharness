@@ -1,26 +1,34 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { ModelCatalogEntry } from "@/src/core";
+import { minContextWindow, type ModelCatalogEntry } from "@/src/core";
 import { notifySettingsSaved } from "@/components/settings-signal";
 import { formatTokens } from "@/components/usage-format";
+import { CommitInput } from "./controls.tsx";
+
+/** The field's caption, shared by Settings and the composer menu. */
+export function contextWindowCaption(entry: ModelCatalogEntry): string {
+	return `Default: ${formatTokens(entry.defaultContextWindow)} · Maximum: ${formatTokens(entry.maxContextWindow)}`;
+}
 
 /**
  * One (provider, model) pair's context window (LH-38, owner 2026-10-27).
- * Enter or Save commits; an empty field resets to the catalog Default. A
- * value above the known Maximum opens a confirm modal first — Confirm
- * stays disabled until "I know what I'm doing" is checked; Cancel keeps
- * the stored value. The server refuses above-maximum writes without that
- * confirmation, so the modal is the only way past it.
+ * Commits on Enter or blur (CommitInput: the field always shows what is
+ * stored); an empty field, or the Default itself, resets to the catalog
+ * Default. A value below the pair's Minimum is refused in place. A value
+ * above the known Maximum opens a confirm modal first — Confirm stays
+ * disabled until "I know what I'm doing" is checked; Cancel keeps the
+ * stored value. The server refuses above-maximum writes without that
+ * confirmation, so the modal is the only way past it; a server refusal
+ * (a stale client catalog) opens the same modal at the server's maximum.
  *
  * Callers key this per pair + stored value, so switching models shows
- * that pair's own value and a landed save resets the draft.
+ * that pair's own value and a landed save resets the field.
  */
 export function ContextWindowField({ entry }: { entry: ModelCatalogEntry }) {
-	const stored = entry.contextWindow === entry.defaultContextWindow ? "" : String(entry.contextWindow);
-	const [draft, setDraft] = useState(stored);
-	const [pending, setPending] = useState<number | null>(null);
+	const stored = entry.customContextWindow === undefined ? "" : String(entry.customContextWindow);
+	const [pending, setPending] = useState<{ tokens: number; maximum: number } | null>(null);
 	const [error, setError] = useState<string | null>(null);
 
 	async function write(tokens: number | null, confirmAboveMax: boolean) {
@@ -32,8 +40,9 @@ export function ContextWindowField({ entry }: { entry: ModelCatalogEntry }) {
 				body: JSON.stringify({ provider: entry.provider, id: entry.id, tokens, confirmAboveMax }),
 			});
 			if (!res.ok) {
-				const body = (await res.json().catch(() => ({}))) as { error?: string };
-				setError(body.error ?? `settings rejected (${res.status})`);
+				const body = (await res.json().catch(() => ({}))) as { error?: string; code?: string; maximum?: number };
+				if (body.code === "above_maximum" && tokens !== null && typeof body.maximum === "number") setPending({ tokens, maximum: body.maximum });
+				else setError(body.error ?? `settings rejected (${res.status})`);
 				return;
 			}
 			notifySettingsSaved("contextWindows");
@@ -42,57 +51,43 @@ export function ContextWindowField({ entry }: { entry: ModelCatalogEntry }) {
 		}
 	}
 
-	function save() {
-		const text = draft.trim();
+	function commit(text: string) {
+		if (pending) return;
 		if (text === "") {
-			if (stored !== "") void write(null, false);
+			void write(null, false);
 			return;
 		}
 		const tokens = Math.floor(Number(text));
-		if (!Number.isFinite(tokens) || tokens < 1) {
-			setError("Enter a positive number of tokens.");
+		if (!Number.isFinite(tokens)) {
+			setError("Enter a number of tokens.");
 			return;
 		}
-		if (tokens > entry.maxContextWindow) setPending(tokens);
+		const minimum = minContextWindow(entry.defaultContextWindow);
+		if (tokens < minimum) setError(`Minimum: ${formatTokens(minimum)} — a smaller window makes compaction churn.`);
+		else if (tokens === entry.defaultContextWindow) void write(null, false);
+		else if (tokens > entry.maxContextWindow) setPending({ tokens, maximum: entry.maxContextWindow });
 		else void write(tokens, false);
 	}
 
 	return (
 		<span className="flex flex-col items-end gap-1">
-			<span className="flex items-center gap-2">
-				<input
-					type="number"
-					value={draft}
-					placeholder={String(entry.defaultContextWindow)}
-					aria-label={`${entry.id} context window`}
-					data-testid="input-context-window"
-					onChange={(e) => setDraft(e.target.value)}
-					onKeyDown={(e) => {
-						if (e.key === "Enter") save();
-					}}
-					className="h-7 w-32 rounded-sm border border-border bg-background px-2 font-ui text-xs text-foreground outline-none placeholder:text-muted-foreground/60"
-				/>
-				<button
-					type="button"
-					data-testid="save-context-window"
-					onClick={save}
-					className="rounded-sm border border-border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
-				>
-					Save
-				</button>
-			</span>
+			<CommitInput
+				type="number"
+				value={stored}
+				placeholder={String(entry.defaultContextWindow)}
+				ariaLabel={`${entry.id} context window`}
+				testid="input-context-window"
+				onCommit={commit}
+			/>
 			{error && <span className="text-xs text-destructive" data-testid="context-window-error">{error}</span>}
 			{pending !== null && (
 				<AboveMaximumDialog
-					tokens={pending}
-					maximum={entry.maxContextWindow}
-					onCancel={() => {
-						setPending(null);
-						setDraft(stored);
-					}}
+					tokens={pending.tokens}
+					maximum={pending.maximum}
+					onCancel={() => setPending(null)}
 					onConfirm={() => {
 						setPending(null);
-						void write(pending, true);
+						void write(pending.tokens, true);
 					}}
 				/>
 			)}
@@ -101,9 +96,10 @@ export function ContextWindowField({ entry }: { entry: ModelCatalogEntry }) {
 }
 
 /** The above-maximum confirm (the abort-turn dialog's frame). No backdrop
- *  dismiss: leaving takes Cancel or Esc. Esc is claimed in the window's
- *  capture phase so the settings dialog behind it stays open, and
- *  data-lh-menu marks it a layer of the open menu, so the menus'
+ *  dismiss: leaving takes Cancel or Esc. Focus lands on the checkbox and
+ *  Tab / Shift+Tab cycle inside the dialog. Keys are claimed in the
+ *  window's capture phase, so Esc leaves the settings dialog behind it
+ *  open, and data-lh-menu marks it a layer of the open menu, so the menus'
  *  outside-click handlers don't close the field under it. */
 function AboveMaximumDialog({
 	tokens,
@@ -117,16 +113,29 @@ function AboveMaximumDialog({
 	onConfirm: () => void;
 }) {
 	const [understood, setUnderstood] = useState(false);
+	const ref = useRef<HTMLDivElement>(null), cancelRef = useRef(onCancel);
+	cancelRef.current = onCancel;
 	useEffect(() => {
+		const focusable = () => [...(ref.current?.querySelectorAll<HTMLElement>("input, button:not([disabled])") ?? [])];
+		focusable()[0]?.focus();
 		const onKeyDown = (e: KeyboardEvent) => {
-			if (e.key !== "Escape") return;
-			e.preventDefault();
-			e.stopPropagation();
-			onCancel();
+			if (e.key === "Escape") {
+				e.preventDefault();
+				e.stopPropagation();
+				cancelRef.current();
+			} else if (e.key === "Tab") {
+				// Claimed outright: the app's own Tab (keyboard-shortcuts.tsx)
+				// would move focus to the fields behind the dialog.
+				e.preventDefault();
+				e.stopPropagation();
+				const items = focusable(), at = items.indexOf(document.activeElement as HTMLElement);
+				const step = e.shiftKey ? -1 : 1;
+				items[at === -1 ? 0 : (at + step + items.length) % items.length]?.focus();
+			}
 		};
 		window.addEventListener("keydown", onKeyDown, true);
 		return () => window.removeEventListener("keydown", onKeyDown, true);
-	}, [onCancel]);
+	}, []);
 	return createPortal(
 		<div
 			role="dialog"
@@ -136,7 +145,7 @@ function AboveMaximumDialog({
 			data-lh-menu=""
 			className="fixed inset-0 z-[60] flex items-center justify-center bg-background/80 backdrop-blur-sm"
 		>
-			<div className="mx-4 w-full max-w-sm rounded-xl border bg-card p-5 shadow-lg">
+			<div ref={ref} className="mx-4 w-full max-w-sm rounded-xl border bg-card p-5 shadow-lg">
 				<h2 className="text-sm font-semibold text-card-foreground">
 					{formatTokens(tokens)} is above the known maximum ({formatTokens(maximum)})
 				</h2>

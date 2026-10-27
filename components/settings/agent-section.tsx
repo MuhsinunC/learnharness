@@ -69,13 +69,13 @@ import {
 	type ModelsSettings,
 } from "@/src/core";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { formatTokens, prettyModel } from "@/components/usage-format";
+import { prettyModel } from "@/components/usage-format";
 import { cn } from "@/lib/utils";
 import { SettingsGroup, SettingsRow, SettingsMenuTrigger, Toggle, CommitInput } from "./controls.tsx";
 import { ModelMenuList, ThinkingMenuList } from "./model-menu";
 import { ChatGPTBackgroundAccess } from "./chatgpt-connection";
 import { NativeSubscriptionBackgroundAccess } from "./subscription-connections";
-import { ContextWindowField } from "./context-window-field";
+import { ContextWindowField, contextWindowCaption } from "./context-window-field";
 
 /** One slot's display identity — the tier's roster as the row hint rides
  *  with the resolved default (owner: the hint ALWAYS names the default). */
@@ -863,7 +863,7 @@ export function AgentSection({
 					<SettingsRow
 						key={`${entry.provider}:${entry.id}`}
 						label={`Context window · ${prettyModel(entry.id)}`}
-						hint={`Default: ${formatTokens(entry.defaultContextWindow)} · Maximum: ${formatTokens(entry.maxContextWindow)}`}
+						hint={contextWindowCaption(entry)}
 						testid={`context-window-row-${entry.provider}:${entry.id}`}
 					>
 						<ContextWindowField key={`${entry.provider}:${entry.id}:${entry.contextWindow}`} entry={entry} />
