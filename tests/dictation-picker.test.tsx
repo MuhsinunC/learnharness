@@ -110,7 +110,9 @@ test("an initial load failure is visible and opening the menu again can retry", 
 test("the real picker searches by language, chooses with Arrow/Enter, and restores focus", async () => {
 	const f = await fixture();
 	assert.match(trigger().textContent!, /English/);
-	assert.equal(trigger().getAttribute("data-variant"), "outline");
+	for (const token of ["h-7", "rounded-sm", "border-border", "bg-background", "font-ui", "text-xs"]) {
+		assert.ok(trigger().className.split(" ").includes(token), `shared settings trigger: ${token}`);
+	}
 	await click(trigger());
 	assert.match(input().className, /lh-input/);
 	assert.equal(document.activeElement, input());
@@ -226,9 +228,15 @@ for (const source of ["none", "file", "env"] as const) test(`Language is below t
 	const rows = group.lastElementChild!.children;
 	assert.equal(rows[0]!.getAttribute("data-testid"), "key-deepgram_api_key");
 	assert.equal(rows[1]!.getAttribute("data-testid"), "row-dictation-language");
+	assert.equal(rows[2]!.getAttribute("data-testid"), "dictation-setup-hint");
+	assert.equal(byTest("dictation-setup-hint").textContent, "Create a Deepgram key with the Member role or higher, then add it above.");
+	assert.match(byTest("dictation-setup-hint").className, /text-muted-foreground/);
+	assert.equal(byTest("dictation-setup-hint").querySelector("a")!.href, "https://developers.deepgram.com/reference/auth/tokens/grant");
+	assert.match(rows[1]!.querySelector("span")!.className, /font-ui text-xs/);
 	assert.equal(trigger().disabled, false, "language is independent of key ownership");
 	await click(byTest("key-deepgram_api_key-row"));
 	if (source !== "env") assert.ok(byTest("key-deepgram_api_key-editor"));
+	assert.ok(byTest("dictation-setup-hint"), "guidance remains visible while the key is edited");
 	await click(trigger());
 	assert(menu());
 	await key(input(), "Escape");

@@ -1,12 +1,10 @@
 "use client";
 
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { ChevronDownIcon } from "lucide-react";
 import { DICTATION_LANGUAGES, type DictationLanguage } from "@/src/core";
 import { MenuShell } from "@/components/menu-shell";
-import { Button } from "@/components/ui/button";
 import { Hint } from "@/components/ui/hint";
-import { SettingsRow } from "@/components/settings/controls";
+import { SettingsMenuTrigger } from "@/components/settings/controls";
 import { SearchMenuList } from "@/components/settings/search-menu-list";
 import { useDictationActive } from "@/components/dictation-state";
 import { useDictationLanguage } from "@/components/dictation-preference";
@@ -16,9 +14,13 @@ type LanguagePreference = ReturnType<typeof useDictationLanguage>;
 export function DictationLanguageSetting() {
 	const preference = useDictationLanguage();
 	const active = useDictationActive();
-	return <SettingsRow label="Language" testid="row-dictation-language" dimmed={active}>
+	return <div
+		data-testid="row-dictation-language"
+		className={`flex items-center justify-between gap-3 rounded-sm px-1 py-1.5${active ? " opacity-40" : ""}`}
+	>
+		<span className="font-ui text-xs text-foreground">Language</span>
 		<DictationLanguagePicker preference={preference} disabled={active} />
-	</SettingsRow>;
+	</div>;
 }
 
 function DictationLanguagePicker({ preference, disabled }: {
@@ -58,11 +60,9 @@ function DictationLanguagePicker({ preference, disabled }: {
 
 	return <>
 		<Hint label={error ?? `Dictation language: ${label}`} side="top">
-			<Button
+			<SettingsMenuTrigger
 				ref={triggerRef}
-				type="button"
-				variant="outline"
-				size="xs"
+				value={label}
 				data-testid="dictation-language"
 				aria-label={`Dictation language: ${label}`}
 				aria-expanded={open && !disabled}
@@ -72,11 +72,8 @@ function DictationLanguagePicker({ preference, disabled }: {
 					setOpen((value) => !value);
 					if (language === undefined) void load().catch(() => {});
 				}}
-				className="h-8 min-w-0 max-w-[65%] px-2.5 font-normal"
-			>
-				<span className="truncate">{label}</span>
-				<ChevronDownIcon aria-hidden className="size-3" />
-			</Button>
+				className="min-w-20 max-w-[65%]"
+			/>
 		</Hint>
 		{open && !disabled && <MenuShell
 			anchorRef={triggerRef}

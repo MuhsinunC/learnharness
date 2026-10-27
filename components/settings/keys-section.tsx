@@ -490,7 +490,17 @@ export function KeysSection({
 						testid={`key-${status.id.toLowerCase()}`}
 					/>
 				))}
-				{label === "Dictation" && <DictationLanguageSetting />}
+				{label === "Dictation" && <>
+					<DictationLanguageSetting />
+					<p data-testid="dictation-setup-hint" className="px-1 text-[11px] leading-relaxed text-muted-foreground/70">
+						Create a Deepgram key with the <a
+							href="https://developers.deepgram.com/reference/auth/tokens/grant"
+							target="_blank"
+							rel="noreferrer"
+							className="underline underline-offset-2 hover:text-foreground"
+						>Member role or higher</a>, then add it above.
+					</p>
+				</>}
 			</SettingsGroup>)}
 
 		</>

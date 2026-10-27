@@ -71,7 +71,7 @@ import {
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { prettyModel } from "@/components/usage-format";
 import { cn } from "@/lib/utils";
-import { SettingsGroup, SettingsRow, Toggle, CommitInput } from "./controls.tsx";
+import { SettingsGroup, SettingsRow, SettingsMenuTrigger, Toggle, CommitInput } from "./controls.tsx";
 import { ModelMenuList, ThinkingMenuList } from "./model-menu";
 import { ChatGPTBackgroundAccess } from "./chatgpt-connection";
 import { NativeSubscriptionBackgroundAccess } from "./subscription-connections";
@@ -245,23 +245,17 @@ function MenuTrigger({
 	disabled?: boolean;
 }) {
 	const button = (
-		<button
-			type="button"
+		<SettingsMenuTrigger
+			value={value || emptyLabel}
 			aria-label={ariaLabel}
 			aria-expanded={open}
 			data-testid={testid}
 			onClick={() => {
 				if (!disabled) onClick();
 			}}
-			className={`flex h-7 items-center gap-1 rounded-sm border border-border bg-background px-1.5 font-ui text-xs text-foreground transition-colors ${
-				disabled ? "cursor-not-allowed" : "hover:border-muted-foreground/50"
-			} ${widthClass}`}
-		>
-			<span className="min-w-0 flex-1 truncate">{value || emptyLabel}</span>
-			<span aria-hidden className="text-muted-foreground">
-				▾
-			</span>
-		</button>
+			unavailable={disabled}
+			className={widthClass}
+		/>
 	);
 	return hint ? <Hint label={hint}>{button}</Hint> : button;
 }
