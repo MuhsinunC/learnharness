@@ -196,6 +196,8 @@ export interface ResearchToolInput {
 export interface ResearchResult {
 	brief: string;
 	sources: { title: string; url: string }[];
+	/** Only a settings change can fix this failure (a rejected key, no model): the steer tells the teacher not to retry. */
+	needsSettingsFix?: true;
 }
 
 export interface DemoToolInput {
@@ -211,6 +213,8 @@ export interface DemoResult {
 	/** The builder sub-agent headlessly executed the demo before delivery. */
 	tested: true;
 	notes?: string;
+	/** Only a settings change can fix this failure (a rejected key, no model): the steer tells the teacher not to retry. */
+	needsSettingsFix?: true;
 }
 
 export interface VisualToolInput {
@@ -222,6 +226,8 @@ export interface VisualResult {
 	/** Complete SVG markup (verified by the maker looking at the render). */
 	svg: string;
 	notes?: string;
+	/** Only a settings change can fix this failure (a rejected key, no model): the steer tells the teacher not to retry. */
+	needsSettingsFix?: true;
 }
 
 /** The pdf-reader (sources v0, 2026-09): reads a learner-provided PDF on
@@ -250,6 +256,8 @@ export interface PdfResult {
 	/** Every page whose content entered the loop, search-hit context lines
 	 *  included — the full audit set (the brief's citations may point here). */
 	pagesConsulted: number[];
+	/** Only a settings change can fix this failure (a rejected key, no model): the steer tells the teacher not to retry. */
+	needsSettingsFix?: true;
 }
 
 // ─── Sub-agent steer messages (THE ASYNC PROTOCOL §3–4) ─────────────────────
@@ -336,6 +344,15 @@ export function isSubagentFailure(
 
 /** The model-facing text of a steer: what the result IS, what to do with it. */
 function steerText(kind: JobKind, result: ResearchResult | DemoResult | VisualResult | PdfResult): string {
+	if (isSubagentFailure(kind, result) && result.needsSettingsFix) {
+		const what =
+			kind === "demo"
+				? `The demo "${(result as DemoResult).title}" could not be built: ${(result as DemoResult).notes ?? "unknown reason"}`
+				: kind === "visual"
+					? `The figure could not be made: ${(result as VisualResult).notes ?? "unknown reason"}`
+					: (result as ResearchResult | PdfResult).brief;
+		return `${what}\n\nRetrying won't help until the learner changes this setting, so don't call ${kind} again. Tell the learner in one sentence what to change, then continue teaching without it.`;
+	}
 	if (isSubagentFailure(kind, result)) {
 		if (kind === "research")
 			return `${(result as ResearchResult).brief}\n\nContinue with what you can establish and flag the uncertainty to the learner.`;
