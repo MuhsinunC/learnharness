@@ -173,7 +173,7 @@ describe("workflow action versions", () => {
 	type Workflow = { jobs: Record<string, { steps: Step[] }> };
 	const yaml = require("js-yaml") as { load(source: string): Workflow };
 
-	for (const filename of ["ci.yml", "release.yml"]) {
+	for (const filename of ["ci.yml", "release.yml", "fork-release.yml"]) {
 		it(`${filename} uses supported Action runtimes without changing the app's Node 26`, () => {
 			const workflow = yaml.load(readFileSync(new URL(`../.github/workflows/${filename}`, import.meta.url), "utf8"));
 			const expected = ["actions/checkout@v7", "actions/setup-node@v7"];

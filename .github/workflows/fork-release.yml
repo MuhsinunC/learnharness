@@ -1,0 +1,159 @@
+name: Fork release
+
+# Cuts a fork pre-release from the current tip of ai-reviewed: builds the
+# ad-hoc-signed arm64 DMG, tags lh-<version>-fork.<N> on the built commit and
+# publishes a draft-first GitHub pre-release. Never creates a v* tag, which
+# would start upstream's release.yml.
+on:
+  workflow_dispatch:
+    inputs:
+      fork_build:
+        description: "N in <package version>-fork.<N>"
+        required: true
+        type: string
+      notes:
+        description: "Optional summary for the release notes"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+  actions: read
+
+# Two dispatches must never race the tag-absence check or an upload.
+concurrency:
+  group: fork-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+      LH_FORK_ICON: icns
+      GH_TOKEN: ${{ github.token }}
+      FORK_BUILD: ${{ inputs.fork_build }}
+    steps:
+      - name: Require a GitHub-hosted Apple Silicon runner
+        run: |
+          set -euo pipefail
+          [[ $GITHUB_ACTIONS == true && $RUNNER_ENVIRONMENT == github-hosted ]]
+          [[ $RUNNER_OS == macOS && $RUNNER_ARCH == ARM64 ]]
+      - name: Require ai-reviewed and a valid fork build
+        run: |
+          set -euo pipefail
+          [[ $GITHUB_REF == refs/heads/ai-reviewed ]] || { echo "dispatch on ai-reviewed, not $GITHUB_REF" >&2; exit 1; }
+          [[ $FORK_BUILD =~ ^[1-9][0-9]*$ ]] || { echo "fork_build must be a positive integer" >&2; exit 1; }
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+          cache: npm
+      - name: Check the tip and tag
+        run: |
+          set -euo pipefail
+          [[ $(git ls-remote origin refs/heads/ai-reviewed | cut -f1) == "$GITHUB_SHA" ]] || { echo "ai-reviewed moved since dispatch" >&2; exit 1; }
+          version=$(node -p 'require("./package.json").version')-fork.$FORK_BUILD
+          tag=lh-$version
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then echo "$tag exists locally" >&2; exit 1; fi
+          [[ -z $(git ls-remote --tags origin "refs/tags/$tag") ]] || { echo "$tag exists on origin" >&2; exit 1; }
+          {
+            echo "FORK_VERSION=$version"
+            echo "TAG=$tag"
+          } >> "$GITHUB_ENV"
+      - name: Require Fork macOS E2E success at this commit
+        run: |
+          set -euo pipefail
+          url=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/fork-mac-e2e.yml/runs?head_sha=$GITHUB_SHA" \
+            --jq '[.workflow_runs[] | select(.conclusion == "success")][0].html_url // empty')
+          [[ -n $url ]] || { echo "no successful Fork macOS E2E run at $GITHUB_SHA yet; wait for it" >&2; exit 1; }
+          echo "E2E_URL=$url" >> "$GITHUB_ENV"
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          npm ci
+      - name: Build fork DMG
+        run: |
+          set -euo pipefail
+          DEVELOPER_DIR="$(xcode-select -p)" scripts/build-fork-mac.sh "$FORK_BUILD"
+          dmg="$GITHUB_WORKSPACE/dist/LearnHarness-$FORK_VERSION-arm64.dmg"
+          test -f "$dmg"
+          {
+            echo "DMG=$dmg"
+            echo "DMG_SHA256=$(shasum -a 256 "$dmg" | cut -d ' ' -f 1)"
+          } >> "$GITHUB_ENV"
+      - name: Check the packaged app's version and signature
+        run: |
+          set -euo pipefail
+          app="$GITHUB_WORKSPACE/dist/mac-arm64/LearnHarness.app"
+          [[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist") == "$FORK_VERSION" ]]
+          codesign --verify --deep --strict "$app"
+          codesign -dv --verbose=2 "$app" > "$RUNNER_TEMP/codesign.txt" 2>&1
+          grep -Fx 'Signature=adhoc' "$RUNNER_TEMP/codesign.txt"
+          if grep -E 'flags=.*runtime' "$RUNNER_TEMP/codesign.txt"; then exit 1; fi
+          # The build must not have changed tracked files.
+          git diff --quiet HEAD
+      - name: Write release notes
+        env:
+          NOTES_INPUT: ${{ inputs.notes }}
+        run: |
+          set -euo pipefail
+          # Before tagging, so the new tag cannot be its own predecessor.
+          prev=$(git tag --list 'lh-*' --sort=-v:refname | grep -vFx "$TAG" | head -1 || true)
+          notes="$RUNNER_TEMP/notes.md"
+          {
+            echo '## Summary'
+            echo "LearnHarness fork build \`$FORK_VERSION\` for Apple Silicon Macs, built from \`ai-reviewed\` at \`$GITHUB_SHA\`. AI-reviewed pre-release; no human approval. Ad-hoc signed and not notarized: see \`docs/fork-desktop-build.md\` to install, and \`docs/migrate.md\` to move from the official app."
+            if [[ -n $NOTES_INPUT ]]; then printf '\n%s\n' "$NOTES_INPUT"; fi
+            echo
+            echo '## DMG SHA-256'
+            echo "\`$DMG_SHA256\`  \`$(basename "$DMG")\`"
+            echo
+            echo '## Verification'
+            echo "- Fork macOS E2E passed at this commit: $E2E_URL"
+            echo "- Built by \`scripts/build-fork-mac.sh $FORK_BUILD\` in run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID: server and provider runtime smokes passed; the app's signature verifies (ad-hoc, no hardened runtime)."
+            echo
+            echo "## Changes since ${prev:-the first commit}"
+            echo '```'
+            git log --oneline --no-merges "${prev:+$prev..}$GITHUB_SHA"
+            echo '```'
+          } > "$notes"
+          echo "NOTES_FILE=$notes" >> "$GITHUB_ENV"
+          cat "$notes"
+      - name: Tag the built commit
+        run: |
+          set -euo pipefail
+          [[ $(git ls-remote origin refs/heads/ai-reviewed | cut -f1) == "$GITHUB_SHA" ]] || { echo "ai-reviewed moved during the build; dispatch again" >&2; exit 1; }
+          [[ -z $(git ls-remote --tags origin "refs/tags/$TAG") ]] || { echo "$TAG appeared on origin" >&2; exit 1; }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "LearnHarness $TAG" "$GITHUB_SHA"
+          git push origin "refs/tags/$TAG"
+      - name: Publish draft first, verify assets, then release
+        run: |
+          set -euo pipefail
+          cd "$(dirname "$DMG")"
+          shasum -a 256 "$(basename "$DMG")" > SHA256SUMS
+          latest_before=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || echo none)
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease --latest=false --draft \
+            --title "LearnHarness fork $TAG" --notes-file "$NOTES_FILE" "$DMG" SHA256SUMS
+          download=$(mktemp -d "$RUNNER_TEMP/download.XXXXXX")
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$download"
+          assets=("$download"/*)
+          [[ ${#assets[@]} == 2 && -f $download/SHA256SUMS && -f $download/$(basename "$DMG") ]]
+          (cd "$download" && shasum -a 256 -c SHA256SUMS)
+          [[ $(shasum -a 256 "$download/$(basename "$DMG")" | cut -d ' ' -f 1) == "$DMG_SHA256" ]]
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false
+          git fetch -q origin "refs/tags/$TAG:refs/tags/$TAG" --force
+          [[ $(git rev-parse "$TAG^{commit}") == "$GITHUB_SHA" ]] || { echo "$TAG is mistargeted" >&2; exit 1; }
+          [[ $(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease --jq '"\(.isDraft) \(.isPrerelease)"') == "false true" ]]
+          [[ $(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || echo none) == "$latest_before" ]]
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url --jq .url
