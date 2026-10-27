@@ -257,11 +257,17 @@ export async function recoverContext(deps: RecoveryDeps, chatId: string): Promis
 }
 
 /** POST /api/chats/[id]/repair — "Repair this chat": the same recovery,
- *  on the learner's request, saved; the learner sends again. */
+ *  on the learner's request, for a chat whose last reply failed for
+ *  length; saved, and the learner sends again. */
 export async function handleRepairRequest(chatId: string): Promise<Response> {
 	const record = stores.chatStore.getChat(chatId);
 	if (!record) return Response.json({ error: "Unknown chat" }, { status: 404 });
 	if (isTurnRunning(chatId)) return Response.json({ error: "A turn is running for this session" }, { status: 409 });
+	// Only a chat whose last reply was rejected for length: a healthy chat
+	// has no stated limit to aim at, and a repaired one ends in its marker.
+	if (!isContextOverflowMessage(record.messages.at(-1))) {
+		return Response.json({ error: "This chat is not broken: its last reply did not fail for length." }, { status: 409 });
+	}
 	const spec = resolveConversationSpec(record.settings, effectiveSettings().models.strong);
 	if (!spec) return Response.json(modelsNotConfigured(["strong"]), { status: 503 });
 	let engine: PiEngine;

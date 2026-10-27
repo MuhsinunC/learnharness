@@ -41,8 +41,11 @@ that is rejected for length, and the chat is broken.
   [errors](https://code.claude.com/docs/en/errors)). It compacts automatically
   near the limit. When a request is rejected for input plus `max_tokens`, it
   first retries with a smaller `max_tokens`, then "stops retrying and compacts
-  instead". When compaction cannot keep up, it stops with a thrashing error
-  rather than looping. `/compact` (with an optional focus) is the manual repair.
+  instead". "Prompt is too long" (and Bedrock's "Input is too long for
+  requested model") triggers auto-compact; a failed one surfaces as "Prompt
+  is too long · automatic compaction failed: …". When compaction cannot keep
+  up, it stops with a thrashing error rather than looping. `/compact` (with
+  an optional focus) is the manual repair.
 
 ## The choice
 
@@ -78,8 +81,10 @@ Pi's shape, with Codex's clipping and option 2 as the fallback
   the older part and continued."
 - **Manual repair.** "Repair this chat" sits in the error banner for a
   length error and in the session menu. It calls
-  `POST /api/chats/[id]/repair`, which runs the same compaction, toward the
-  limit stated in the chat's last length error when there is one.
+  `POST /api/chats/[id]/repair`, which runs the same compaction toward the
+  limit stated in the chat's length error. It refuses (409) unless the
+  chat's last message is that error, so it never compacts a working chat
+  and a second click is a no-op.
 - **Learning state.** Nothing is deleted. The rejected reply stays in the
   record; pi drops errored replies on the wire. Full history stays behind
   the marker, which keeps the transcript-derived plan progress and
@@ -92,4 +97,7 @@ Recovery reads the window only through `contextWindowFor(modelId)` in
 `src/server/context-recovery.ts`. Today it returns `catalogContextLimits()`.
 LH-38's per-(provider, model) setting should plug in there. The threshold
 compaction's two call sites in `chat-handler.ts` were left as they are,
-for LH-38.
+for LH-38. Until the window itself is corrected, the threshold still trusts
+the wrong value, so an over-window chat will hit the limit and recover again
+every few turns. Persisting the limit a rejection states, per model, would
+stop that; it is left to LH-38.

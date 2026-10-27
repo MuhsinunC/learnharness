@@ -14,7 +14,7 @@ import { reply, startStubProvider, type StubProvider, type StubRequest, type Stu
 // context-length 400, stating LIMIT_CHARS / 4 tokens.
 
 const LIMIT_CHARS = 38_000;
-const REPLY = `Here is the next part of the lesson. ${"Limits describe what a function approaches. ".repeat(115)}`;
+const FILLER = "Limits describe what a function approaches. ".repeat(115);
 const SUMMARY = [
 	"## The learner's understanding",
 	"The learner asked for a walk through limits and followed each step.",
@@ -48,9 +48,15 @@ type Msg = { id: string; role: string; content?: unknown; stopReason?: string; e
 type Chat = { messages: Msg[]; tree?: unknown; turnInFlight: boolean; compacting?: boolean };
 
 const size = (req: StubRequest) => JSON.stringify(req.messages).length;
+const lastLearnerText = (req: StubRequest) => {
+	const content = req.messages.filter((m) => m.role === "user").at(-1)?.content;
+	return typeof content === "string" ? content : JSON.stringify(content ?? "");
+};
+/** The reply names the learner message it answers, so a test can tell replies apart. */
+const answer = (text: string) => `Answering "${text}". ${FILLER}`;
 const limited = (limitChars: number): StubResponder => (req) => {
 	if (size(req) > limitChars) return reply.contextLength(Math.floor(limitChars / 4));
-	return reply.text(req.system.startsWith(SUMMARIZER) ? SUMMARY : REPLY);
+	return reply.text(req.system.startsWith(SUMMARIZER) ? SUMMARY : answer(lastLearnerText(req)));
 };
 const isTurnRequest = (req: StubRequest) => !req.system.startsWith(SUMMARIZER);
 const recoveryMarkers = (c: Chat) => c.messages.filter((m) => m.customType === "compaction" && m.details?.notice);
@@ -110,10 +116,47 @@ async function newChat(title: string): Promise<string> {
 	return id;
 }
 
-async function openChat(id: string) {
+/** Open the chat and wait until React has hydrated `selector`. */
+async function openChat(id: string, selector: string) {
 	const page = await chrome.browser.newPage();
+	await page.setViewport({ width: 1400, height: 900 });
 	await page.goto(`${server.url}/chat/${id}`, { waitUntil: "domcontentloaded", timeout: 180_000 });
+	await page.waitForFunction(
+		(sel) => {
+			const el = document.querySelector(sel);
+			return !!el && Object.keys(el).some((k) => k.startsWith("__reactProps"));
+		},
+		{ timeout: 120_000 },
+		selector,
+	);
 	return page;
+}
+
+/** Leave the chat as one broken before this release: the learner's
+ *  message, then the provider's length rejection (pi-ai's persisted text
+ *  for reply.contextLength, seen in a live run). */
+function breakChat(id: string): void {
+	const file = path.join(server.dataDir, "chats", `${id}.json`);
+	const record = JSON.parse(fs.readFileSync(file, "utf-8")) as { messages: unknown[] };
+	const limit = Math.floor(LIMIT_CHARS / 4);
+	record.messages.push(
+		{ id: `msg_lh40_user_${id}`, role: "user", content: `Explain it all again in detail. ${"Please. ".repeat(700)}`, timestamp: Date.now() },
+		{
+			id: `msg_lh40_error_${id}`,
+			role: "assistant",
+			content: [],
+			api: "openai-completions",
+			provider: "e2e-stub",
+			model: "stub-a",
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+			stopReason: "error",
+			errorMessage: `400: {"message":"This model's maximum context length is ${limit} tokens. However, your messages resulted in ${limit + 1000} tokens.","type":"invalid_request_error","code":"context_length_exceeded"}`,
+			timestamp: Date.now(),
+		},
+	);
+	fs.writeFileSync(file, JSON.stringify(record));
+	const lastGrowth = stub.requests.at(-1)!;
+	assert.ok(size(lastGrowth) + JSON.stringify(record.messages.slice(-3)).length > LIMIT_CHARS, "the next request would be past the real window");
 }
 
 test("(a, c) an over-window chat recovers on the next learner turn, and the learning state is untouched", async () => {
@@ -130,7 +173,23 @@ test("(a, c) an over-window chat recovers on the next learner turn, and the lear
 	const grown = await chat(id);
 	const start = stub.requests.length;
 
-	await send(id, "Keep going, part 6.");
+	// The learner is in the tab when the chat breaks: part 6 goes through
+	// the composer, and the same page (no reload) must end on the
+	// recovered reply and the notice, with no error banner or bubble.
+	const page = await openChat(id, '[data-testid="composer"] textarea');
+	try {
+		await page.type('[data-testid="composer"] textarea', "Keep going, part 6.");
+		await page.keyboard.press("Enter");
+		await page.waitForFunction(
+			() => document.body.innerText.includes('Answering "Keep going, part 6."') &&
+				[...document.querySelectorAll('[data-testid="compaction-divider"]')].some((el) => el.textContent?.includes("condensed the older part and continued")),
+			{ timeout: 120_000 },
+		);
+		assert.equal(await page.$('[data-testid="chat-error"]'), null, "no stale error banner");
+		assert.ok(!(await page.evaluate(() => document.body.innerText)).includes("context_length_exceeded"), "the kept rejection renders nothing");
+	} finally {
+		await page.close();
+	}
 	const done = await settled(id, "the recovered reply", (c) => recoveryMarkers(c).length > 0 && isReply(c.messages.at(-1)));
 
 	const turnRequests = stub.requests.slice(start).filter(isTurnRequest);
@@ -146,7 +205,7 @@ test("(a, c) an over-window chat recovers on the next learner turn, and the lear
 	const markers = recoveryMarkers(done);
 	assert.equal(markers.length, 1);
 	assert.equal(markers[0]!.details!.notice, "This chat had grown too long for stub-a; I condensed the older part and continued.");
-	assert.match(JSON.stringify(done.messages.at(-1)!.content), /next part of the lesson/);
+	assert.match(JSON.stringify(done.messages.at(-1)!.content), /Answering \\"Keep going, part 6\.\\"/);
 
 	// (c) Nothing was deleted: every earlier message survives, in order;
 	// the plan tree and the graph are byte-identical.
@@ -156,58 +215,15 @@ test("(a, c) an over-window chat recovers on the next learner turn, and the lear
 	assert.deepEqual(done.tree, TREE);
 	assert.equal(hashDir(path.join(server.dataDir, "graph")), graphBefore);
 	assert.equal(await (await server.api("/api/graph")).text(), graphApiBefore);
-
-	// The learner sees the notice in the transcript.
-	const page = await openChat(id);
-	try {
-		await page.waitForFunction(
-			() => [...document.querySelectorAll('[data-testid="compaction-divider"]')].some((el) => el.textContent?.includes("condensed the older part and continued")),
-			{ timeout: 120_000 },
-		);
-	} finally {
-		await page.close();
-	}
 });
 
 test("(b) Repair this chat fixes a chat already in the broken state", async () => {
 	const id = await newChat("Derivatives");
 	await grow(id, 5);
-	// The broken state, as a chat left before this release: the learner's
-	// message, then the provider's length rejection.
-	const file = path.join(server.dataDir, "chats", `${id}.json`);
-	const record = JSON.parse(fs.readFileSync(file, "utf-8")) as { messages: unknown[] };
-	// pi-ai's persisted text for reply.contextLength (seen in a live run).
-	const limit = Math.floor(LIMIT_CHARS / 4);
-	const errorMessage = `400: {"message":"This model's maximum context length is ${limit} tokens. However, your messages resulted in ${limit + 1000} tokens.","type":"invalid_request_error","code":"context_length_exceeded"}`;
-	record.messages.push(
-		{ id: "msg_lh40_user", role: "user", content: `Explain it all again in detail. ${"Please. ".repeat(700)}`, timestamp: Date.now() },
-		{
-			id: "msg_lh40_error",
-			role: "assistant",
-			content: [],
-			api: "openai-completions",
-			provider: "e2e-stub",
-			model: "stub-a",
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-			stopReason: "error",
-			errorMessage,
-			timestamp: Date.now(),
-		},
-	);
-	fs.writeFileSync(file, JSON.stringify(record));
-	const lastGrowth = stub.requests.at(-1)!;
-	assert.ok(size(lastGrowth) + JSON.stringify(record.messages.slice(-3)).length > LIMIT_CHARS, "the next request would be past the real window");
+	breakChat(id);
 
-	const page = await openChat(id);
+	const page = await openChat(id, '[data-testid="repair-chat"]');
 	try {
-		// Click only once React has hydrated the server-rendered banner.
-		await page.waitForFunction(
-			() => {
-				const el = document.querySelector('[data-testid="repair-chat"]');
-				return !!el && Object.keys(el).some((k) => k.startsWith("__reactProps"));
-			},
-			{ timeout: 120_000 },
-		);
 		await page.click('[data-testid="repair-chat"]');
 		await settled(id, "the repair marker", (c) => recoveryMarkers(c).length === 1);
 		await page.waitForFunction(
@@ -227,7 +243,33 @@ test("(b) Repair this chat fixes a chat already in the broken state", async () =
 	assert.ok(size(turnRequests[0]!) <= LIMIT_CHARS);
 	assert.match(JSON.stringify(turnRequests[0]!.messages), /SESSION HISTORY COMPACTED/);
 	assert.equal(recoveryMarkers(done).length, 1);
-	assert.ok(done.messages.some((m) => m.id === "msg_lh40_error"), "the rejected reply is kept, never deleted");
+	assert.ok(done.messages.some((m) => m.id === `msg_lh40_error_${id}`), "the rejected reply is kept, never deleted");
+});
+
+test("(b) the session menu repairs a broken chat and refuses a healthy one", async () => {
+	const id = await newChat("Sequences");
+	await grow(id, 5);
+	breakChat(id);
+	const page = await openChat(id, '[data-testid="session-row"]');
+	try {
+		const rows = await page.$$('[data-testid="session-row"], [data-testid="session-row-kbd"]');
+		let row = null;
+		for (const r of rows) if ((await r.evaluate((el) => el.textContent ?? "")).includes("Sequences")) row = r;
+		assert.ok(row, "the chat's sidebar row");
+		await row.click({ button: "right" });
+		await page.click('[data-testid="ctx-repair"]');
+		const repaired = await settled(id, "the menu repair marker", (c) => recoveryMarkers(c).length === 1);
+		assert.equal(repaired.messages.at(-1)!.customType, "compaction");
+	} finally {
+		await page.close();
+	}
+	// Once repaired (or never broken), repair refuses rather than compact a working chat.
+	for (const target of [id, await newChat("Healthy")]) {
+		const before = (await chat(target)).messages.length;
+		const res = await server.api(`/api/chats/${target}/repair`, { method: "POST" });
+		assert.equal(res.status, 409, await res.text());
+		assert.equal((await chat(target)).messages.length, before);
+	}
 });
 
 test("(d) recovery never loops: when even the smallest request is too big, the learner gets a clear failure", async () => {
