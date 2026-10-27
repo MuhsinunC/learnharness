@@ -71,6 +71,7 @@ function fixture({ packaged = true, updaterMissing = false } = {}) {
 	const app = Object.assign(new EventEmitter(), {
 		isPackaged: packaged,
 		name: "LearnHarness",
+		getVersion: () => "0.3.8",
 		setName() {},
 		getPath: () => userData,
 		setPath: (_: string, value: string) => { userData = value; },
