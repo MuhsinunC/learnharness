@@ -9,7 +9,7 @@ import type { Page } from "puppeteer-core";
 import { imageDimensions, MAX_ATTACHMENT_BYTES } from "../../src/core/attachments.ts";
 import { bootServer, until, type BootOptions, type LhServer } from "./harness/server.ts";
 import { launchChrome, type HeadlessChrome } from "./harness/chrome.ts";
-import { calledTool, reply, startStubProvider, type StubProvider, type StubRequest } from "./harness/stub-provider.ts";
+import { calledTool, reply, startStubProvider, type StubProvider, type StubRequest, type StubResponder } from "./harness/stub-provider.ts";
 
 // LH-39: images attach by paste, drop and path; every one is copied into
 // <data>/attachments; the copies outlive the originals and a restart; the
@@ -89,25 +89,28 @@ const providers: BootOptions["providers"] = [];
 const slot = { model: { provider: "e2e-stub", id: "vision-a" } };
 const settings = { version: 1, models: { strong: slot, cheap: slot, vision: slot }, graph: { enabled: false } };
 
+/** The file's default stub: summaries, view_image and read calls, short replies. */
+const baseResponder: StubResponder = (req) => {
+	// The summarizer: echo the image references it was given, the way a
+	// faithful summary keeps identifiers exact.
+	if (isSummary(req)) {
+		const ids = [...new Set(JSON.stringify(req.messages).match(/[0-9a-f]{64}\.png/g) ?? [])];
+		return reply.text(`## The learner's understanding\nShared images: ${ids.join(", ")}`);
+	}
+	if (lastUserText(req).includes(VIEW_AGAIN) && !calledTool(req, "view_image")) {
+		return reply.tools([{ name: "view_image", arguments: { id: idOf(IMAGES.pasted) } }]);
+	}
+	if (lastUserText(req).includes(READ_ASK) && !calledTool(req, "read")) {
+		return reply.tools([{ name: "read", arguments: { path: readFile } }]);
+	}
+	// The long message's reply reports a context past the 150k default
+	// threshold, so compaction runs at settle (the post-compaction
+	// projection, ~31k, stays under it).
+	return reply.text("I see it.", lastUserText(req).length > 50_000 ? { prompt_tokens: 160_000, completion_tokens: 20 } : undefined);
+};
+
 before(async () => {
-	stub = await startStubProvider((req) => {
-		// The summarizer: echo the image references it was given, the way a
-		// faithful summary keeps identifiers exact.
-		if (isSummary(req)) {
-			const ids = [...new Set(JSON.stringify(req.messages).match(/[0-9a-f]{64}\.png/g) ?? [])];
-			return reply.text(`## The learner's understanding\nShared images: ${ids.join(", ")}`);
-		}
-		if (lastUserText(req).includes(VIEW_AGAIN) && !calledTool(req, "view_image")) {
-			return reply.tools([{ name: "view_image", arguments: { id: idOf(IMAGES.pasted) } }]);
-		}
-		if (lastUserText(req).includes(READ_ASK) && !calledTool(req, "read")) {
-			return reply.tools([{ name: "read", arguments: { path: readFile } }]);
-		}
-		// The long message's reply reports a context past the 150k default
-		// threshold, so compaction runs at settle (the post-compaction
-		// projection, ~31k, stays under it).
-		return reply.text("I see it.", lastUserText(req).length > 50_000 ? { prompt_tokens: 160_000, completion_tokens: 20 } : undefined);
-	});
+	stub = await startStubProvider(baseResponder);
 	providers.push({
 		id: "e2e-stub",
 		baseUrl: stub.baseUrl,
@@ -115,6 +118,8 @@ before(async () => {
 			{ id: "vision-a", input: ["text", "image"] },
 			{ id: "text-only", input: ["text"] },
 			{ id: "plain-text", input: ["text"] },
+			// Its own model, so the limit the recovery case learns stays there.
+			{ id: "vision-r", input: ["text", "image"] },
 		],
 	});
 	server = await bootServer({ ticket: TICKET, providers, settings });
@@ -625,4 +630,46 @@ test("a new session's first message still sends when its path can't be attached"
 	const chat = await settled(id, 1);
 	assert.equal((chat.messages[0] as { content?: unknown }).content, prompt, "the text went, with the path as typed");
 	await page.close();
+});
+
+test("an attached image survives an over-context recovery, and view_image still loads it", async () => {
+	// The stub enforces a real limit far under the catalog window and
+	// states it (LH-40's recovery); its summarizer is down, so the
+	// deterministic fallback marker lands.
+	const limit = 38_000;
+	const filler = "A sketch shows the shape of a curve. ".repeat(130);
+	const again = "Look at my sketch again.";
+	const sketch = png(200, 60, 160);
+	stub.setResponder((req) => {
+		if (JSON.stringify(req.messages).length > limit) return reply.contextLength(Math.floor(limit / 4));
+		if (isSummary(req)) return reply.http(500, { error: { message: "summarizer down" } });
+		if (lastUserText(req).includes(again) && !calledTool(req, "view_image")) {
+			return reply.tools([{ name: "view_image", arguments: { id: idOf(sketch) } }]);
+		}
+		return reply.text(`Noted. ${filler}`);
+	});
+	try {
+		const { id } = await server.json<{ id: string }>("/api/chats", { body: { title: "Sketch" } });
+		await server.json(`/api/chats/${id}/settings`, { method: "PUT", body: { model: { provider: "e2e-stub", id: "vision-r" } } });
+		await sendViaApi(id, "Here is my sketch of the curve.", [await store(id, sketch, "sketch.png")], 1);
+		type ChatView = { messages: Array<{ customType?: string; content?: unknown; details?: { notice?: string } }> };
+		const recovery = (c: ChatView) => c.messages.find((m) => m.customType === "compaction" && m.details?.notice);
+		let turns = 1;
+		let retried: StubRequest;
+		do {
+			turns++;
+			assert.ok(turns <= 14, "the chat outgrew the stub's limit");
+			retried = await sendViaApi(id, `Keep going, part ${turns}.`, [], turns);
+		} while (!recovery(await server.json<ChatView>(`/api/chats/${id}`)));
+		const marker = recovery(await server.json<ChatView>(`/api/chats/${id}`))!;
+		assert.match(String(marker.content), /no model summary could be written/, "the deterministic fallback landed");
+		assert.match(String(marker.content), new RegExp(`Image attached by the learner: ${idOf(sketch)}`), "the dropped image keeps its id");
+		assert.deepEqual(imagesIn(retried), [], "the retried request carries references, not pixels");
+
+		const viewed = await sendViaApi(id, again, [], turns + 1);
+		assert.ok(calledTool(viewed, "view_image"));
+		assert.deepEqual(imagesIn(viewed), [sketch.toString("base64")], "view_image loaded the stored pixels after the recovery");
+	} finally {
+		stub.setResponder(baseResponder);
+	}
 });
