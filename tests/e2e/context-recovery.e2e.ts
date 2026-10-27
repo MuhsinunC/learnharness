@@ -184,11 +184,13 @@ async function openChat(id: string, selector: string) {
 	return page;
 }
 
-/** The sidebar row for a chat title, once the session list has loaded. */
+/** The sidebar row for a chat title, once the session list has loaded
+ *  and React has hydrated it (a right-click before that opens nothing). */
 const sidebarRow = (page: Page, title: string) =>
 	until(async () => {
 		for (const r of await page.$$('[data-testid="session-row"], [data-testid="session-row-kbd"]')) {
-			if ((await r.evaluate((el) => el.textContent ?? "")).includes(title)) return r;
+			const [text, hydrated] = await r.evaluate((el) => [el.textContent ?? "", Object.keys(el).some((k) => k.startsWith("__reactProps"))] as const);
+			if (text.includes(title) && hydrated) return r;
 		}
 		return null;
 	}, `the sidebar row for ${title}`);
