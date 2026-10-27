@@ -207,12 +207,15 @@ export function loginRetryAfter(key: string, now = Date.now()): number {
 	return blockedBy === undefined ? 0 : Math.ceil((blockedBy + WINDOW_MS - now) / 1000);
 }
 
-export function recordLoginFailure(key: string, now = Date.now()): void {
+/** Charges one attempt BEFORE the password is checked, so parallel posts
+ * cannot outrun the limit. Call the returned release for a right password. */
+export function chargeLoginAttempt(key: string, now = Date.now()): () => void {
 	for (const bucket of [key, ALL]) failures.set(bucket, [...recent(bucket, now), now]);
-}
-
-export function clearLoginFailures(key: string): void {
-	failures.delete(key);
+	return () => {
+		failures.delete(key);
+		const all = failures.get(ALL) ?? [], i = all.indexOf(now);
+		if (i >= 0) all.splice(i, 1);
+	};
 }
 
 /** A same-origin path to return to after login; anything else becomes "/". */

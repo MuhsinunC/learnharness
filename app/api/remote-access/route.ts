@@ -6,6 +6,9 @@
  * Only a LOCAL request (proxy.ts's stamp) may change it: a phone that
  * logged in can use the app but never take over or lock out the login.
  * The desktop app has no fixed port to serve, so it reports unavailable.
+ * A raw `next dev` (no LH_LISTEN_HOST from scripts/web-server.mjs) refuses
+ * a new password: there the proxy could no longer trust this computer,
+ * and the password could not be changed again without editing files.
  */
 import { ACCESS_HEADER, MIN_PASSWORD_LENGTH, clearPassword, passwordConfigured, setPassword } from "@/src/server";
 
@@ -24,6 +27,9 @@ export async function GET(req: Request) {
 
 export async function PUT(req: Request) {
 	if (desktop() || req.headers.get(ACCESS_HEADER) !== "local") return localOnly();
+	if (!process.env.LH_LISTEN_HOST) {
+		return Response.json({ error: "Start LearnHarness with npm run dev or npm start to turn on remote access." }, { status: 409 });
+	}
 	const body = (await req.json().catch(() => null)) as { password?: unknown } | null;
 	const password = body?.password;
 	if (typeof password !== "string" || password.length < MIN_PASSWORD_LENGTH || password.length > 1024) {

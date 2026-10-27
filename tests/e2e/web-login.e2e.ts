@@ -149,6 +149,9 @@ test("(b) a password makes remote-style requests log in, while loopback stays lo
 	] as Array<Record<string, string>>) {
 		assert.equal((await raw("/api/settings", { headers })).status, 401, JSON.stringify(headers));
 	}
+	for (const sneaky of ["/_next/../api/settings", "/_next/%2e%2e/api/settings", "/_next/static/../../api/settings", "/_next/static/%2e%2e/%2e%2e/api/settings"]) {
+		assert.notEqual((await raw(sneaky, { headers: viaServe() })).status, 200, `${sneaky} must not slip past the proxy`);
+	}
 	const page = await raw("/chat/new?x=1", { headers: viaServe() });
 	assert.equal(page.status, 303);
 	assert.equal(page.headers.location, "/login?next=%2Fchat%2Fnew%3Fx%3D1", "relative, so the phone stays on its ts.net name");
@@ -169,6 +172,11 @@ test("(c) a wrong password is refused and failed attempts are rate-limited", asy
 	assert.equal(blocked.status, 429, "even the right password waits once the client is locked out");
 	assert(Number(blocked.headers["retry-after"]) > 0);
 	assert.equal((await login("100.70.0.2", PASSWORD, "/", { origin: "https://evil.example" })).status, 403, "cross-site login posts are refused");
+});
+
+test("(c) parallel wrong logins cannot outrun the limit", async () => {
+	const statuses = (await Promise.all(Array.from({ length: 8 }, () => login("100.70.0.9", "wrong password")))).map((r) => r.status).sort();
+	assert.deepEqual(statuses, [401, 401, 401, 401, 401, 429, 429, 429]);
 });
 
 test("(d) a correct login sets the session cookie and opens the app and /api", async () => {
@@ -285,4 +293,22 @@ test("the proxy wrote no secret to the server log", async () => {
 	await until(() => server.log().length > 0, "server output");
 	assert(!server.log().includes(PASSWORD));
 	assert(!/lh_session=[A-Za-z0-9_-]{20,}/.test(server.log()));
+});
+
+test("a raw `next dev` (no LH_LISTEN_HOST) keeps loopback login-free and refuses to set a password", async () => {
+	// Two `next dev` in one checkout collide on its dev lock: stop the main one first.
+	const record = fs.readFileSync(path.join(server.dataDir, "web-login.json"));
+	await server.stop();
+	const rawServer = await bootServer({ ticket: TICKET, providers: [], settings: { version: 1, graph: { enabled: false } } });
+	try {
+		const put = await rawServer.api("/api/remote-access", { method: "PUT", body: { password: PASSWORD } });
+		assert.equal(put.status, 409);
+		assert.match((await put.json()).error, /npm run dev/);
+		assert.equal((await rawServer.api("/api/settings")).status, 200);
+		// A record left by a launcher run: the listener is unknown, so loopback logs in too.
+		fs.writeFileSync(path.join(rawServer.dataDir, "web-login.json"), record, { mode: 0o600 });
+		assert.equal((await rawServer.api("/api/settings")).status, 401);
+	} finally {
+		await rawServer.stop();
+	}
 });

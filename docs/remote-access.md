@@ -108,6 +108,8 @@ always listens on `127.0.0.1` unless told otherwise:
   Avoid it.
 
 If you start Next directly (`npx next dev`), `LH_LISTEN_HOST` is not set, so
-LearnHarness can't tell what it is listening on. Without a password it works
-as before on loopback. Once a password exists, every request, local ones too,
-needs the login.
+LearnHarness can't tell what it is listening on. It works as before on
+loopback, and Settings refuses to set a password: start it with `npm run dev`
+or `npm start` (or set `LH_LISTEN_HOST=127.0.0.1`) to turn remote access on.
+If a password already exists from an earlier run, every request, local ones
+too, needs the login.

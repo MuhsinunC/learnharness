@@ -8,12 +8,11 @@
  */
 import {
 	ACCESS_HEADER,
-	clearLoginFailures,
+	chargeLoginAttempt,
 	clientKey,
 	createSession,
 	loginRetryAfter,
 	passwordConfigured,
-	recordLoginFailure,
 	safeNext,
 	sessionCookie,
 	verifyPassword,
@@ -75,11 +74,9 @@ export async function POST(req: Request): Promise<Response> {
 	const key = clientKey(req.headers);
 	const wait = loginRetryAfter(key);
 	if (wait > 0) return page(429, next, "Too many failed attempts. Try again later.", { "Retry-After": String(wait) });
+	const release = chargeLoginAttempt(key);
 	const password = form?.get("password");
-	if (typeof password !== "string" || !password || !(await verifyPassword(password))) {
-		recordLoginFailure(key);
-		return page(401, next, "Wrong password.");
-	}
-	clearLoginFailures(key);
+	if (typeof password !== "string" || !password || !(await verifyPassword(password))) return page(401, next, "Wrong password.");
+	release();
 	return redirect(next, { "Set-Cookie": sessionCookie(createSession(), req.headers) });
 }
