@@ -175,6 +175,8 @@ describe("prefillFromSlots — the SetupDialog prefill (BYOK wave)", () => {
 		supportedLevels: ["low"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 8192,
+		defaultContextWindow: 8192,
+		maxContextWindow: 8192,
 		maxTokens: 1024,
 	});
 	const catalog = [entry("glm-5.3-flash", "z-ai"), entry("qwen3.8-flash", "qwen")];

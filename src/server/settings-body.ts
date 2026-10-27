@@ -386,6 +386,41 @@ export function parseDictationSettingsBody(body: unknown): SettingsBodyResult<Di
 	return { ok: true, settings: { language: raw.language } };
 }
 
+/** One pair's context-window write (LH-38, PUT /api/settings/context-windows):
+ *  a per-pair MERGE, not a replace-whole section — re-sending every pair
+ *  would re-submit values confirmed above their maximum. `tokens: null`
+ *  clears the pair back to its catalog default; `confirmAboveMax` is the
+ *  modal's "I know what I'm doing" confirmation. */
+export interface ContextWindowWrite {
+	provider: string;
+	id: string;
+	tokens: number | null;
+	confirmAboveMax: boolean;
+}
+
+export function parseContextWindowBody(body: unknown): SettingsBodyResult<ContextWindowWrite> {
+	const raw = asRecord(body);
+	if (!raw) return { ok: false, error: "Invalid JSON body" };
+	if (typeof raw.provider !== "string" || typeof raw.id !== "string") {
+		return { ok: false, error: "provider and id must be strings" };
+	}
+	if (raw.tokens !== null && (typeof raw.tokens !== "number" || !Number.isFinite(raw.tokens) || raw.tokens < 1)) {
+		return { ok: false, error: "tokens must be a positive number, or null for the default" };
+	}
+	if (raw.confirmAboveMax !== undefined && typeof raw.confirmAboveMax !== "boolean") {
+		return { ok: false, error: "confirmAboveMax must be a boolean" };
+	}
+	return {
+		ok: true,
+		settings: {
+			provider: raw.provider,
+			id: raw.id,
+			tokens: raw.tokens === null ? null : Math.floor(raw.tokens),
+			confirmAboveMax: raw.confirmAboveMax === true,
+		},
+	};
+}
+
 /** The section→parser map for PUT /api/settings/[section] (the route also
  *  carries the special prompts sub-resource). */
 export const SETTINGS_SECTIONS = {

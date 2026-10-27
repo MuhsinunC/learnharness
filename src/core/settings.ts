@@ -379,6 +379,9 @@ export interface UserSettings {
 	appearance?: AppearanceSettings;
 	graph?: GraphSettings;
 	compaction?: CompactionSettings;
+	/** Custom context windows per `provider:id` (LH-38, core/context-windows.ts);
+	 *  absent pair = the catalog default. */
+	contextWindows?: Record<string, number>;
 	[key: string]: unknown;
 }
 
@@ -614,6 +617,16 @@ function sanitizeCompaction(raw: Record<string, unknown>): CompactionSettings {
 	return out;
 }
 
+/** Keeps positive integer windows only (fractions floor); a bad entry drops
+ *  and the pair reads its catalog default. */
+function sanitizeContextWindows(raw: Record<string, unknown>): Record<string, number> {
+	const out: Record<string, number> = {};
+	for (const [key, value] of Object.entries(raw)) {
+		if (typeof value === "number" && Number.isFinite(value) && value >= 1) out[key] = Math.floor(value);
+	}
+	return out;
+}
+
 /**
  * Coerce arbitrary JSON (disk file, network body) into a valid delta record:
  * known fields validated strictly (invalid ones drop/clamp per module doc),
@@ -651,6 +664,9 @@ export function sanitizeUserSettings(raw: unknown): UserSettings | null {
 		if (r.compaction !== undefined && r.compaction !== null && typeof r.compaction === "object") {
 			out.compaction = sanitizeCompaction(r.compaction as Record<string, unknown>);
 		}
+	}
+	if (r.contextWindows !== null && typeof r.contextWindows === "object" && !Array.isArray(r.contextWindows)) {
+		out.contextWindows = sanitizeContextWindows(r.contextWindows as Record<string, unknown>);
 	}
 	// Unknown top-level keys ride along untouched (forward-compat). One
 	// known-DEAD key is stripped instead of riding: `chat` (the old

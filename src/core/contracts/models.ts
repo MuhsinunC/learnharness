@@ -22,7 +22,14 @@ export interface ModelCatalogEntry {
 	 * picker lists exactly these; anything else is a lie. */
 	supportedLevels: ThinkingLevel[];
 	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
+	/** The window that runs: the user's custom value for this pair, else
+	 *  the catalog default (LH-38, core/context-windows.ts). */
 	contextWindow: number;
+	/** The catalog's own window (shown as "Default"). */
+	defaultContextWindow: number;
+	/** The known working maximum (shown as "Maximum"); saving above it
+	 *  needs explicit confirmation. */
+	maxContextWindow: number;
 	maxTokens: number;
 }
 

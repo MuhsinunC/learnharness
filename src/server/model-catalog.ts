@@ -49,6 +49,7 @@ import type {
 } from "../core/contracts/models.ts";
 import type { EffectiveModelSpec, EffectiveSlot } from "../core/settings-resolution.ts";
 import { AUTH_PROVIDER_KEYS } from "../core/auth-keys.ts";
+import { contextWindowKey, maxContextWindow } from "../core/context-windows.ts";
 import { BACKGROUND_MODEL_ROLES, MODEL_SLOTS, type BackgroundModelRole, type ModelSlotName, type ModelsSettings } from "../core/settings.ts";
 
 bootClaudeCodeProvider();
@@ -156,8 +157,28 @@ function keyedProviderIds(): Set<string> {
 	return new Set(catalogProviders().filter((p) => p.keyPresent).map((p) => p.id));
 }
 
-/** Project one catalog model to the client DTO. */
-export function toModelDto(model: Model<Api>): ModelDto {
+/** The user's custom context windows (LH-38), read fresh per call like
+ *  every settings consumer. */
+function customContextWindows(): Record<string, number> {
+	return settingsStore.readSettings()?.contextWindows ?? {};
+}
+
+/** The pair's custom context window, or undefined for the catalog
+ *  default — the engine seam (agent/models.ts setContextWindowLookup). */
+export function customContextWindow(provider: string, id: string): number | undefined {
+	return customContextWindows()[contextWindowKey(provider, id)];
+}
+
+/** One pair's Default and Maximum (core/context-windows.ts) — undefined
+ *  when the pair is not in its provider's catalog. */
+export function contextWindowBounds(provider: string, id: string): { defaultWindow: number; maxWindow: number } | undefined {
+	const model = connectionModel(provider, id);
+	return model ? { defaultWindow: model.contextWindow, maxWindow: maxContextWindow(provider, id, model.contextWindow) } : undefined;
+}
+
+/** Project one catalog model to the client DTO. `contextWindow` is the
+ *  window that runs (custom over default). */
+export function toModelDto(model: Model<Api>, custom: Record<string, number> = {}): ModelDto {
 	return {
 		id: model.id,
 		name: model.name,
@@ -171,7 +192,9 @@ export function toModelDto(model: Model<Api>): ModelDto {
 			cacheRead: model.cost.cacheRead,
 			cacheWrite: model.cost.cacheWrite,
 		},
-		contextWindow: model.contextWindow,
+		contextWindow: custom[contextWindowKey(model.provider, model.id)] ?? model.contextWindow,
+		defaultContextWindow: model.contextWindow,
+		maxContextWindow: maxContextWindow(model.provider, model.id, model.contextWindow),
 		maxTokens: model.maxTokens,
 	};
 }
@@ -185,14 +208,17 @@ export function toModelDto(model: Model<Api>): ModelDto {
  *  a model missing here reads limit-null (usage-only, honest render). */
 export function catalogContextLimits(): Map<string, number> {
 	const keyed = keyedProviderIds();
+	const custom = customContextWindows();
 	const index = new Map<string, number>();
+	const add = (model: Model<Api>) => {
+		const key = contextWindowKey(model.provider, model.id);
+		index.set(key, custom[key] ?? model.contextWindow);
+	};
 	for (const provider of piModels().getProviders()) {
 		if (!keyed.has(provider.id)) continue;
-		for (const model of piModels().getModels(provider.id)) {
-			index.set(`${provider.id}:${model.id}`, model.contextWindow);
-		}
+		for (const model of piModels().getModels(provider.id)) add(model);
 	}
-	for (const model of [...chatGPTModels(), ...nativeSubscriptionModels()]) index.set(`${model.provider}:${model.id}`, model.contextWindow);
+	for (const model of [...chatGPTModels(), ...nativeSubscriptionModels()]) add(model);
 	return index;
 }
 
@@ -202,13 +228,14 @@ export function catalogContextLimits(): Map<string, number> {
  *  pins (the settings UI's per-role default captions). */
 export function modelCatalog(): ModelCatalogResponse {
 	const keyed = keyedProviderIds();
+	const custom = customContextWindows();
 	const models = piModels()
 		.getProviders()
 		.filter((p) => keyed.has(p.id))
 		.flatMap((p) => piModels().getModels(p.id))
-		.map(toModelDto)
+		.map((m) => toModelDto(m, custom))
 		.sort((a, b) => (a.provider === b.provider ? a.id.localeCompare(b.id) : a.provider.localeCompare(b.provider)))
-		.concat([...chatGPTModels(), ...nativeSubscriptionModels()].map(toModelDto));
+		.concat([...chatGPTModels(), ...nativeSubscriptionModels()].map((m) => toModelDto(m, custom)));
 	return {
 		models,
 		defaults: catalogDefaults(),
