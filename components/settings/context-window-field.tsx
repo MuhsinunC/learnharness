@@ -102,7 +102,9 @@ export function ContextWindowField({ entry }: { entry: ModelCatalogEntry }) {
 
 /** The above-maximum confirm (the abort-turn dialog's frame). No backdrop
  *  dismiss: leaving takes Cancel or Esc. Esc is claimed in the window's
- *  capture phase so the settings dialog behind it stays open. */
+ *  capture phase so the settings dialog behind it stays open, and
+ *  data-lh-menu marks it a layer of the open menu, so the menus'
+ *  outside-click handlers don't close the field under it. */
 function AboveMaximumDialog({
 	tokens,
 	maximum,
@@ -131,6 +133,7 @@ function AboveMaximumDialog({
 			aria-modal="true"
 			aria-label="Context window above maximum"
 			data-testid="context-window-dialog"
+			data-lh-menu=""
 			className="fixed inset-0 z-[60] flex items-center justify-center bg-background/80 backdrop-blur-sm"
 		>
 			<div className="mx-4 w-full max-w-sm rounded-xl border bg-card p-5 shadow-lg">

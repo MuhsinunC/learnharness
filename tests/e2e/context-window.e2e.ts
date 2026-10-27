@@ -19,12 +19,15 @@ import { reply, startStubProvider, type StubProvider } from "./harness/stub-prov
 const STUB = "openrouter";
 const A = `${STUB}:stub-a`; // Default 100k
 const B = `${STUB}:stub-b`; // Default 128k, maxTokens 64k
+const D = `${STUB}:stub-d`; // Default 64k, never in a slot
 
 let stub: StubProvider;
 let server: LhServer;
 let chrome: HeadlessChrome;
 let page: Page;
 const keptRoots: string[] = [];
+/** The data dir the running server reads; (e) restarts onto the first one. */
+let dataDir: string;
 
 const providers = (baseUrl: string): E2EProvider[] => [
 	{
@@ -34,6 +37,7 @@ const providers = (baseUrl: string): E2EProvider[] => [
 			{ id: "stub-a", contextWindow: 100_000 },
 			{ id: "stub-b", contextWindow: 128_000, maxTokens: 64_000 },
 			{ id: "stub-c", contextWindow: 200_000, input: ["text", "image"] },
+			{ id: "stub-d", contextWindow: 64_000 }, // in no slot: composer-only
 		],
 	},
 ];
@@ -53,6 +57,7 @@ before(async () => {
 			},
 		},
 	});
+	dataDir = server.dataDir;
 	await saveStubKey();
 	chrome = await launchChrome("lh-38");
 	page = await chrome.browser.newPage();
@@ -74,8 +79,12 @@ const rowSel = (pair: string) => `[data-testid="context-window-row-${pair}"]`;
 const inputSel = (pair: string) => `${rowSel(pair)} [data-testid="input-context-window"]`;
 const dialogSel = '[data-testid="context-window-dialog"]';
 
-function diskWindows(dataDir = server.dataDir): Record<string, number> | undefined {
-	return JSON.parse(fs.readFileSync(path.join(dataDir, "settings.json"), "utf-8")).contextWindows;
+function diskSettings(): { contextWindows?: Record<string, number>; models?: Record<string, { model?: { id: string } }> } {
+	return JSON.parse(fs.readFileSync(path.join(dataDir, "settings.json"), "utf-8"));
+}
+
+function diskWindows(): Record<string, number> | undefined {
+	return diskSettings().contextWindows;
 }
 
 async function openAgentSettings(): Promise<void> {
@@ -104,19 +113,29 @@ async function waitInput(pair: string, value: string): Promise<void> {
 }
 
 async function typeWindow(pair: string, value: string, commit: "enter" | "save"): Promise<void> {
-	await page.click(inputSel(pair));
+	await typeIn(rowSel(pair), value, commit);
+}
+
+/** Replace the field's text inside `container`, then commit. */
+async function typeIn(container: string, value: string, commit: "enter" | "save"): Promise<void> {
+	const input = `${container} [data-testid="input-context-window"]`;
+	await page.click(input);
 	await page.keyboard.press("End");
 	for (let i = 0; i < 12; i++) await page.keyboard.press("Backspace");
-	await page.type(inputSel(pair), value);
+	await page.type(input, value);
 	if (commit === "enter") await page.keyboard.press("Enter");
-	else await page.click(`${rowSel(pair)} [data-testid="save-context-window"]`);
+	else await page.click(`${container} [data-testid="save-context-window"]`);
+}
+
+async function footerReads(denominator: string): Promise<void> {
+	await until(async () => (await page.$eval('[data-testid="stats-context"]', (el) => el.textContent ?? "").catch(() => "")).trim().endsWith(`/ ${denominator}`), `footer to read / ${denominator}`, 120_000);
 }
 
 async function pickStrong(id: string): Promise<void> {
 	await page.click('[data-testid="slot-model-strong"]');
 	await page.waitForSelector(`[data-testid="model-option-${id}"]`);
 	await page.click(`[data-testid="model-option-${id}"]`);
-	await until(async () => JSON.parse(fs.readFileSync(path.join(server.dataDir, "settings.json"), "utf-8")).models?.strong?.model?.id === id, `strong slot = ${id}`);
+	await until(() => diskSettings().models?.strong?.model?.id === id, `strong slot = ${id}`);
 }
 
 /** Run one learner turn and return the max-tokens budget stub-b received. */
@@ -211,7 +230,6 @@ test("(d) each pair keeps its own value across model switches", async () => {
 
 test("(e) the values survive a server restart", async () => {
 	// Same data dir and auth file: the new process reads what the old one wrote.
-	const dataDir = server.dataDir;
 	const root = path.dirname(dataDir);
 	keptRoots.push(root);
 	process.env.LH_E2E_KEEP = "1";
@@ -235,7 +253,7 @@ test("(e) the values survive a server restart", async () => {
 test("(f) the runtime uses the pair's value: footer denominator and engine budget", async () => {
 	const { id } = await server.json<{ id: string }>("/api/chats", { body: { title: "Context window" } });
 	await page.goto(`${server.url}/chat/${id}`, { waitUntil: "domcontentloaded", timeout: 180_000 });
-	await until(async () => /\/ 60k$/.test((await page.$eval('[data-testid="stats-context"]', (el) => el.textContent ?? "").catch(() => "")).trim()), "footer to read / 60k", 120_000);
+	await footerReads("60k");
 
 	// pi-ai clamps max tokens to contextWindow − context − 4096: with B's
 	// 60k window the request asks for less than B's own 64k maxTokens;
@@ -246,5 +264,40 @@ test("(f) the runtime uses the pair's value: footer denominator and engine budge
 	assert.equal(diskWindows()?.[B], undefined);
 	assert.equal(await turnBudget(id), 64_000);
 	await page.reload({ waitUntil: "domcontentloaded" });
-	await until(async () => /\/ 128k$/.test((await page.$eval('[data-testid="stats-context"]', (el) => el.textContent ?? "").catch(() => "")).trim()), "footer to read / 128k", 120_000);
+	await footerReads("128k");
+});
+
+test("(g) the composer's model picker edits a model that is in no slot", async () => {
+	const { id } = await server.json<{ id: string }>("/api/chats", { body: { title: "Composer pick" } });
+	await page.goto(`${server.url}/chat/${id}`, { waitUntil: "domcontentloaded", timeout: 180_000 });
+	const openMenu = () =>
+		until(async () => {
+			await page.click('[data-testid="stats-model"]');
+			return page.waitForSelector('[data-testid="model-menu"]', { timeout: 2000 });
+		}, "the composer model menu to open", 180_000, 500);
+	await openMenu();
+	await page.waitForSelector('[data-testid="model-option-stub-d"]', { timeout: 60_000 });
+	await page.click('[data-testid="model-option-stub-d"]');
+	await until(async () => (await server.json<{ settings?: { model?: { id: string } } }>(`/api/chats/${id}`)).settings?.model?.id === "stub-d", "the session to run stub-d");
+	await footerReads("64k");
+
+	const field = '[data-testid="composer-context-window"]';
+	await openMenu();
+	await page.waitForSelector(field);
+	assert.match(await page.$eval(field, (el) => el.textContent ?? ""), /Default: 64k · Maximum: 64k/);
+	await typeIn(field, "30000", "enter");
+	await until(() => diskWindows()?.[D] === 30_000, "D = 30000 on disk");
+	await footerReads("30k");
+
+	// The same modal and guard as Settings; clicking inside the modal must
+	// not close the menu (and the field) underneath it.
+	await typeIn(field, "250000", "save");
+	await page.waitForSelector(dialogSel);
+	assert.equal(await page.$eval('[data-testid="context-window-confirm"]', (el) => (el as HTMLButtonElement).disabled), true);
+	await page.click('[data-testid="context-window-understood"]');
+	assert.ok(await page.$('[data-testid="model-menu"]'), "the menu stays open under the modal");
+	await page.click('[data-testid="context-window-confirm"]');
+	await until(() => diskWindows()?.[D] === 250_000, "D = 250000 on disk");
+	await footerReads("250k");
+	assert.ok(!JSON.stringify(diskSettings().models).includes("stub-d"), "stub-d is in no slot");
 });

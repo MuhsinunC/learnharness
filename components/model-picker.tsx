@@ -3,8 +3,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ChatSettings, ModelCatalogEntry, ModelCatalogResponse, ModelsSettings, UserSettings } from "@/src/core";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { prettyModel } from "@/components/usage-format";
+import { formatTokens, prettyModel } from "@/components/usage-format";
 import { ModelMenuList, ThinkingMenuList } from "@/components/settings/model-menu";
+import { ContextWindowField } from "@/components/settings/context-window-field";
 import { composeSlotModel } from "@/components/settings/agent-section";
 import { MenuShell } from "@/components/menu-shell";
 import { Hint } from "@/components/ui/hint";
@@ -354,6 +355,17 @@ export function ModelControl({ chatId, onModelChange }: { chatId?: string; onMod
 									: "Strong tier — the default for new sessions"
 						}
 					/>
+					{/* The active model's context window (LH-38): every pair is
+					    editable where it is chosen, slot or not. */}
+					{entry && (
+						<div data-testid="composer-context-window" className="mt-1.5 flex items-center justify-between gap-2 border-t px-2 pt-1.5">
+							<span className="min-w-0 text-muted-foreground">
+								<span className="block text-card-foreground">Context window</span>
+								<span className="block">Default: {formatTokens(entry.defaultContextWindow)} · Maximum: {formatTokens(entry.maxContextWindow)}</span>
+							</span>
+							<ContextWindowField key={`${entry.provider}:${entry.id}:${entry.contextWindow}`} entry={entry} />
+						</div>
+					)}
 				</MenuShell>
 			)}
 
