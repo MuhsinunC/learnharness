@@ -23,7 +23,7 @@ import { AnsweredCard } from "@/components/answered-card";
 import { artifactRenderers } from "@/components/artifacts";
 import { SubagentSteerCard } from "@/components/artifacts/steer-card";
 import { Composer } from "@/components/composer";
-import { AttachmentChips, AttachmentImage, useAttachments } from "@/components/attachments";
+import { AttachmentChips, AttachmentImage, AttachmentNotice, useAttachments } from "@/components/attachments";
 import { useEnterSubmits } from "@/components/enter-submits";
 import { blurAfterPointerClick } from "@/components/focus-hygiene";
 import { dockStateKey } from "@/components/dock-state-key";
@@ -212,6 +212,7 @@ export function Chat({
 	initialMessages,
 	initialError,
 	initialPrompt,
+	initialAttachments = [],
 	initiallyInFlight,
 	initiallyCompacting = false,
 	initialConfigured = false,
@@ -227,6 +228,9 @@ export function Chat({
 	 *  tag rides the header instead. */
 	kind?: "teach" | "practice";
 	initialPrompt?: string;
+	/** Images attached on the new-session page (LH-39), already stored;
+	 *  they ride the first send with initialPrompt. */
+	initialAttachments?: AttachmentRef[];
 	/** A teacher turn is running server-side but attached to no client
 	 * (navigated away mid-turn, returned while in flight). */
 	initiallyInFlight?: boolean;
@@ -273,9 +277,12 @@ export function Chat({
 	useEffect(() => {
 		if (!sentInitial.current && initialPromptOwed(initialMessages, initialPrompt)) {
 			sentInitial.current = true;
-			void takePaths(initialPrompt!).then(({ text, refs }) => send({ type: "text", text, ...(refs.length ? { attachments: refs } : {}) }));
+			void takePaths(initialPrompt!).then(({ text, refs }) => {
+				const attachments = [...initialAttachments, ...refs];
+				void send({ type: "text", text, ...(attachments.length ? { attachments } : {}) });
+			});
 		}
-	}, [initialPrompt, initialMessages, send, takePaths]);
+	}, [initialPrompt, initialAttachments, initialMessages, send, takePaths]);
 
 	// A turn running server-side, attached to no live view of ours (navigate
 	// away mid-turn, or a wake turn discovered mid-session): the reattach
@@ -597,7 +604,7 @@ export function Chat({
 	 *  learner to re-send (Save never auto-sends, owner 2026-10-09).
 	 *  Auto-continuations (probe answers) never set it — their refusal
 	 *  opens the dialog with no replay. */
-	const draftRef = useRef<string | null>(null);
+	const draftRef = useRef<{ text: string; refs: AttachmentRef[] } | null>(null);
 
 	// THE BYOK REFUSAL (owner, 2026-09-22): a send that lands the server's
 	// 503 models_not_configured envelope renders as the SETUP FLOW, never
@@ -624,7 +631,8 @@ export function Chat({
 			}
 			if (cancelled) return;
 			if (draftRef.current !== null) {
-				applyText(draftRef.current);
+				applyText(draftRef.current.text);
+				attach.restore(draftRef.current.refs);
 				draftRef.current = null;
 			}
 			recoverFromError();
@@ -1178,7 +1186,7 @@ export function Chat({
 		if (busy || pending || compacting) return;
 		const { text: t, refs } = await attach.takePaths(textRef.current.trim());
 		if (!t && refs.length === 0) return;
-		draftRef.current = t; // the refusal flow's preserve-and-replay seam
+		draftRef.current = { text: t, refs }; // the refusal flow's preserve-and-replay seam
 		applyText("");
 		attach.clear();
 		void send({ type: "text", text: t, ...(refs.length ? { attachments: refs } : {}) });
@@ -1713,11 +1721,7 @@ export function Chat({
 					attachments={
 						<>
 							<AttachmentChips items={attach.items} onRemove={attach.remove} />
-							{attach.notice && (
-								<div data-testid="attachment-notice" className="px-3 pt-2 font-ui text-xs text-muted-foreground">
-									{attach.notice}
-								</div>
-							)}
+							<AttachmentNotice notice={attach.notice} />
 						</>
 					}
 					onSubmitAnswer={(output) => {

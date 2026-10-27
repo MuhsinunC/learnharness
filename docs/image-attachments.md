@@ -25,15 +25,17 @@ A learner can attach an image to a chat message in three ways: paste it (a scree
 
 - **The store.** `src/store/attachments.ts` keeps every image at `<LH_DATA_DIR>/attachments/<sha256>.<ext>`.
   - The format is sniffed from the magic bytes, never the filename: png, jpg, gif or webp.
-  - Each image is capped at 7 MB, which stays under Claude's 10 MB base64 limit. Nothing resizes yet.
+  - Each image is capped at 7 MB, which stays under Claude's 10 MB base64 limit.
   - Identical bytes get the same id, so attachments deduplicate.
   - Writes go to a temp file and are then renamed, so a crash never leaves a half-written image under a valid id.
   - Nothing deletes from the store. Deleting the original file, clearing the clipboard or restarting the app never breaks a chat.
-- **Intake.** `POST /api/attachments` takes either multipart bytes (paste or drop) or `{path}`.
-  - For a path, the server copies the file. The server runs on the learner's machine, so it can read the path directly.
+- **Intake.** Every image takes one road: the composer fits it, then uploads it to `POST /api/attachments`.
+  - **Fitting** (`fitImage`, canvas): an image whose longest edge is over 2000 px, or whose size is over 7 MB, is downscaled to a 2000 px longest edge. It is re-encoded as PNG, or as JPEG at quality 0.9 then 0.75 on a white ground if the PNG is still over the cap. An image already within both limits uploads byte-for-byte. Only what still doesn't fit is refused, by the server. Full-screen Retina screenshots (5-15 MB) attach this way.
+  - For a path, `POST /api/attachments/file` reads the file and returns its bytes, images only, sniffed. The server runs on the learner's machine, so it can read the path directly. The composer then fits and uploads the image like a paste.
   - Accepted path forms: `~`, `file://`, quoted paths, and the `\ ` escapes a terminal drag produces.
   - The composer finds image paths in the message text at send time (`findImagePaths`). Each path that attaches is removed from the text, because the stored copy replaces it. A path that fails stays in the text as typed.
-  - Every intake names its chat. The server refuses it before storing anything when that chat's model can't read images.
+  - Every intake names its chat. The server refuses it before storing anything when that chat's model can't read images. The new-session page has no chat yet, so it gates on the strong slot the new chat is stamped from. Its images ride to the session's first send as `?images=<id>,…`.
+  - When a send is refused and its text goes back into the composer, its image chips go back too.
 - **The record keeps references only.** A user message carries `attachments: [{id, mimeType, name}]` next to its text, and attachments put no pixels into the chat JSON. (The older `read` tool still stores the base64 of any image file it reads; see below.)
   - `toLlmMessages`, the one model-facing seam, turns each reference into text: `[Image attached by the learner: <id> …]`.
   - It adds the pixels only for messages that come after the active compaction marker, and only when the live agent passes its store loader. The token estimate and the summarizer get references only.
@@ -75,7 +77,6 @@ The fork's Claude Code sign-in (LH-21 and later) is not on v0.3.8, so on this ba
 
 ## Known limits
 
-- **No resize.** An image over 7 MB is refused, not downscaled.
-- **Draft restore drops images.** The refusal flow puts the message text back in the composer, but not its images.
-- **The new-session page has no paste or drop.** Its composer sends text only. Image paths in that first message are still copied into the store when the chat opens.
+- **Fitting needs the browser.** An image the browser can't decode (for example a HEIC file) uploads as is, and the server refuses it unless it is a png, jpeg, gif or webp within 7 MB.
+- **The first message needs text.** On the new-session page, the first message must have text; images ride along with it.
 - **An image-only steer shows an empty line** in the queued-steer indicator until its card lands.
