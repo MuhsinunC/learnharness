@@ -65,8 +65,13 @@ export function expandLearnerPath(raw: string): string {
 	return path.resolve(os.homedir(), p);
 }
 
-/** Copy the image at a learner-given path into the store. */
-export function saveAttachmentFromPath(raw: string): AttachmentRef {
+/** Files larger than this are not read for an attach at all: the
+ *  composer downscales what it gets, but a 64 MB screenshot is no image. */
+const MAX_PATH_READ_BYTES = 64 * 1024 * 1024;
+
+/** Read the image at a learner-given path (for the composer to fit and
+ *  upload — nothing is stored here). Image formats only, by magic bytes. */
+export function readImageFile(raw: string): { bytes: Buffer; name: string; mimeType: string } {
 	const file = expandLearnerPath(raw);
 	let stat: fs.Stats;
 	try {
@@ -75,10 +80,11 @@ export function saveAttachmentFromPath(raw: string): AttachmentRef {
 		throw new AttachmentError(`no file at ${file}`);
 	}
 	if (!stat.isFile()) throw new AttachmentError(`${file} is not a file`);
-	if (stat.size > MAX_ATTACHMENT_BYTES) {
-		throw new AttachmentError(`the image is larger than ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB`);
-	}
-	return saveAttachment(fs.readFileSync(file), path.basename(file));
+	if (stat.size > MAX_PATH_READ_BYTES) throw new AttachmentError(`${file} is too large to attach`);
+	const bytes = fs.readFileSync(file);
+	const ext = sniffImageExt(bytes);
+	if (!ext) throw new AttachmentError(`only ${Object.keys(ATTACHMENT_MIME).join(", ")} images can be attached`);
+	return { bytes, name: path.basename(file), mimeType: ATTACHMENT_MIME[ext]! };
 }
 
 export function attachmentExists(id: string): boolean {

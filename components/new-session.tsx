@@ -12,9 +12,10 @@ import { ClaudeCodeOffNotice, preSendRemedy, useModelSetup, selectedModelUnavail
 import { StatsBar } from "@/components/stats-bar";
 import { ChainTableOverlay } from "@/components/chain-table.tsx";
 import { ComposerActions, NodePickerControl } from "@/components/composer-actions";
+import { AttachmentChips, AttachmentNotice, useAttachments } from "@/components/attachments";
 import { OPENING_PROMPT_FAILURE } from "@/components/opening-prompt";
 import { SessionStarter } from "@/components/start-session";
-import type { ChatSettings, GraphSnapshot } from "@/src/core";
+import type { AttachmentRef, ChatSettings, GraphSnapshot } from "@/src/core";
 
 /** The draft's pick set (owner round 10): the SAME shape the home pick
  *  bar lifts — resolved nodes as the learner SAW them at pick time. */
@@ -47,6 +48,7 @@ export async function startDraftSession(
 	picks?: readonly DraftPick[],
 	starter = new SessionStarter(),
 	settingsIdentity?: string,
+	images: readonly AttachmentRef[] = [],
 ): Promise<string | null> {
 	const t = text.trim();
 	if (!t) return null;
@@ -54,13 +56,16 @@ export async function startDraftSession(
 	// from the pick bar creates its session WITH the graph context — the
 	// same contract as the home screen's practice send (the marker with
 	// [id] name: statement lines, target validation's truth set).
-	return starter.start(
+	const target = await starter.start(
 		mode === "practice"
 			? { title: t, kind: "practice", ...(picks && picks.length > 0 ? { graphContext: { propositions: picks } } : {}) }
 			: { title: t },
 		fetchLike,
 		settingsIdentity,
 	);
+	// Attached images (LH-39) are already in the store; their ids ride to
+	// the session's first send.
+	return images.length ? `${target}?images=${images.map((r) => r.id).join(",")}` : target;
 }
 
 /** The pure shell (no router) — the render-test seam: the draft view's
@@ -80,6 +85,8 @@ export function DraftShell({
 	onOpenPicker,
 	onClearPicks,
 	overlay,
+	attachments,
+	onFiles,
 }: {
 	busy: boolean;
 	text: string;
@@ -107,6 +114,10 @@ export function DraftShell({
 	 *  the graph view (the overlay fills its column, never the sidebar).
 	 *  Passed as a node so the pick state stays in NewSession. */
 	overlay?: ReactNode;
+	/** The pending image chips + notice (LH-39), above the text row. */
+	attachments?: ReactNode;
+	/** Pasted or dropped image files (LH-39). */
+	onFiles?: (files: File[]) => void;
 }) {
 	// Voice dictation (STT wave, 2026-09-17): finals append at the end of the
 	// draft text (via the parent's onChange — the truth lives there); the
@@ -190,6 +201,7 @@ export function DraftShell({
 								/>
 								{startError && <p role="alert" className="pointer-events-auto mb-2 text-sm text-destructive">{OPENING_PROMPT_FAILURE}</p>}
 								<div className="pointer-events-auto overflow-hidden rounded-2xl border bg-card shadow-lg">
+									{attachments}
 									<Composer
 										busy={busy}
 										value={text}
@@ -205,6 +217,7 @@ export function DraftShell({
 										// started yet, so the composer must not read like one is in
 										// flight.
 										placeholder={mode === "practice" ? "What do you want to practice?" : "What do you want to learn?"}
+										onFiles={onFiles}
 									/>
 								</div>
 								<StatsBar
@@ -281,6 +294,9 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 	const remedy = preSendRemedy(zeroKeys, catalog);
 	const [noticeShown, setNoticeShown] = useState(false);
 	const [setupOpen, setSetupOpen] = useState(false);
+	// No session yet: intake gates on the strong slot the new chat is
+	// stamped from.
+	const attach = useAttachments();
 
 	const send = useCallback(() => {
 		const draft = textRef.current.trim();
@@ -313,7 +329,7 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 		setBusy(true);
 		setStartError(false);
 		void startDraftSession(draft, fetch, mode === "practice" ? "practice" : undefined, mode === "practice" ? picksRef.current : undefined,
-			starterRef.current, JSON.stringify(catalog?.slots.strong))
+			starterRef.current, JSON.stringify(catalog?.slots.strong), attach.items)
 			.then((target) => {
 				if (target) router.push(target);
 				else { startingRef.current = false; setBusy(false); }
@@ -323,7 +339,7 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 				setBusy(false);
 				setStartError(true);
 			});
-	}, [router, configured, remedy, zeroKeys, catalog, mode]);
+	}, [router, configured, remedy, zeroKeys, catalog, mode, attach.items]);
 
 	return (
 		<>
@@ -337,6 +353,13 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 				picks={picks}
 				onOpenPicker={openPicker}
 				onClearPicks={() => applyPicks([])}
+				attachments={
+					<>
+						<AttachmentChips items={attach.items} onRemove={attach.remove} />
+						<AttachmentNotice notice={attach.notice} />
+					</>
+				}
+				onFiles={(files) => void attach.addFiles(files)}
 				overlay={
 					// THE PICKER (owner round 10b): hosted INSIDE the content
 					// column — absolute inset-0 resolves to the column's relative

@@ -23,7 +23,7 @@ import { AnsweredCard } from "@/components/answered-card";
 import { artifactRenderers } from "@/components/artifacts";
 import { SubagentSteerCard } from "@/components/artifacts/steer-card";
 import { Composer } from "@/components/composer";
-import { AttachmentChips, AttachmentImage, useAttachments } from "@/components/attachments";
+import { AttachmentChips, AttachmentImage, AttachmentNotice, useAttachments } from "@/components/attachments";
 import { useEnterSubmits } from "@/components/enter-submits";
 import { blurAfterPointerClick } from "@/components/focus-hygiene";
 import { dockStateKey } from "@/components/dock-state-key";
@@ -181,9 +181,9 @@ export function refusalBannerText(message: string): string {
  * from an earlier, already-durable text send over today's unsent composer.
  * Retire that fallback synchronously, never when the async Retry settles:
  * a later ordinary send may own a new recovery draft by then. */
-export function retryFailedResponse(
+export function retryFailedResponse<T>(
 	send: (input: ChatInput) => void,
-	submittedDraft: { current: string | null },
+	submittedDraft: { current: T | null },
 ): void {
 	submittedDraft.current = null;
 	void send({ type: "retry" });
@@ -227,6 +227,7 @@ export function Chat({
 	initialMessages,
 	initialError,
 	initialPrompt,
+	initialAttachments = [],
 	initiallyInFlight,
 	initiallyCompacting = false,
 	initialConfigured = false,
@@ -242,6 +243,9 @@ export function Chat({
 	 *  tag rides the header instead. */
 	kind?: "teach" | "practice";
 	initialPrompt?: string;
+	/** Images attached on the new-session page (LH-39), already stored;
+	 *  they ride the first send with initialPrompt. */
+	initialAttachments?: AttachmentRef[];
 	/** A teacher turn is running server-side but attached to no client
 	 * (navigated away mid-turn, returned while in flight). */
 	initiallyInFlight?: boolean;
@@ -588,7 +592,7 @@ export function Chat({
 	 *  learner to re-send (Save never auto-sends, owner 2026-10-09).
 	 *  Auto-continuations (probe answers) never set it — their refusal
 	 *  opens recovery with no replay. */
-	const draftRef = useRef<string | null>(null);
+	const draftRef = useRef<{ text: string; refs: AttachmentRef[] } | null>(null);
 	const openingDraftRef = useRef<string | null>(null);
 	const [openingError, setOpeningError] = useState(false);
 	const openingMountedRef = useRef(false);
@@ -607,19 +611,23 @@ export function Chat({
 			return;
 		}
 		setOpeningError(false);
-		draftRef.current = prompt; // The existing 503 flow must restore it too.
+		draftRef.current = { text: prompt, refs: initialAttachments }; // The existing 503 flow must restore it too.
 		applyText("");
-		// Image paths in the opening message attach like a composer send's (LH-39).
-		void takePaths(prompt).then(({ text, refs }) => send({ type: "text", text, ...(refs.length ? { attachments: refs } : {}) }, () => {
-			clearOpeningPrompt(chatId);
-			openingDraftRef.current = null;
-			if (draftRef.current === prompt) draftRef.current = null;
-		})).then(accepted => {
+		// Images from the new-session page and image paths in the opening
+		// message attach like a composer send's (LH-39).
+		void takePaths(prompt).then(({ text, refs }) => {
+			const attachments = [...initialAttachments, ...refs];
+			return send({ type: "text", text, ...(attachments.length ? { attachments } : {}) }, () => {
+				clearOpeningPrompt(chatId);
+				openingDraftRef.current = null;
+				if (draftRef.current?.text === prompt) draftRef.current = null;
+			});
+		}).then(accepted => {
 			if (!accepted && openingMountedRef.current && openingDraftRef.current === prompt && !textRef.current) {
 				applyText(prompt);
 			}
 		});
-	}, [chatId, send, applyText, takePaths]);
+	}, [chatId, send, applyText, takePaths, initialAttachments]);
 
 	const sentInitial = useRef(false);
 	useEffect(() => {
@@ -646,7 +654,7 @@ export function Chat({
 		// only the unchanged recovered draft, never the learner's newer work.
 		const opening = openingDraftRef.current;
 		if (opening !== null && textRef.current === opening) applyText("");
-		if (draftRef.current === opening) draftRef.current = null;
+		if (draftRef.current?.text === opening) draftRef.current = null;
 		openingDraftRef.current = null;
 		setOpeningError(false);
 	}, [chatId, hasConfirmedConversation, applyText]);
@@ -683,7 +691,8 @@ export function Chat({
 			}
 			if (cancelled) return;
 			if (draftRef.current !== null) {
-				applyText(draftRef.current);
+				applyText(draftRef.current.text);
+				attach.restore(draftRef.current.refs);
 				draftRef.current = null;
 			}
 			recoverFromError();
@@ -1259,7 +1268,7 @@ export function Chat({
 			deliverOpeningPrompt(t);
 			return;
 		}
-		draftRef.current = t; // the refusal flow's preserve-and-replay seam
+		draftRef.current = { text: t, refs }; // the refusal flow's preserve-and-replay seam
 		applyText("");
 		attach.clear();
 		void send({ type: "text", text: t, ...(refs.length ? { attachments: refs } : {}) });
@@ -1802,11 +1811,7 @@ export function Chat({
 					attachments={
 						<>
 							<AttachmentChips items={attach.items} onRemove={attach.remove} />
-							{attach.notice && (
-								<div data-testid="attachment-notice" className="px-3 pt-2 font-ui text-xs text-muted-foreground">
-									{attach.notice}
-								</div>
-							)}
+							<AttachmentNotice notice={attach.notice} />
 						</>
 					}
 					onSubmitAnswer={(output) => {

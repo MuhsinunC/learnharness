@@ -13,7 +13,7 @@ import { piEngineForSpec, type PiEngine } from "../agent/models.ts";
 import { attachmentExists } from "../store/attachments.ts";
 import { effectiveSettings, stores } from "./stores.ts";
 
-export { AttachmentError, saveAttachment, saveAttachmentFromPath, readAttachment } from "../store/attachments.ts";
+export { AttachmentError, saveAttachment, readAttachment, readImageFile } from "../store/attachments.ts";
 
 /** The engine with its Model's `input` matching the effective setting —
  *  pi-ai drops image blocks for a model whose input lacks "image", so an
@@ -42,10 +42,12 @@ export function imageInputRefusal(model: Model<Api>, attachments: readonly Attac
 
 /** The same gate for a chat by id, where no engine exists yet: an intake
  *  (no attachments argument — may this chat take images at all?) or a
- *  steer carrying attachments. */
-export function chatImageRefusal(chatId: string, attachments?: readonly AttachmentRef[]): Response | null {
+ *  steer carrying attachments. No chat id = the new-session draft, which
+ *  the server will stamp from the strong slot. */
+export function chatImageRefusal(chatId: string | undefined, attachments?: readonly AttachmentRef[]): Response | null {
 	if (attachments?.length === 0) return null;
-	const spec = resolveConversationSpec(stores.chatStore.getChat(chatId)?.settings, effectiveSettings().models.strong);
+	const settings = chatId ? stores.chatStore.getChat(chatId)?.settings : undefined;
+	const spec = resolveConversationSpec(settings, effectiveSettings().models.strong);
 	let model: Model<Api> | undefined;
 	try { model = spec ? piEngineForSpec(spec).model : undefined; }
 	catch { model = undefined; }
