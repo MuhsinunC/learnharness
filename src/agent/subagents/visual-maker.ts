@@ -6,6 +6,7 @@ import { piEngineFor, type PiEngine, type ThinkingLevel } from "../models.ts";
 import { providerEventObserver, type ProviderEventObserver } from "../provider-events.ts";
 import type { VisualResult } from "../../core/contracts.ts";
 import { getHeadless, type HeadlessApi } from "./headless.ts";
+import { isProviderAuthError, modelCallError } from "./auth-fallback.ts";
 
 /**
  * The visual-maker sub-agent (vision §2.5): authors ONE precise SVG from a
@@ -290,6 +291,7 @@ export async function runVisualMaker(input: VisualMakerInput, opts: VisualMakerO
 			}
 		}
 	} catch (err) {
+		if (isProviderAuthError(err)) throw err; // the job runner's auth fallback decides
 		const msg = err instanceof Error ? err.message : String(err);
 		return { svg: "", notes: `FAILED: the maker crashed — ${msg}` };
 	}
@@ -342,7 +344,7 @@ async function streamOnce(
 				err.name = "AbortError";
 				throw err;
 			}
-			throw new Error(event.error.errorMessage ?? "the model call failed");
+			throw modelCallError(event.error.errorMessage ?? "the model call failed");
 		}
 	}
 	throw new Error("the model stream ended without a result");

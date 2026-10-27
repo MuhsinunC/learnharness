@@ -6,6 +6,7 @@ import type { PiEngine } from "../models.ts";
 import { runSubagent } from "./pi-run.ts";
 import type { DemoResult } from "../../core/contracts.ts";
 import { getHeadless, type DemoRunResult, type HeadlessApi } from "./headless.ts";
+import { isProviderAuthError } from "./auth-fallback.ts";
 import { healToolRecord } from "../tools/heal.ts";
 
 /**
@@ -217,6 +218,7 @@ export async function runDemoBuilder(input: DemoBuilderInput, opts: DemoBuilderO
 		});
 		finalText = result.text;
 	} catch (err) {
+		if (isProviderAuthError(err)) throw err; // the job runner's auth fallback decides
 		const msg = err instanceof Error ? err.message : String(err);
 		return { title, html: "", tested: true, notes: `FAILED: the builder crashed — ${msg}` };
 	}
@@ -237,6 +239,10 @@ export async function runDemoBuilder(input: DemoBuilderInput, opts: DemoBuilderO
 		opts.onActivity?.("final verification");
 		let verify: DemoRunResult;
 		try {
+			// e2e seam (LH-37): stall this step, which ignores the abort
+			// signal, to prove the job limits are terminal.
+			const stallMs = process.env.LH_E2E === "1" ? Number(process.env.LH_E2E_DEMO_VERIFY_STALL_MS) : 0;
+			if (stallMs > 0) await new Promise((resolve) => setTimeout(resolve, stallMs));
 			verify = await headless.runDemo(state.html);
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
