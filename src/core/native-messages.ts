@@ -669,15 +669,35 @@ export function danglingQuestionOf(
 	return null;
 }
 
-/** The probe→teach construction seam (chat-handler): a probe_done call in
- *  the transcript — any state — means the probe is concluded: teach. */
-export function hasProbeDone(messages: readonly LhMessage[]): boolean {
+/** Successful probe_done result MESSAGE ids, in transcript order. A call
+ *  from a failed/aborted generation grants no completion authority. Its
+ *  later result must match both call id and tool name, must not be an
+ *  error, and must not explicitly refuse with details.ok:false. Older
+ *  clean acknowledgments without ok:true still count. No history changes. */
+export function probeDoneResultIds(messages: readonly LhMessage[]): Set<string> {
+	const calls = new Set<string>();
+	const results = new Set<string>();
 	for (const m of messages) {
-		if ((m as { role?: string }).role !== "assistant") continue;
-		const assistant = m as AssistantMessage;
-		if (assistant.content.some((b) => b.type === "toolCall" && b.name === "probe_done")) return true;
+		if (m.role === "assistant") {
+			if (m.stopReason === "error" || m.stopReason === "aborted") continue;
+			for (const block of m.content) {
+				if (block.type === "toolCall" && block.name === "probe_done") calls.add(block.id);
+			}
+		} else if (
+			m.role === "toolResult" && m.toolName === "probe_done" &&
+			calls.has(m.toolCallId) && !m.isError &&
+			(m.details as { ok?: unknown } | null | undefined)?.ok !== false
+		) {
+			results.add(m.id);
+		}
 	}
-	return false;
+	return results;
+}
+
+/** The probe→teach construction seam (chat-handler and the tool guard):
+ *  only a concluded call plus a matching successful result means teach. */
+export function hasProbeDone(messages: readonly LhMessage[]): boolean {
+	return probeDoneResultIds(messages).size > 0;
 }
 
 /** Every toolResult id in the record — answer-event validation (the call

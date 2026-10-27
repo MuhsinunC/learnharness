@@ -17,6 +17,7 @@ import type { AgentBuildOptions, TeachingAgent } from "../src/agent/teacher-agen
 import type { PiEngine } from "../src/agent/models.ts";
 import type { LhMessage } from "../src/core/native-messages.ts";
 import type { QuestionData } from "../src/core/question-core.ts";
+import type { SteerMessage } from "../src/core/contracts.ts";
 
 // Set the storage/auth seams BEFORE any app/config-loading imports.
 assert.equal(process.env.NODE_ENV, "test", "Run with NODE_ENV=test; these tests must not invoke real providers.");
@@ -36,7 +37,8 @@ const { jobStore } = await import("../src/store/jobs.ts");
 const { subscribe } = await import("../src/core/events.ts");
 const { buildAnswer, normalizeOptions, resolveCorrect } = await import("../src/core/question-core.ts");
 const { ChatInputError, endsInFailedTurn, failedResponseAtEnd, inputAppends, parseChatInput, retryDrops } = await import("../src/core/input-events.ts");
-const { INTERRUPTED_TEXT, asAgentMessages, newHandoffMessage, newPlanBlockMessage, newUserMessage, reconstructRequestCause, toLlmMessages } = await import("../src/core/native-messages.ts");
+const { INTERRUPTED_TEXT, asAgentMessages, hasProbeDone, newHandoffMessage, newPlanBlockMessage, newUserMessage, reconstructRequestCause, toLlmMessages } = await import("../src/core/native-messages.ts");
+const { phaseAt3Lh } = await import("../src/core/phases.ts");
 const { newCompactionMarker } = await import("../src/core/compaction.ts");
 
 after(() => {
@@ -285,6 +287,47 @@ describe("failed-response Retry (issue #110)", () => {
 		assert.equal(executions, 0);
 		assertPreserved(before, chatStore.getChat(chat.id)!.messages);
 		assert.deepEqual(contexts.at(-1), ["user"]);
+	});
+
+	it("a retained failed probe retries with the prober, concludes once, then selects the teacher", async () => {
+		const input = { assessment: { strands: [{ strand: "planet order", assessment: "Names known; ordering needs work." }] } };
+		const { engine, histories } = scripted([
+			() => fauxAssistantMessage([fauxToolCall("probe_done", input, { id: "failed-probe" })], { stopReason: "error", errorMessage: "cut off" }),
+			() => fauxAssistantMessage([fauxToolCall("probe_done", input, { id: "fresh-probe" })], { stopReason: "toolUse" }),
+			() => fauxAssistantMessage("Assessment ready."),
+			() => fauxAssistantMessage("Now planning the lesson."),
+		]);
+		const chat = createConfiguredChat("Test: failed probe recovery");
+		const delivered: SteerMessage[] = [];
+		const selections: boolean[] = [];
+		const factory: AgentFactory = (opts) => {
+			selections.push(opts.teaching);
+			if (opts.teaching) return createTeacherAgent(undefined, { ...opts, engine });
+			return createProberAgent({
+				chatId: chat.id, chatStore, jobStore, deliver: (s) => delivered.push(s), spawn: () => {},
+			}, { ...opts, engine });
+		};
+		await turn(engine, chat.id, { type: "text", text: "teach me planet order" }, factory);
+		const before = chatStore.getChat(chat.id)!.messages;
+		assert.ok(endsInFailedTurn(before));
+		assert.equal(hasProbeDone(before), false);
+		assert.equal(phaseAt3Lh(before), "probe");
+		assert.equal(delivered.length, 0, "the stored failed call never ran");
+
+		assert.equal((await turn(engine, chat.id, { type: "retry" }, factory)).status, 200);
+		const recovered = chatStore.getChat(chat.id)!.messages;
+		assertPreserved(before, recovered);
+		assert.deepEqual(selections, [false, false], "Retry must still build the prober");
+		assert.equal(hasProbeDone(recovered), true);
+		assert.equal(phaseAt3Lh(recovered), "plan");
+		assert.equal(delivered.length, 1, "the full retained-store guard accepts the fresh conclusion");
+		assert.deepEqual(recovered.filter((m) => m.role === "toolResult").map((m) => m.role === "toolResult" && m.toolCallId), ["fresh-probe"]);
+		assert.doesNotMatch(histories[1]!, /failed-probe/, "the failed call is omitted only from temporary Retry history");
+
+		assert.equal((await turn(engine, chat.id, { type: "text", text: "go on" }, factory)).status, 200);
+		assert.deepEqual(selections, [false, false, true]);
+		assert.equal(delivered.length, 1, "later turns do not replay either saved call");
+		assertPreserved(recovered, chatStore.getChat(chat.id)!.messages);
 	});
 
 	for (const kind of ["prober", "teacher", "practice"] as const) {
