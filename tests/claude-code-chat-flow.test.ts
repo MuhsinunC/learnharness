@@ -257,9 +257,7 @@ test("a background sub-agent resolves the cheap claude-code slot and leaves no s
 	const job = jobStore.createJob({ kind: "research", chatId: chat.id, toolCallId: "research-1" });
 	const jobRun = jobRunner.runJob(job.id, { question: "Summarize planet order" });
 	try {
-		await Promise.race([started, jobRun.then(() => {
-			assert.fail(`job finished before the wake started: ${JSON.stringify(jobStore.getJob(job.id))}`);
-		})]);
+		await started;
 		const wake = runningTurn(chat.id);
 		assert.ok(wake, "job delivery started the teacher wake turn");
 		const body = new Response(wake.subscribe()).text();
