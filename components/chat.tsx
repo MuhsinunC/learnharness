@@ -276,6 +276,11 @@ export function Chat({
 	// The reattach settled terminal → the sync-and-continue seam (below).
 	setReattachSettled(() => reattachSettledRef.current());
 
+	// Image attachments (LH-39): the server checks the chat's model on
+	// every intake, so a model that can't read images shows the notice.
+	const attach = useAttachments(chatId);
+	const { takePaths } = attach;
+
 	// A turn running server-side, attached to no live view of ours (navigate
 	// away mid-turn, or a wake turn discovered mid-session): the reattach
 	// stream is the primary channel (resumeStream — the same rendering path
@@ -604,16 +609,17 @@ export function Chat({
 		setOpeningError(false);
 		draftRef.current = prompt; // The existing 503 flow must restore it too.
 		applyText("");
-		void send({ type: "text", text: prompt }, () => {
+		// Image paths in the opening message attach like a composer send's (LH-39).
+		void takePaths(prompt).then(({ text, refs }) => send({ type: "text", text, ...(refs.length ? { attachments: refs } : {}) }, () => {
 			clearOpeningPrompt(chatId);
 			openingDraftRef.current = null;
 			if (draftRef.current === prompt) draftRef.current = null;
-		}).then(accepted => {
+		})).then(accepted => {
 			if (!accepted && openingMountedRef.current && openingDraftRef.current === prompt && !textRef.current) {
 				applyText(prompt);
 			}
 		});
-	}, [chatId, send, applyText]);
+	}, [chatId, send, applyText, takePaths]);
 
 	const sentInitial = useRef(false);
 	useEffect(() => {
@@ -757,9 +763,6 @@ export function Chat({
 	// recovers from it. Later compaction requires new input instead.
 	const retryable = (status === "ready" || status === "error") && !busy && !compacting && endsInFailedTurn(nativeMessages);
 	const retryFailedTurn = () => retryFailedResponse(send, draftRef);
-	// Image attachments (LH-39): the server checks the chat's model on
-	// every intake, so a model that can't read images shows the notice.
-	const attach = useAttachments(chatId);
 	const canSend =
 		(text.trim().length > 0 || attach.items.length > 0 || dictation.active) && !pending && !activeProblem && !compacting;
 

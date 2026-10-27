@@ -37,6 +37,12 @@ export const ATTACHMENT_MIME: Readonly<Record<string, string>> = {
  *  7.5 MB raw); nothing here resizes, so bigger images refuse up front. */
 export const MAX_ATTACHMENT_BYTES = 7 * 1024 * 1024;
 
+/** The wire's pixel budget per request (Claude's limits): past 20 image
+ *  blocks every image must be under ~2000 px, and a request caps at 32 MB.
+ *  Newer images win; older ones ride as reference text (view_image). */
+export const MAX_WIRE_IMAGES = 20;
+export const MAX_WIRE_IMAGE_BASE64 = 20 * 1024 * 1024;
+
 export function isAttachmentId(id: unknown): id is string {
 	return typeof id === "string" && ATTACHMENT_ID_RE.test(id);
 }
