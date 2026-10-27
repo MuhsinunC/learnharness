@@ -330,7 +330,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 					limit:
 						idleLeft <= 0
 							? `The ${job.kind} job made no progress for ${formatLimit(idleMs)} and was stopped.`
-							: `The ${job.kind} job ran past its ${formatLimit(capMs)} limit and was stopped.`,
+							: `The ${job.kind} job ran longer than ${formatLimit(capMs)} and was stopped.`,
 				});
 			};
 			check();
