@@ -173,6 +173,18 @@ export function refusalBannerText(message: string): string {
 	return providerRefusalAction(message) === "notice" ? JSON.parse(message).error : message;
 }
 
+/** Retry sends no composer text. Its refusal must not resurrect the draft
+ * from an earlier, already-durable text send over today's unsent composer.
+ * Retire that fallback synchronously, never when the async Retry settles:
+ * a later ordinary send may own a new recovery draft by then. */
+export function retryFailedResponse(
+	send: (input: ChatInput) => void,
+	submittedDraft: { current: string | null },
+): void {
+	submittedDraft.current = null;
+	void send({ type: "retry" });
+}
+
 /** useLayoutEffect that is silent during SSR (client components still render on the server in Next). */
 const useIsoLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
@@ -690,7 +702,7 @@ export function Chat({
 	// "error" too: a dropped stream leaves the model there, and send()
 	// recovers from it. Later compaction requires new input instead.
 	const retryable = (status === "ready" || status === "error") && !busy && !compacting && endsInFailedTurn(nativeMessages);
-	const retryFailedTurn = () => void send({ type: "retry" });
+	const retryFailedTurn = () => retryFailedResponse(send, draftRef);
 	const canSend =
 		(text.trim().length > 0 || dictation.active) && !pending && !activeProblem && !compacting;
 
