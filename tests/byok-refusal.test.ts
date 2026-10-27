@@ -61,7 +61,7 @@ describe("Retry owns no composer recovery draft", () => {
 					return new Response(body, { status: 503 });
 				},
 			});
-			let request!: Promise<void>;
+			let request!: ReturnType<SessionModel["send"]>;
 			retryFailedResponse((input) => request = model.send(input), submittedDraft);
 			await request;
 			assert.equal(model.getState().error?.message, body, "503 stays raw for existing setup/picker routing");
