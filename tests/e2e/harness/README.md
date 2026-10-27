@@ -25,8 +25,10 @@ time, because each file boots its own `next dev` in this checkout.
   `{ url, dataDir, api, json, log, stop }`. It writes `settings` to a fresh
   `LH_DATA_DIR` under `~/.cache/lh-e2e/<ticket>/`, strips proxy and credential
   variables, and sets `LH_IGNORE_ENV_KEYS=1` and `LH_E2E=1`. The server runs
-  under `nice -n 10`. `stop()` signals only that child, then deletes the run
-  directory; set `LH_E2E_KEEP=1` to keep it. `until(probe, label, ms)` polls.
+  under `nice -n 10`. `stop()` collects that child's process tree
+  (`pgrep -P`, recursively), sends SIGTERM to exactly those pids, sends
+  SIGKILL to any still alive after 10 s, then deletes the run directory;
+  set `LH_E2E_KEEP=1` to keep it. `until(probe, label, ms)` polls.
 - `chrome.ts`: `launchChrome(ticket)` starts headless system Chrome with a
   throwaway `--user-data-dir`. Set `CHROME_PATH` to override the binary.
 
