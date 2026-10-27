@@ -148,6 +148,9 @@ export function browserServiceSpawnEnv(
  *  (plain node) the electron package resolves to the dev binary path. */
 export function browserServiceBinary(): string | null {
 	if (process.versions.electron) return process.execPath;
+	// e2e runs (tests/e2e/harness) never start the Electron helper: they use
+	// the headless system Chrome fallback with its throwaway profile.
+	if (process.env.LH_E2E === "1") return null;
 	try {
 		const req = createRequire(import.meta.url);
 		const p = req("electron") as unknown as string;
