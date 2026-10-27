@@ -127,6 +127,8 @@ export const extraction = createExtractionPipeline({
 	// refuses BEFORE any batch runs (the typed throw), never mid-run.
 	providerKeyMissing: (provider, tier) =>
 		providerKeyPresent(provider) ? null : providerKeyMissingEnvelope(provider, [tier]),
+	// The auth fallback (LH-37), same consent gate as the job runner.
+	backgroundAllowed: connectionBackgroundAllowed,
 });
 
 

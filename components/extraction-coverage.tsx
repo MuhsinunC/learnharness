@@ -39,6 +39,8 @@ export interface SessionCoverage {
 	uncoveredTokens: number;
 	running: boolean;
 	lastFoldedAt: string | null;
+	/** The last run's failure, learner-readable (LH-37); null after a clean run. */
+	lastError?: string | null;
 }
 
 /** One session's coverage read — null on transport/404 (callers render
@@ -213,6 +215,11 @@ export function CoverageMenuBody({
 			>
 				{busy ? "Running" : "Extract"}
 			</button>
+			{coverage.lastError && !busy && (
+				<span className="text-destructive" data-testid="ctx-coverage-error">
+					Last extraction failed: {coverage.lastError}
+				</span>
+			)}
 		</div>
 	);
 }
@@ -395,6 +402,11 @@ export function CoverageRingDetail({ coverage, chunkTokens }: { coverage: Sessio
 						{coverage.lastFoldedAt ? timeAgo(coverage.lastFoldedAt) : "—"}
 					</span>
 				</div>
+				{coverage.lastError && !coverage.running && (
+					<div className="text-destructive" data-testid="coverage-ring-error">
+						Last extraction failed: {coverage.lastError}
+					</div>
+				)}
 				{coverage.running && (
 					<div className="flex justify-between gap-2" data-testid="coverage-ring-running">
 						<span>Status</span>
