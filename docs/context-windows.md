@@ -14,7 +14,7 @@ thinking level doesn't affect the window.
   `COMPACTION_RESERVE_TOKENS` (16,384), the smallest window whose compaction
   trigger (`window − 16k`) stays at the threshold floor. A lower value is
   refused in the field, and the route answers 400 `below_minimum`.
-- Enter, or clicking away, commits the value; the field always shows what is
+- Enter, **Save**, or clicking away commits the value; the field always shows what is
   stored. An empty field, or the Default itself, resets the pair to Default,
   so no pin equal to the Default is stored.
 - A value above Maximum opens a confirm modal. **Confirm** stays disabled until
