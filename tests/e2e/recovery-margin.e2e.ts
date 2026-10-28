@@ -14,7 +14,11 @@ import { maxOutputTokens, reply, startStubProvider, type StubProvider, type Stub
 // and was rejected again.
 // (b) A stated limit smaller than the prompt and tool declarations:
 // nothing can be sent, so nothing is condensed.
-// (c) A learned limit is cleared by saving a custom window.
+// (c) A learned limit is cleared by saving a custom window, and the
+// rejection that taught it does not teach it again.
+// (d) A stated limit that leaves the prompt and tool declarations a
+// little room: the recovery condenses into that room (never to nothing),
+// its retry is still held back, and the learner gets the explanation.
 
 const LIMIT = 40_960;
 const MAX_OUTPUT = 16_384;
@@ -28,7 +32,7 @@ const NOTES = "The derivative of x squared is two x, by the limit of the differe
 const paste = (n: number) => `Part ${n}: my next worked attempt. ${NOTES.repeat(42)}`;
 const REPLY = "Checked: each step follows from the definition of the derivative. ".repeat(8);
 
-type Msg = { id: string; role: string; stopReason?: string; errorMessage?: string; contextOverflow?: { providerText?: string; unrecoverable?: boolean }; customType?: string; details?: { notice?: string } };
+type Msg = { id: string; role: string; content?: unknown; stopReason?: string; errorMessage?: string; heldBack?: boolean; contextOverflow?: { providerText?: string; unrecoverable?: boolean }; customType?: string; details?: { notice?: string; firstKeptMessageId?: string } };
 type Chat = { messages: Msg[]; turnInFlight: boolean; compacting?: boolean };
 
 const text = (content: unknown) => typeof content === "string" ? content : JSON.stringify(content ?? "");
@@ -47,10 +51,35 @@ const summaryOf = (req: StubRequest) => {
 	return `## The learner's understanding\n${Array(cap - 8).fill("rate").join(" ")}\n## The current moment\nThe learner pastes.`;
 };
 
+/** The system prompt and tool declarations at pi-ai's chars/3.5: what the
+ *  server measures as the chat's request prefix. */
+const prefixWire = (req: StubRequest) =>
+	Math.ceil(req.system.length / 3.5) + Math.ceil(JSON.stringify(((req.body.tools ?? []) as Array<{ function: unknown }>).map((t) => t.function)).length / 3.5);
+/** Room the stub-y limit leaves the marker and kept tail above the
+ *  held-back floor (4,096 + 1,024): below a quarter of the prefix, so the
+ *  0.8 margin alone would leave none. */
+const ROOM = 1_400;
+const LONG_REPLY = "Checked: each step follows from the definition of the derivative. ".repeat(96);
+const short = (n: number) => `Part ${n}: is this limit right?`;
+
 let rejections = 0;
+/** Turn requests to reject at LIMIT regardless of size. */
+let forced = 0;
 /** stub-x states its tiny limit once a chat has been answered twice. */
 const tinyAfter = 2;
+let stubYRejected = false;
 const responder: StubResponder = (req) => {
+	if (req.model === "stub-y" && isTurn(req)) {
+		if (stubYRejected || !text(req.messages.at(-1)?.content).includes("Part 4:")) return reply.text(LONG_REPLY);
+		stubYRejected = true;
+		rejections++;
+		return reply.contextLength(prefixWire(req) + 5_120 + ROOM);
+	}
+	if (isTurn(req) && forced > 0) {
+		forced--;
+		rejections++;
+		return reply.contextLength(LIMIT);
+	}
 	if (req.model === "stub-x" && isTurn(req) && req.messages.filter((m) => m.role === "assistant").length >= tinyAfter) {
 		rejections++;
 		return reply.contextLength(TINY_LIMIT);
@@ -72,11 +101,11 @@ before(async () => {
 	const slot = { model: { provider: STUB, id: "stub-q" } };
 	server = await bootServer({
 		ticket: "lh-55",
-		providers: [{ id: STUB, baseUrl: stub.baseUrl, models: [{ id: "stub-q", contextWindow: LIMIT, maxTokens: MAX_OUTPUT }, { id: "stub-x", contextWindow: LIMIT, maxTokens: MAX_OUTPUT }] }],
+		providers: [{ id: STUB, baseUrl: stub.baseUrl, models: ["stub-q", "stub-x", "stub-y"].map((id) => ({ id, contextWindow: LIMIT, maxTokens: MAX_OUTPUT })) }],
 		settings: {
 			version: 1,
 			models: { strong: slot, cheap: slot, vision: slot },
-			contextWindows: { [`${STUB}:stub-q`]: 1_000_000, [`${STUB}:stub-x`]: 1_000_000 },
+			contextWindows: { [`${STUB}:stub-q`]: 1_000_000, [`${STUB}:stub-x`]: 1_000_000, [`${STUB}:stub-y`]: 1_000_000 },
 			graph: { enabled: false },
 		},
 	});
@@ -164,11 +193,41 @@ test("(b) a stated limit below the prompt and tool declarations: explained at on
 	assert.equal(after.messages.at(-1)!.contextOverflow?.unrecoverable, true, "and marked the chat unrecoverable");
 });
 
-test("(c) saving a custom window clears the pair's learned limit", async () => {
-	writeSettings({ learnedContextLimits: { [`${STUB}:stub-q`]: LIMIT } });
+test("(c) saving a custom window clears the pair's learned limit, and Repair does not learn it back", async () => {
+	const id = await newChat("A limit the learner overrides");
+	// Enough history for the recovery to condense.
+	for (let part = 1; part <= 8; part++) await turn(id, paste(part));
+	// The turn and its recovery retry are both rejected: Repair stays offered.
+	forced = 2;
+	const c = await turn(id, paste(9));
+	assert.ok(c.messages.at(-1)!.contextOverflow && !c.messages.at(-1)!.contextOverflow!.unrecoverable, "Repair is offered");
 	assert.deepEqual([(await modelRow("stub-q"))?.contextWindow, (await modelRow("stub-q"))?.learnedContextLimit], [LIMIT, LIMIT]);
 	await server.json("/api/settings/context-windows", { method: "PUT", body: { provider: STUB, id: "stub-q", tokens: 200_000, confirmAboveMax: true } });
 	const row = await modelRow("stub-q");
 	assert.deepEqual([row?.contextWindow, row?.customContextWindow, row?.learnedContextLimit], [200_000, 200_000, undefined], "the saved window runs");
 	assert.equal(readSettings().learnedContextLimits?.[`${STUB}:stub-q`], undefined);
+	// The chat's old rejection still states 40,960: Repair must not learn it again.
+	const repaired = await server.api(`/api/chats/${id}/repair`, { method: "POST" });
+	assert.equal(repaired.status, 200, await repaired.text());
+	const after = await modelRow("stub-q");
+	assert.deepEqual([after?.contextWindow, after?.learnedContextLimit], [200_000, undefined], "Repair learned nothing from the old rejection");
+	assert.equal(readSettings().learnedContextLimits?.[`${STUB}:stub-q`], undefined);
+});
+
+test("(d) the prefix fits but the retry is still held back: the history keeps its tail, and the learner gets the explanation", async () => {
+	const id = await newChat("A little room", "stub-y");
+	for (let n = 1; n <= 3; n++) await turn(id, short(n));
+	const start = stub.requests.length;
+	const c = await turn(id, short(4));
+	const marker = c.messages.find((m) => m.customType === "compaction" && m.details?.notice);
+	assert.ok(marker, "the recovery condensed the chat");
+	const kept = c.messages.findIndex((m) => m.id === marker.details!.firstKeptMessageId);
+	const learner = c.messages.findIndex((m) => m.role === "user" && text(m.content).includes("Part 4:"));
+	assert.ok(kept >= 0 && kept < learner, `the kept tail holds more than the learner's last message (kept from ${kept}, learner at ${learner}): the history is not truncated to nothing`);
+	const sent = stub.requests.slice(start).filter((r) => r.model === "stub-y" && isTurn(r));
+	assert.equal(sent.length, 1, "the rejected turn only: the recovery retry was held back, never sent");
+	const failed = c.messages.at(-1)!;
+	assert.equal(failed.heldBack, true, "the last request was held back");
+	assert.match(failed.errorMessage ?? "", /^This chat is still too long for stub-y/, "the learner gets the explanation");
+	assert.equal(failed.contextOverflow?.providerText, undefined, "no provider text: the held-back retry reached no provider");
 });
