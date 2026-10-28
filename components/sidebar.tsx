@@ -20,7 +20,7 @@ import { cn } from "@/lib/utils";
 import { fuzzyScore } from "@/src/core";
 import { useServerEvent, useServerResync } from "@/components/server-events";
 import type { ChatListItem } from "@/src/core";
-import { isTypingSurface, kbdEventForAction } from "@/src/core";
+import { kbdEventForAction } from "@/src/core";
 import { COMPACT_QUERY } from "@/components/compact-query";
 import { notifySettingsSaved } from "@/components/settings-signal";
 import { repairChatRequest } from "@/components/repair-chat";
@@ -463,9 +463,6 @@ export function RenameRow({ chat, onCommit, onCancel }: { chat: ChatListItem; on
 export type SessionKindFilter = "teach" | "all" | "practice";
 const KIND_FILTER_KEY = "lh:session-kind-filter";
 
-/** Keys the open drawer keeps from the inert page behind it. */
-const DRAWER_KEYS = new Set(["Escape", "Enter", " ", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"]);
-
 function SessionsSidebar() {
 	const { open, toggle, compact, closeDrawer, toggleRef } = useSidebar();
 	const [chats, setChats] = useState<ChatListItem[] | null>(null);
@@ -748,28 +745,21 @@ function SessionsSidebar() {
 			[opener, toggleRef.current, closeRef.current].find(usable)?.focus();
 		};
 	}, [drawer, toggleRef]);
-	/* Keys are fenced too: inert stops focus and pointers, not the page's
-	   own document and window key listeners (the quiz dock's arrows, Space
-	   and Enter; a plan's or popover's Escape). While the drawer is open
-	   these keys stop at the window in the capture phase, before anything
-	   below sees them, and Escape closes the drawer (one Esc, one layer).
-	   A typing surface keeps its keys (its own handler runs), and the
-	   session menu and the delete dialog keep theirs. */
+	/* Escape closes the drawer, last in line (one Esc, one layer): on the
+	   window, in the bubble phase, and only when nothing claimed it. A field,
+	   the session menu, the delete dialog and the settings dialog stop its
+	   propagation; the cheat sheet and a Radix hint preventDefault, so that
+	   is read once the dispatch is over (the cheat sheet's window listener
+	   registers after this one). The page behind is inert, and its own
+	   listeners stand down (pageInert in src/core/keyboard.ts). */
 	useEffect(() => {
-		if (!drawer || ctxChatId !== null || deleting) return;
+		if (!drawer) return;
 		const onKeyDown = (e: KeyboardEvent) => {
-			if (!DRAWER_KEYS.has(e.key) || e.metaKey || e.ctrlKey || isTypingSurface(e)) return;
-			const target = e.target instanceof Node ? e.target : null;
-			if (target !== document.body && !asideRef.current?.contains(target)) return;
-			e.stopImmediatePropagation();
-			if (e.key === "Escape") {
-				e.preventDefault();
-				closeDrawer();
-			}
+			if (e.key === "Escape") setTimeout(() => !e.defaultPrevented && closeDrawer());
 		};
-		window.addEventListener("keydown", onKeyDown, true);
-		return () => window.removeEventListener("keydown", onKeyDown, true);
-	}, [drawer, ctxChatId, deleting, closeDrawer]);
+		window.addEventListener("keydown", onKeyDown);
+		return () => window.removeEventListener("keydown", onKeyDown);
+	}, [drawer, closeDrawer]);
 
 	useEffect(() => {
 		if (!open) return;
