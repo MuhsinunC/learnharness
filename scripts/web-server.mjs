@@ -12,6 +12,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { TAILSCALE_BINS } from "../src/server/tailscale-bins.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const [mode, ...extra] = process.argv.slice(2);
@@ -35,10 +36,9 @@ if (bind) refuse(`${bind}: the address and port are set by LearnHarness (use LH_
 
 const port = process.env.LH_LISTEN_PORT || process.env.PORT || "3000";
 
-/** Whether `tailscale serve` forwards anything to this port. Same CLI
- * locations as tailnetURL() in src/server/web-login.ts; none found = no. */
+/** Whether `tailscale serve` forwards anything to this port; no CLI found = no. */
 function servedOnTailnet() {
-	const bins = process.env.LH_TAILSCALE_BIN ? [process.env.LH_TAILSCALE_BIN] : ["tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale", "/opt/homebrew/bin/tailscale", "/usr/local/bin/tailscale"];
+	const bins = process.env.LH_TAILSCALE_BIN ? [process.env.LH_TAILSCALE_BIN] : TAILSCALE_BINS;
 	for (const bin of bins) {
 		let out;
 		try { out = execFileSync(bin, ["serve", "status", "--json"], { encoding: "utf8", timeout: 3000, stdio: ["ignore", "pipe", "ignore"] }); } catch { continue; }

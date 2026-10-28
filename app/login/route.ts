@@ -5,7 +5,8 @@
  * Cross-site posts (Origin: null included) are refused before anything is
  * charged; failed attempts are rate-limited per client (and globally)
  * BEFORE the password is hashed. `next` is printable ASCII, so the
- * redirect cannot fail after the session exists. Every Location is relative: behind tailscale serve
+ * redirect cannot fail after the session exists. The session is bound to
+ * the Host it was posted to. Every Location is relative: behind tailscale serve
  * an absolute one would point the phone at the laptop's loopback.
  */
 import {
@@ -80,5 +81,8 @@ export async function POST(req: Request): Promise<Response> {
 	const password = form?.get("password");
 	if (typeof password !== "string" || !password || !(await verifyPassword(password))) return page(401, next, "Wrong password.");
 	release();
-	return redirect(next, { "Set-Cookie": sessionCookie(createSession(), req.headers) });
+	// Remote access was turned off while the password was being checked.
+	const token = createSession(req.headers);
+	if (!token) return page(403, next, null);
+	return redirect(next, { "Set-Cookie": sessionCookie(token, req.headers) });
 }
