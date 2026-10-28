@@ -705,11 +705,10 @@ function SessionsSidebar() {
 	useEffect(() => {
 		closeDrawer();
 	}, [pathname, closeDrawer]);
-	const [drawerOpened, setDrawerOpened] = useState(false);
-	useEffect(() => {
-		if (compact && open) setDrawerOpened(true);
-	}, [compact, open]);
-	const drawerUsed = drawerOpened || (compact && open);
+	const drawer = compact && open;
+	// The drawer animates only once opened, so loading closed never slides it out.
+	const drawerUsedRef = useRef(false);
+	if (drawer) drawerUsedRef.current = true;
 
 	useEffect(() => {
 		if (!open) return;
@@ -720,17 +719,16 @@ function SessionsSidebar() {
 
 	return (
 		<>
-		{compact && open && (
+		{drawer && (
 			<div data-testid="sidebar-backdrop" aria-hidden="true" onClick={closeDrawer} className="fixed inset-0 z-50 bg-background/80" />
 		)}
 		<aside
 			data-testid="sidebar"
 			className={cn(
 				"shrink-0 overflow-hidden",
-				// The drawer slides over the page; it animates only once
-				// opened, so loading closed never slides it out.
+				// The drawer slides over the page.
 				compact
-					? cn("fixed inset-y-0 left-0 z-50 w-72 max-w-[85vw] pl-[env(safe-area-inset-left)] shadow-xl", drawerUsed && "transition-[translate] duration-200", !open && "-translate-x-full")
+					? cn("fixed inset-y-0 left-0 z-50 w-72 max-w-[85vw] pl-[env(safe-area-inset-left)] shadow-xl", drawerUsedRef.current && "transition-[translate] duration-200", !open && "-translate-x-full")
 					: cn("sidebar-motion duration-200", open ? "w-72" : "w-0"),
 			)}
 			aria-hidden={!open}
