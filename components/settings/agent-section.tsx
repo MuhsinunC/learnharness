@@ -900,7 +900,7 @@ export function AgentSection({
 						hint={contextWindowCaption(entry)}
 						testid={`context-window-row-${entry.provider}:${entry.id}`}
 					>
-						<ContextWindowField key={`${entry.provider}:${entry.id}:${entry.contextWindow}`} entry={entry} />
+						<ContextWindowField key={`${entry.provider}:${entry.id}:${entry.customContextWindow ?? ""}`} entry={entry} />
 					</SettingsRow>
 				))}
 			</SettingsGroup>
