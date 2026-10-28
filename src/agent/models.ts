@@ -5,6 +5,7 @@ import {
 	getSupportedThinkingLevels,
 	normalizeContext,
 	type Api,
+	type AssistantMessage,
 	type Context,
 	type Model,
 	type Models,
@@ -20,6 +21,7 @@ import { Value } from "typebox/value";
 import { type ModelRole } from "../../config.ts";
 import { claudeCodeProvider, type ClaudeCodeProviderDeps } from "./claude-code/provider.ts";
 import { DEFAULT_THINKING_ORDER } from "../core/settings.ts";
+import type { HeldBack } from "../core/context-overflow.ts";
 import packageMetadata from "../../package.json" with { type: "json" };
 import { chatGPTModel } from "./chatgpt-bridge.ts";
 import { chatGPTStream } from "./chatgpt-stream.ts";
@@ -197,10 +199,11 @@ function maxOutputTokens(): number | undefined {
 
 /** pi-ai's margin under the window: its max-tokens clamp leaves this
  *  much free (api/simple-options.js CONTEXT_SAFETY_TOKENS). */
-const CONTEXT_SAFETY_TOKENS = 4096;
+export const CONTEXT_SAFETY_TOKENS = 4096;
 
-/** The least reply room a request goes out with (LH-50). */
-const MIN_REPLY_TOKENS = 1024;
+/** The least reply room a request goes out with (LH-50): 1024 tokens,
+ *  or the model's whole max output when that is smaller. */
+export const replyFloorTokens = (maxTokens: number) => Math.min(1024, maxTokens);
 
 /** The reply room pi-ai's max-tokens clamp leaves this request:
  *  window − its estimate of the context (system prompt, tool
@@ -211,21 +214,20 @@ function replyRoomTokens(model: Model<Api>, context: Context): number {
 }
 
 /** A request whose reply would be cut off silently is held back as a
- *  length rejection stating the window (LH-50): overflow recovery then
- *  condenses the chat, or explains that nothing can (context-recovery). */
+ *  length rejection marked `heldBack` (LH-50, core/context-overflow):
+ *  overflow recovery then condenses the chat, or explains that nothing
+ *  can (context-recovery). No provider saw it, so it states no limit. */
 function heldBackStream(model: Model<Api>, room: number, lifecycle?: ChatGPTDispatchLifecycle) {
 	const output = new AssistantMessageEventStream();
 	const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 	markUnadmittedUsage(usage);
 	lifecycle?.noDispatch("other");
-	output.push({
-		type: "error",
-		reason: "error",
-		error: {
-			role: "assistant", api: model.api, provider: model.provider, model: model.id, content: [], usage, stopReason: "error", timestamp: Date.now(),
-			errorMessage: `Not sent: this model's maximum context length is ${model.contextWindow} tokens, and this request would leave its reply ${Math.max(room, 0)} tokens.`,
-		},
-	});
+	const error: AssistantMessage & HeldBack = {
+		role: "assistant", api: model.api, provider: model.provider, model: model.id, content: [], usage, stopReason: "error", timestamp: Date.now(),
+		errorMessage: `Not sent: the reply would have only ${Math.max(room, 0)} tokens of room in this chat's ${model.contextWindow}-token context window.`,
+		heldBack: true,
+	};
+	output.push({ type: "error", reason: "error", error });
 	output.end();
 	return output;
 }
@@ -276,7 +278,7 @@ export function piEngineForSpec(spec: ResolvedModelSpec, background: boolean | (
 				: cap !== undefined && !matches && requestModel.maxTokens > cap
 					? { ...requestModel, maxTokens: cap } : requestModel;
 			const room = replyRoomTokens(streamModel, context);
-			if (room < Math.min(MIN_REPLY_TOKENS, streamModel.maxTokens)) return heldBackStream(streamModel, room, lifecycle);
+			if (room < replyFloorTokens(streamModel.maxTokens)) return heldBackStream(streamModel, room, lifecycle);
 			const outputCeiling = cap === undefined ? undefined : Math.min(streamModel.maxTokens, cap);
 			return stream(streamModel, context, {
 				...options,

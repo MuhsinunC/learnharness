@@ -61,7 +61,7 @@ type Msg = {
 	content?: unknown;
 	stopReason?: string;
 	errorMessage?: string;
-	contextOverflow?: { providerText: string; unrecoverable?: boolean };
+	contextOverflow?: { providerText?: string; unrecoverable?: boolean };
 	customType?: string;
 	details?: { notice?: string; firstKeptMessageId?: string };
 };
@@ -402,13 +402,16 @@ test("(d) recovery never loops: when even the smallest request is too big, the l
 		assert.equal(recoveryMarkers(final).length, 1);
 		assert.match(JSON.stringify(recoveryMarkers(final)[0]!.content), /no model summary could be written/, "the deterministic fallback landed");
 		const failed = final.messages.at(-1)!;
-		assert.match(
-			failed.errorMessage!,
-			/^This chat is still too long for stub-a, even after condensing its older part\. Start a new session, or pick a model with a larger context window\. \(Not sent: /,
+		// The held-back retry reached no provider: the explanation stands alone.
+		assert.equal(
+			failed.errorMessage,
+			"This chat is still too long for stub-a, even after condensing its older part. Start a new session, or pick a model with a larger context window.",
 		);
 		// (7) Never nested, the provider text kept apart, and Repair no longer offered.
-		assert.equal(failed.errorMessage!.split("This chat is still too long").length, 2);
-		assert.match(failed.contextOverflow!.providerText, /^Not sent: this model's maximum context length is 2500 tokens/);
+		assert.equal(failed.contextOverflow!.providerText, undefined, "no provider text: the app held the retry back");
+		const rejected = final.messages.filter((m) => m.role === "assistant" && m.stopReason === "error").at(-2)!;
+		assert.match(rejected.errorMessage!, /^400: .*maximum context length is 2500 tokens.*context_length_exceeded/, "the provider's rejection keeps its own text");
+		assert.equal(rejected.contextOverflow, undefined);
 		const refused = await server.api(`/api/chats/${id}/repair`, { method: "POST" });
 		assert.equal(refused.status, 409);
 		assert.match(await refused.text(), /cannot be condensed any further/);
