@@ -925,7 +925,7 @@ function SessionsSidebar() {
 										router.push(`/chat/${c.id}`);
 									}}
 									onContextMenu={(e) => openContext(e, c)}
-									onMenu={(e) => openContext(e, c)}
+									onMenu={(e) => (ctxChatId === c.id ? setCtxChatId(null) : openContext(e, c))}
 								/>
 							),
 						)
