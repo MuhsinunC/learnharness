@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import zlib from "node:zlib";
 import { after, before, test } from "node:test";
 import type { ElementHandle, Page } from "puppeteer-core";
 import { bootServer, until, type LhServer } from "./harness/server.ts";
 import { launchChrome, type HeadlessChrome } from "./harness/chrome.ts";
 import { calledTool, lastToolName, reply, startStubProvider, type StubProvider, type StubRequest } from "./harness/stub-provider.ts";
+import { png } from "./harness/png.ts";
 
 // LH-44: the pages the desktop app renders fit a phone (390×844, touch),
 // a tablet (768×1024, touch) and a desktop window (1280×800). On every
@@ -94,30 +94,6 @@ function respond(req: StubRequest) {
 			{ name: "visual", arguments: { brief: "A circle centred in the frame." } },
 		], "Let me build a demo and draw it.");
 	return reply.text(RICH);
-}
-
-/** A solid-color PNG, for the composer's image chip. */
-function png(width: number, height: number): Buffer {
-	const chunk = (type: string, data: Buffer) => {
-		const body = Buffer.concat([Buffer.from(type), data]);
-		const out = Buffer.alloc(12 + data.length);
-		out.writeUInt32BE(data.length, 0);
-		body.copy(out, 4);
-		out.writeUInt32BE(zlib.crc32(body), 8 + data.length);
-		return out;
-	};
-	const ihdr = Buffer.alloc(13);
-	ihdr.writeUInt32BE(width, 0);
-	ihdr.writeUInt32BE(height, 4);
-	ihdr.set([8, 2, 0, 0, 0], 8);
-	const row = Buffer.alloc(1 + width * 3);
-	for (let x = 0; x < width; x++) row.set([200, 40, 40], 1 + x * 3);
-	return Buffer.concat([
-		Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-		chunk("IHDR", ihdr),
-		chunk("IDAT", zlib.deflateSync(Buffer.concat(Array.from({ length: height }, () => row)))),
-		chunk("IEND", Buffer.alloc(0)),
-	]);
 }
 
 const NAMES = ["Limit", "Continuity", "Derivative", "Integral", "Sequence", "Epsilon-delta", "Squeeze theorem", "Mean value theorem"];
@@ -220,6 +196,8 @@ class Walk {
 		}
 		// Every visible interactive element is inside the screen's width,
 		// unless it sits in a horizontal scroller (a wide table, a tab strip).
+		// A scroller is one that really scrolls sideways: overflow-y: auto
+		// computes overflow-x to auto as well, so the style alone is not enough.
 		const offscreen = await this.page.evaluate((width) => {
 			const out: string[] = [];
 			for (const el of document.querySelectorAll<HTMLElement>("button, a[href], input:not([type=file]), textarea, select, [role=button]")) {
@@ -228,7 +206,9 @@ class Walk {
 				const cs = getComputedStyle(el);
 				if (r.width === 0 || r.height === 0 || cs.visibility === "hidden" || cs.pointerEvents === "none") continue;
 				let scroller = false;
-				for (let p = el.parentElement; p && !scroller; p = p.parentElement) scroller = /auto|scroll/.test(getComputedStyle(p).overflowX);
+				for (let p = el.parentElement; p && !scroller; p = p.parentElement) {
+					scroller = /auto|scroll/.test(getComputedStyle(p).overflowX) && p.scrollWidth > p.clientWidth + 1;
+				}
 				if (scroller) continue;
 				if (r.left < -1 || r.right > width + 1) {
 					const name = el.dataset.testid ?? el.getAttribute("aria-label") ?? el.textContent?.trim().slice(0, 40);
@@ -264,6 +244,18 @@ class Walk {
 					.map((el) => `${el.dataset.testid ?? el.getAttribute("aria-label") ?? el.getAttribute("placeholder")} (${getComputedStyle(el).fontSize})`),
 			);
 			for (const s of small) this.problems.push(`${at}: input ${s} is under 16px, so iOS zooms on focus`);
+			// The 16px floor must not clip: each field's content box holds one line.
+			const clipped = await this.page.evaluate(() =>
+				[...document.querySelectorAll<HTMLElement>("input:not([type=checkbox], [type=radio], [type=range], [type=file]), textarea, select")]
+					.filter((el) => el.getBoundingClientRect().width > 0 && !el.closest("[aria-hidden=true], [inert]"))
+					.flatMap((el) => {
+						const cs = getComputedStyle(el);
+						const content = el.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+						const line = cs.lineHeight === "normal" ? 1.2 * parseFloat(cs.fontSize) : parseFloat(cs.lineHeight);
+						return line > content + 0.5 ? [`${el.dataset.testid ?? el.getAttribute("aria-label") ?? el.getAttribute("placeholder")} (line ${line.toFixed(1)}px, content box ${content}px)`] : [];
+					}),
+			);
+			for (const c of clipped) this.problems.push(`${at}: input ${c} clips its text`);
 			for (const selector of opts.minTap ?? []) {
 				for (const el of await this.page.$$(selector)) {
 					const box = await el.boundingBox();
@@ -286,12 +278,22 @@ class Walk {
 	}
 }
 
-async function walk(vp: Viewport): Promise<string[]> {
-	const page = await chrome.browser.newPage();
+/** COMPACT_QUERY's rule (components/sidebar.tsx): the drawer under 640px, and under 1024px on a touch screen. */
+function isCompact(vp: Viewport): boolean {
+	return vp.width < 640 || (vp.width < 1024 && vp.hasTouch);
+}
+
+async function newWalk(vp: Viewport, context = chrome.browser.defaultBrowserContext()): Promise<Walk> {
+	const page = await context.newPage();
 	await page.setViewport(vp);
 	if (vp.ua) await page.setUserAgent(vp.ua);
-	const w = new Walk(page, vp);
-	const compact = vp.width < 1024;
+	return new Walk(page, vp);
+}
+
+async function walk(vp: Viewport): Promise<string[]> {
+	const w = await newWalk(vp);
+	const page = w.page;
+	const compact = isCompact(vp);
 	try {
 		// The viewport meta: device width, and cover so the safe-area insets are real on iOS.
 		await w.goto("/");
@@ -375,7 +377,7 @@ async function walk(vp: Viewport): Promise<string[]> {
 			const dt = new DataTransfer();
 			dt.items.add(new File([data], "my-working-for-the-limit-question.png", { type: "image/png" }));
 			document.querySelector("[data-testid=composer] textarea")!.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
-		}, png(160, 90).toString("base64"));
+		}, png(200, 40, 40, 160, 90).toString("base64"));
 		await page.waitForSelector("[data-testid=attachment-chip]", { timeout: 30_000 });
 		await page.type("[data-testid=composer] textarea", "Here is my working for the limit question, as a photo.");
 		await w.settle(1000);
@@ -460,4 +462,197 @@ test("a tablet (768×1024, touch): every surface fits", async () => {
 
 test("a desktop window (1280×800): every surface fits, the sidebar stays inline", async () => {
 	assert.deepEqual(await walk(DESKTOP), []);
+});
+
+/** `until`, answering false on a timeout instead of throwing. */
+async function within(probe: () => Promise<boolean>, ms: number): Promise<boolean> {
+	return until(probe, "", ms).then(
+		() => true,
+		() => false,
+	);
+}
+
+async function focusLabel(page: Page): Promise<string | null> {
+	return page.evaluate(() => document.activeElement?.getAttribute("aria-label") ?? document.activeElement?.tagName ?? null);
+}
+
+test("a phone: every drawer navigation closes the drawer, the same-pathname ones too", async () => {
+	const w = await newWalk(PHONE);
+	const closes = async (what: string, selector: string, pathname: string, search = "") => {
+		await w.openSidebar();
+		await w.press(selector);
+		await w.page.waitForFunction((p, q) => location.pathname === p && location.search === q, { timeout: 60_000 }, pathname, search);
+		if (!(await within(() => w.drawerClosed(), 5000))) w.problems.push(`${what} left the drawer open`);
+	};
+	try {
+		await w.goto("/chat/new");
+		await closes("+ Practice on the teaching draft", "[data-testid=new-session-practice]", "/chat/new", "?mode=practice");
+		await closes("+ Teaching on the practice draft", "[data-testid=new-session]", "/chat/new");
+		await w.goto(`/chat/${lessonId}`);
+		await closes("the open session's own row", `[data-testid=session-row][data-chat-id="${lessonId}"]`, `/chat/${lessonId}`);
+		// Search, then Enter on the open session.
+		await w.openSidebar();
+		await w.press("[data-testid=session-search]");
+		await w.page.type("[data-testid=session-search]", "Limits");
+		await w.page.keyboard.press("Enter");
+		if (!(await within(() => w.drawerClosed(), 5000))) w.problems.push("search Enter on the open session left the drawer open");
+		await w.goto("/");
+		await closes("the wordmark at home", '[data-testid=sidebar] a[aria-label="Home"]', "/");
+		assert.deepEqual(w.problems, []);
+	} finally {
+		await w.page.close();
+	}
+});
+
+test("a phone: the drawer is a modal dialog, Escape closes it without aborting a turn, and focus returns to the toggle", async () => {
+	const w = await newWalk(PHONE);
+	const { page } = w;
+	const state = () =>
+		page.evaluate(() => {
+			const aside = document.querySelector("[data-testid=sidebar]")!;
+			const active = document.activeElement;
+			return {
+				role: aside.getAttribute("role"),
+				modal: aside.getAttribute("aria-modal"),
+				focusInside: !!active && aside.contains(active),
+				mainInert: (document.querySelector("main") as HTMLElement).inert,
+				aborts: (window as unknown as { aborts: number }).aborts,
+			};
+		});
+	const closed = async (what: string) => {
+		if (!(await within(() => w.drawerClosed(), 5000))) w.problems.push(`${what} left the drawer open`);
+		if (!(await within(async () => (await focusLabel(page)) === "Open sidebar", 3000))) w.problems.push(`after ${what} focus is on ${await focusLabel(page)}, not the toggle`);
+		if ((await state()).mainInert) w.problems.push(`after ${what} the page is still inert`);
+	};
+	try {
+		await w.goto(`/chat/${lessonId}`);
+		await page.evaluate(() => {
+			const counter = window as unknown as { aborts: number };
+			counter.aborts = 0;
+			window.addEventListener("lh:kbd-abort-turn", () => counter.aborts++);
+		});
+		await w.openSidebar();
+		const open = await state();
+		if (open.role !== "dialog" || open.modal !== "true") w.problems.push(`the open drawer has role=${open.role} aria-modal=${open.modal}, not a modal dialog`);
+		if (!open.focusInside) w.problems.push(`focus stayed outside the open drawer (on ${await focusLabel(page)})`);
+		if (!open.mainInert) w.problems.push("the page behind the open drawer is not inert");
+		await page.keyboard.press("Escape");
+		await closed("Escape");
+		const aborts = (await state()).aborts;
+		if (aborts !== 0) w.problems.push(`Escape on the open drawer reached the abort-turn chain (${aborts} lh:kbd-abort-turn)`);
+
+		// One Esc, one layer: with the session menu open, Escape closes the menu only.
+		await w.openSidebar();
+		await w.press(`[data-testid=session-row-menu][data-chat-id="${quizId}"]`);
+		await page.waitForSelector("[data-testid=session-context-menu]", { timeout: 10_000 });
+		await page.keyboard.press("Escape");
+		await until(async () => (await page.$("[data-testid=session-context-menu]")) === null, "Escape to close the session menu", 5000);
+		if (await w.drawerClosed()) w.problems.push("Escape on the session menu also closed the drawer");
+		await page.keyboard.press("Escape");
+		await closed("a second Escape");
+
+		// A backdrop tap with the search focused also hands focus back to the toggle.
+		await w.openSidebar();
+		await page.$eval("[data-testid=session-search]", (el) => (el as HTMLElement).focus());
+		await page.touchscreen.tap(PHONE.width - 10, PHONE.height / 2);
+		await closed("a backdrop tap");
+		assert.deepEqual(w.problems, []);
+	} finally {
+		await page.close();
+	}
+});
+
+test("a phone: a second tap on a session's '…' closes its menu", async () => {
+	const w = await newWalk(PHONE);
+	const menu = `[data-testid=session-row-menu][data-chat-id="${quizId}"]`;
+	try {
+		await w.goto("/");
+		await w.openSidebar();
+		await w.press(menu);
+		await w.page.waitForSelector("[data-testid=session-context-menu]", { timeout: 10_000 });
+		await w.settle();
+		await w.press(menu);
+		assert.ok(await within(async () => (await w.page.$("[data-testid=session-context-menu]")) === null, 3000), "the second tap closes the menu");
+		assert.equal(await w.drawerClosed(), false, "the drawer stays open");
+	} finally {
+		await w.page.close();
+	}
+});
+
+test("a mouse-driven desktop window at 900px keeps the inline sidebar and its saved preference; under 640px it is the drawer", async () => {
+	const context = await chrome.browser.createBrowserContext();
+	try {
+		const w = await newWalk({ name: "narrow-desktop", width: 900, height: 800, deviceScaleFactor: 1, isMobile: false, hasTouch: false }, context);
+		for (const pref of ["0", "1"]) {
+			await w.goto("/");
+			await w.page.evaluate((v) => localStorage.setItem("lh:sidebar-open", v), pref);
+			await w.goto("/");
+			await w.settle(600);
+			const got = await w.page.$eval("[data-testid=sidebar]", (el) => ({
+				hidden: el.getAttribute("aria-hidden"),
+				width: Math.round(el.getBoundingClientRect().width),
+				position: getComputedStyle(el).position,
+				backdrop: !!document.querySelector("[data-testid=sidebar-backdrop]"),
+			}));
+			const want = { hidden: pref === "1" ? "false" : "true", width: pref === "1" ? 288 : 0, position: "static", backdrop: false };
+			assert.deepEqual(got, want, `a 900px mouse window with the saved preference ${pref}`);
+		}
+		const small = await newWalk({ name: "small-desktop", width: 600, height: 800, deviceScaleFactor: 1, isMobile: false, hasTouch: false }, context);
+		await small.goto("/");
+		assert.ok(await small.drawerClosed(), "a 600px mouse window gets the drawer, closed on load");
+	} finally {
+		await context.close();
+	}
+});
+
+test("a compact visit never writes the saved sidebar preference, so the desktop keeps it", async () => {
+	const context = await chrome.browser.createBrowserContext();
+	try {
+		const desk = await newWalk(DESKTOP, context);
+		await desk.goto("/");
+		await desk.page.evaluate(() => localStorage.setItem("lh:sidebar-open", "0"));
+		const phone = await newWalk(PHONE, context);
+		await phone.goto("/");
+		await phone.openSidebar();
+		await phone.press('[aria-label="Close sidebar"]');
+		await until(() => phone.drawerClosed(), "the close button to close the drawer", 5000);
+		await phone.openSidebar();
+		await phone.page.touchscreen.tap(PHONE.width - 10, PHONE.height / 2);
+		await until(() => phone.drawerClosed(), "a backdrop tap to close the drawer", 5000);
+		assert.equal(await phone.page.evaluate(() => localStorage.getItem("lh:sidebar-open")), "0");
+		await desk.goto("/");
+		await desk.settle(600);
+		const box = await desk.page.$eval("[data-testid=sidebar]", (el) => ({ hidden: el.getAttribute("aria-hidden"), width: Math.round(el.getBoundingClientRect().width) }));
+		assert.deepEqual(box, { hidden: "true", width: 0 }, "the desktop sidebar stays closed as saved");
+	} finally {
+		await context.close();
+	}
+});
+
+test("an iPhone without range media queries (iOS Safari before 16.4) still gets the drawer", async () => {
+	const w = await newWalk(PHONE);
+	try {
+		// Old WebKit reads a range query as "not all", which never matches.
+		await w.page.evaluateOnNewDocument(() => {
+			const native = window.matchMedia.bind(window);
+			window.matchMedia = (query: string) => native(/[<>]/.test(query) ? "not all" : query);
+		});
+		await w.goto("/");
+		await w.settle(600);
+		assert.ok(await w.drawerClosed(), "the sidebar loads as the closed drawer, not inline");
+		// The built stylesheets carry no range syntax either.
+		// (A loop, not a nested function: tsx would wrap one in its __name helper, which the page lacks.)
+		const ranged = await w.page.evaluate(() => {
+			const out: string[] = [];
+			const rules = [...document.styleSheets].flatMap((sheet) => [...sheet.cssRules]);
+			for (let rule = rules.pop(); rule; rule = rules.pop()) {
+				if (rule instanceof CSSMediaRule && /[<>]/.test(rule.conditionText)) out.push(rule.conditionText);
+				if (rule instanceof CSSGroupingRule) rules.push(...rule.cssRules);
+			}
+			return out;
+		});
+		assert.deepEqual(ranged, []);
+	} finally {
+		await w.page.close();
+	}
 });
