@@ -178,6 +178,12 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
 		return () => query.removeEventListener("change", onChange);
 	}, []);
 	const closeDrawer = useCallback(() => setDrawerOpen(false), []);
+	// Back and swipe-back close the drawer before the page they return to
+	// commits, so its mount-time focus does not land on an inert page.
+	useEffect(() => {
+		window.addEventListener("popstate", closeDrawer);
+		return () => window.removeEventListener("popstate", closeDrawer);
+	}, [closeDrawer]);
 
 	const toggle = useCallback(() => {
 		if (compact) {
@@ -702,7 +708,7 @@ function SessionsSidebar() {
 
 	// The drawer closes on every navigation: its own links close it in
 	// their handlers (a query-only change or the active row keeps the
-	// pathname), and this covers the rest, such as Back.
+	// pathname), popstate covers Back, and this is the backstop.
 	useEffect(() => {
 		closeDrawer();
 	}, [pathname, closeDrawer]);
