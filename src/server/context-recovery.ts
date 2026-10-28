@@ -99,6 +99,13 @@ export function contextWindowFor(engine: PiEngine): number | undefined {
  *  where this module's estimates count chars/4. */
 const WIRE_CHARS_PER_TOKEN = 3.5;
 
+/** The share of its room a recovery retry fills, the system prompt and
+ *  tool declarations included (LH-55). The OB-0645 live check counted
+ *  OpenRouter's pre-flight at about 1.18x the billed tokens, and pi-ai's
+ *  flat 4,096-token margin absorbs that only below ~22.7k tokens once it
+ *  clamps max_tokens to the window: 1/1.18 ≈ 0.85, less some headroom. */
+const RETRY_FIT_SHARE = 0.8;
+
 /** Per-line cap for the learner's dropped lines in the fallback marker. */
 const FALLBACK_LINE_CHARS = 300;
 
@@ -178,13 +185,15 @@ function droppedSpanSummary(record: ChatRecord, previous: LhMarkerMessage | null
 export interface RecoveryDeps extends Omit<CompactionDeps, "thresholdTokens" | "canStart" | "keepRecentTokens"> {
 	/** The window to fit (recoveryWindowTokens). */
 	windowTokens: number;
-	/** What the marker and the kept tail may fill, in wire tokens: the
-	 *  window less the reply's room (outputReserveTokens) and the system
-	 *  prompt and tool declarations. At most 0 when those leave no room. */
+	/** What the marker and the kept tail may fill, in wire tokens:
+	 *  RETRY_FIT_SHARE of the window less the reply's room
+	 *  (outputReserveTokens), less the system prompt and tool
+	 *  declarations. At most 0 when those leave no room. */
 	fitTokens: number;
-	/** What they may fill before the request is held back: the window
-	 *  less pi-ai's margin, the least reply room (replyFloorTokens) and
-	 *  the prompt and declarations. At most 0 when nothing can be sent. */
+	/** What they may fill before the request is held back: the same
+	 *  share of the window less pi-ai's margin and the least reply room
+	 *  (replyFloorTokens), less the prompt and declarations. At most 0
+	 *  when nothing can be sent: the chat is explained, never condensed. */
 	floorFitTokens: number;
 	/** The rejected request's estimate (chars/4), measured once. */
 	failedRequestTokens: number;
@@ -213,8 +222,8 @@ export function recoveryDeps(chatStore: ChatStore, record: ChatRecord, engine: P
 		systemPromptTokens,
 		failedRequestTokens,
 		windowTokens,
-		fitTokens: windowTokens - outputReserveTokens(windowTokens, engine.model.maxTokens) - prefixTokens,
-		floorFitTokens: windowTokens - CONTEXT_SAFETY_TOKENS - replyFloorTokens(engine.model.maxTokens) - prefixTokens,
+		fitTokens: Math.floor(RETRY_FIT_SHARE * (windowTokens - outputReserveTokens(windowTokens, engine.model.maxTokens))) - prefixTokens,
+		floorFitTokens: Math.floor(RETRY_FIT_SHARE * (windowTokens - CONTEXT_SAFETY_TOKENS - replyFloorTokens(engine.model.maxTokens))) - prefixTokens,
 		notice,
 	};
 }
