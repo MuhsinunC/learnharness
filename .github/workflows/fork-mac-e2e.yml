@@ -113,17 +113,16 @@ jobs:
           cp "$golden/settings.json" "$data/data/settings.json"
           printf 'fixture bytes\n' > "$data/nested dir/file with space"
           # Remote access (LH-43): a login password makes the app take its fixed
-          # loopback port (3757). Same record src/server/web-login.ts writes;
-          # the password is CI-only dummy data.
-          python3 - "$data/data/web-login.json" <<'PY'
-          import base64, hashlib, json, os, sys
-          salt = os.urandom(16)
-          key = hashlib.scrypt(b'ci-remote-access-dummy', salt=salt, n=2**15, r=8, p=3, maxmem=128 * 1024 * 1024, dklen=32)
-          record = {'version': 1, 'password': {'salt': base64.b64encode(salt).decode(), 'hash': base64.b64encode(key).decode(), 'N': 2**15, 'r': 8, 'p': 3}, 'sessions': []}
-          with open(sys.argv[1], 'w') as out:
-              json.dump(record, out)
-          os.chmod(sys.argv[1], 0o600)
-          PY
+          # loopback port (3757). The record src/server/web-login.ts writes, made
+          # with the same Node scrypt; the password is CI-only dummy data.
+          node - "$data/data/web-login.json" <<'JS'
+          const { randomBytes, scryptSync } = require("node:crypto");
+          const fs = require("node:fs");
+          const salt = randomBytes(16);
+          const hash = scryptSync("ci-remote-access-dummy", salt, 32, { N: 2 ** 15, r: 8, p: 3, maxmem: 64 * 1024 * 1024 });
+          const record = { version: 1, password: { salt: salt.toString("base64"), hash: hash.toString("base64"), N: 2 ** 15, r: 8, p: 3 }, sessions: [] };
+          fs.writeFileSync(process.argv[2], JSON.stringify(record), { mode: 0o600 });
+          JS
           bash tests/fork-mac-e2e/data-manifest.sh write "$data" "$ART/data-manifest.jsonl"
       - name: Quarantine downloaded fork
         run: |
@@ -189,7 +188,8 @@ jobs:
           curl --max-time 20 -sS "${serve[@]}" -o /dev/null -D "$RUNNER_TEMP/remote-page.txt" "http://127.0.0.1:$port/chat/new"
           grep -Eq '^HTTP/[0-9.]+ 303' "$RUNNER_TEMP/remote-page.txt"
           grep -iq '^location: /login?next=%2Fchat%2Fnew' "$RUNNER_TEMP/remote-page.txt"
-          curl --max-time 20 -sS "${serve[@]}" "http://127.0.0.1:$port/login" | grep -Fq 'type="password"'
+          curl --max-time 20 -sS "${serve[@]}" -o "$RUNNER_TEMP/remote-login-page.html" "http://127.0.0.1:$port/login"
+          grep -Fq 'type="password"' "$RUNNER_TEMP/remote-login-page.html"
           [[ $(curl --max-time 20 -sS "${serve[@]}" -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/api/models") == 403 ]]
           curl --max-time 60 -sS "${serve[@]}" -H 'Origin: https://ci-mac.example.ts.net' -o /dev/null -D "$RUNNER_TEMP/remote-login.txt" \
             --data-urlencode 'password=ci-remote-access-dummy' --data-urlencode 'next=/' "http://127.0.0.1:$port/login"

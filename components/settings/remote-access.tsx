@@ -45,9 +45,13 @@ export function RemoteAccessSettings() {
 	const hint = state.enabled
 		? "On. Devices on your tailnet log in with this password. Saving a new one logs every device out."
 		: "Off. Set a password to open LearnHarness from your phone over Tailscale.";
-	const setup = !state.enabled || !local ? null : state.restartNeeded ? (
+	// A `tailscale serve` left running keeps forwarding to the port whoever holds it.
+	const serveOff = <code className="select-all font-mono text-foreground" data-testid="remote-access-serve-off">tailscale serve --https=443 off</code>;
+	const setup = !local ? null : !state.enabled ? (
+		<span className="block">If you shared LearnHarness with tailscale serve before, stop that too: {serveOff}</span>
+	) : state.restartNeeded ? (
 		<span className="block" data-testid="remote-access-restart">
-			Quit LearnHarness and open it again to finish. If this stays, port {state.remotePort} is used by another program.
+			Quit LearnHarness and open it again to finish. If this stays, port {state.remotePort} is used by another program: don’t run tailscale serve for it, and if you already did, run {serveOff}
 		</span>
 	) : (
 		<>

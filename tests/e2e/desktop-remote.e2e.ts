@@ -24,6 +24,9 @@ const TS_HOST = "lh-test.example.ts.net";
 const SECRET = randomBytes(32).toString("hex");
 const WINDOW = { "x-learnharness-desktop": SECRET };
 const SERVER = path.join(REPO_ROOT, ".next", "standalone", "server.js");
+// `next build` rewrites this tracked file for build types; `next dev` writes it back.
+const NEXT_ENV = path.join(REPO_ROOT, "next-env.d.ts");
+const nextEnv = fs.readFileSync(NEXT_ENV, "utf8");
 
 let root: string;
 let port: number;
@@ -129,6 +132,7 @@ before(async () => {
 
 after(async () => {
 	await stopDesktopServer();
+	fs.writeFileSync(NEXT_ENV, nextEnv);
 	if (root && process.env.LH_E2E_KEEP !== "1") fs.rmSync(root, { recursive: true, force: true });
 });
 

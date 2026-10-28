@@ -97,6 +97,11 @@ Safe:
   data folder (readable only by your user).
 
 Not safe, don't do it:
+- **Leaving `tailscale serve` on when you stop using remote access.** Serve
+  keeps forwarding your tailnet to the port, whatever program holds it. If you
+  turn remote access off, uninstall LearnHarness, or start another program on
+  that port (3000 is a common default for developer tools), first run
+  `tailscale serve --https=443 off`. Settings reminds you after **Turn off**.
 - **Tailscale Funnel** (`tailscale funnel`) puts the app on the public
   internet. Never use it for LearnHarness.
 - **Other tunnels or reverse proxies** (ngrok, cloudflared, nginx, Caddy) are
