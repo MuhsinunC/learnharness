@@ -20,6 +20,10 @@ import { inputTokens, maxOutputTokens, reply, requestTokens, startStubProvider, 
 
 const LIMIT = 40_960;
 const MAX_OUTPUT = 16_384;
+/** stub-t: LH-40's old tiny regime, a real 11,548 window with 2,048 max
+ *  output, under the same custom 1M window. */
+const TINY = 11_548;
+const REPLY_FLOOR = 1_024;
 const STUB = "openrouter";
 const SUMMARIZER = "You are the session-compaction summarizer";
 const SUMMARY = [
@@ -53,9 +57,10 @@ let rejections = 0;
 /** Turn requests to reject regardless of size (the Repair case). */
 let forcedRejections = 0;
 const responder: StubResponder = (req) => {
-	if (requestTokens(req) > LIMIT || (isTurnRequest(req) && forcedRejections > 0 && forcedRejections--)) {
+	const limit = req.model === "stub-t" ? TINY : LIMIT;
+	if (requestTokens(req) > limit || (isTurnRequest(req) && forcedRejections > 0 && forcedRejections--)) {
 		rejections++;
-		return reply.contextLength(LIMIT);
+		return reply.contextLength(limit);
 	}
 	if (!isTurnRequest(req)) return reply.text(SUMMARY);
 	const text = `Answering part ${lastPart(req)}. ${REPLY}`;
@@ -71,11 +76,15 @@ before(async () => {
 	const slot = { model: { provider: STUB, id: "stub-q" } };
 	server = await bootServer({
 		ticket: "lh-50",
-		providers: [{ id: STUB, baseUrl: stub.baseUrl, models: [{ id: "stub-q", contextWindow: LIMIT, maxTokens: MAX_OUTPUT }] }],
+		providers: [{
+			id: STUB,
+			baseUrl: stub.baseUrl,
+			models: [{ id: "stub-q", contextWindow: LIMIT, maxTokens: MAX_OUTPUT }, { id: "stub-t", contextWindow: TINY, maxTokens: 2_048 }],
+		}],
 		settings: {
 			version: 1,
 			models: { strong: slot, cheap: slot, vision: slot },
-			contextWindows: { [`${STUB}:stub-q`]: 1_000_000 },
+			contextWindows: { [`${STUB}:stub-q`]: 1_000_000, [`${STUB}:stub-t`]: 1_000_000 },
 			graph: { enabled: false },
 		},
 	});
@@ -205,4 +214,18 @@ test("one huge paste: the recovery's retry fits the window with the tool declara
 	const after = await turn(id, paste(3));
 	assert.ok(isReply(after.messages.at(-1)));
 	assert.equal(rejections, 1, "no later rejection");
+});
+
+test("a window too small for the prompt, the tool declarations and a reply: nothing is sent to be cut off, and the learner gets the explanation", async () => {
+	const id = await newChat("Tiny window");
+	await server.json(`/api/chats/${id}/settings`, { method: "PUT", body: { model: { provider: STUB, id: "stub-t" } } });
+	const start = stub.requests.length;
+	let c = await chat(id);
+	for (let part = 1; part <= 6 && !c.messages.at(-1)?.contextOverflow; part++) c = await turn(id, paste(part));
+	const sent = stub.requests.slice(start).filter((r) => r.model === "stub-t");
+	assert.ok(sent.length > 0);
+	for (const r of sent) assert.ok(maxOutputTokens(r) >= REPLY_FLOOR, `no request leaves its reply under ${REPLY_FLOOR} tokens (max_tokens ${maxOutputTokens(r)})`);
+	const failed = c.messages.at(-1)!;
+	assert.match(failed.errorMessage!, /^This chat is still too long for stub-t, even after condensing its older part\./, "the learner sees the explanation");
+	assert.match(failed.contextOverflow!.providerText, /^Not sent: this model's maximum context length is 11548 tokens/, "the last request was held back, not sent");
 });

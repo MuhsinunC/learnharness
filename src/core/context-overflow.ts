@@ -32,6 +32,13 @@ export function contextOverflowState(message: unknown): "repairable" | "unrecove
 	return isContextOverflow(m as AssistantMessage) || EXTRA_OVERFLOW_TEXT.some((p) => p.test(text)) ? "repairable" : null;
 }
 
+/** Is this error text a length rejection? The subscription transports
+ *  keep such text instead of their generic failure line (LH-50), so
+ *  recovery can act on it. */
+export function isContextOverflowText(text: string): boolean {
+	return contextOverflowState({ role: "assistant", stopReason: "error", errorMessage: text }) === "repairable";
+}
+
 /** The provider's own rejection text (never a server explanation). */
 export function overflowProviderText(message: unknown): string | undefined {
 	const m = message as MaybeMarked;

@@ -3,13 +3,17 @@ import {
 	clampThinkingLevel,
 	createModels,
 	getSupportedThinkingLevels,
+	normalizeContext,
 	type Api,
+	type Context,
 	type Model,
 	type Models,
 	type OpenRouterRouting,
 	type StreamFunction,
 } from "@earendil-works/pi-ai";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
+import { AssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import { OpenRouterRoutingSchema } from "@earendil-works/pi-ai/providers/compat-schema";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { Value } from "typebox/value";
@@ -23,6 +27,7 @@ import { e2eProviders } from "./e2e-providers.ts";
 import type { ChatGPTDispatchLifecycle } from "./chatgpt-request-cycle.ts";
 import { nativeSubscriptionId, nativeSubscriptionModel } from "./subscription-bridge.ts";
 import { nativeSubscriptionStream } from "./subscription-stream.ts";
+import { markUnadmittedUsage } from "./subscription-request-cycle.ts";
 
 /** App identity is immutable and shared by Models and every native Agent.
  * Agent's default Pi attribution otherwise overrides the Models identity. */
@@ -190,6 +195,41 @@ function maxOutputTokens(): number | undefined {
 	return value;
 }
 
+/** pi-ai's margin under the window: its max-tokens clamp leaves this
+ *  much free (api/simple-options.js CONTEXT_SAFETY_TOKENS). */
+const CONTEXT_SAFETY_TOKENS = 4096;
+
+/** The least reply room a request goes out with (LH-50). */
+const MIN_REPLY_TOKENS = 1024;
+
+/** The reply room pi-ai's max-tokens clamp leaves this request:
+ *  window − its estimate of the context (system prompt, tool
+ *  declarations, messages) − its safety margin. */
+function replyRoomTokens(model: Model<Api>, context: Context): number {
+	if (!(model.contextWindow > 0)) return Infinity;
+	return model.contextWindow - estimateContextTokens(normalizeContext(context)).tokens - CONTEXT_SAFETY_TOKENS;
+}
+
+/** A request whose reply would be cut off silently is held back as a
+ *  length rejection stating the window (LH-50): overflow recovery then
+ *  condenses the chat, or explains that nothing can (context-recovery). */
+function heldBackStream(model: Model<Api>, room: number, lifecycle?: ChatGPTDispatchLifecycle) {
+	const output = new AssistantMessageEventStream();
+	const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+	markUnadmittedUsage(usage);
+	lifecycle?.noDispatch("other");
+	output.push({
+		type: "error",
+		reason: "error",
+		error: {
+			role: "assistant", api: model.api, provider: model.provider, model: model.id, content: [], usage, stopReason: "error", timestamp: Date.now(),
+			errorMessage: `Not sent: this model's maximum context length is ${model.contextWindow} tokens, and this request would leave its reply ${Math.max(room, 0)} tokens.`,
+		},
+	});
+	output.end();
+	return output;
+}
+
 /** The production engine for a RESOLVED spec (model slots wave,
  *  2026-09-20): provider-aware catalog lookup + thinking clamp. The API
  *  key is resolved by pi-ai itself from the environment per request (the
@@ -235,6 +275,8 @@ export function piEngineForSpec(spec: ResolvedModelSpec, background: boolean | (
 			const streamModel = model !== catalogModel && matches ? model
 				: cap !== undefined && !matches && requestModel.maxTokens > cap
 					? { ...requestModel, maxTokens: cap } : requestModel;
+			const room = replyRoomTokens(streamModel, context);
+			if (room < Math.min(MIN_REPLY_TOKENS, streamModel.maxTokens)) return heldBackStream(streamModel, room, lifecycle);
 			const outputCeiling = cap === undefined ? undefined : Math.min(streamModel.maxTokens, cap);
 			return stream(streamModel, context, {
 				...options,
