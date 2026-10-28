@@ -699,7 +699,7 @@ export function AgentSection({
 						</SettingsRow>
 					);
 				})}
-				<ImageSupportRow catalog={catalog} />
+				<ImageSupportRow catalog={catalog ?? null} />
 			</SettingsGroup>
 
 			<SettingsGroup label="Tools" testid="group-tools">
