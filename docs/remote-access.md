@@ -116,15 +116,19 @@ Safe:
   websites don't get the cookie, but a page from another program serving
   on `127.0.0.1` (any port) counts as the same site and does, so
   LearnHarness refuses every change (and the login and logout forms) that
-  doesn't come from its own pages.
+  doesn't come from its own pages, and any request from another page to the
+  parts that act on the computer (the Claude Code check runs the program,
+  even just to read its status).
 - Wrong passwords are rate-limited: five failures lock that device out for
   15 minutes, and thirty failed logins in total lock every new login out
   for 15 minutes (devices already logged in keep working). A wrong current
   password typed in a logged-in browser (next to an API key, or to change or
-  turn off remote access) counts only against that device, so one device
-  can't lock the others out. The limit goes by the address
-  `tailscale serve` reports for the phone; a program on the computer itself
-  can claim any address, which is why the total cap exists for logins.
+  turn off remote access) counts only against that browser's login: five
+  wrong ones lock it for 15 minutes, and other devices aren't affected.
+  Logins are limited by the address `tailscale serve` reports for the
+  phone; a program on the computer itself can claim any address, which is
+  why the total cap exists for logins. A password change also ends any
+  login that was still being checked against the old password.
 - The first password can only be set in the desktop app or with the terminal
   command, never by a web page. Changing it from a browser needs the current
   password.

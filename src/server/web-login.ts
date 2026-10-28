@@ -113,25 +113,42 @@ function serial<T>(work: () => Promise<T>): Promise<T> {
 	return run;
 }
 
-/** Sets or replaces the password and revokes every session. */
-export async function setPassword(password: string): Promise<void> {
+/** Which password a check matched (its stored hash): a write or session
+ * that follows the check goes ahead only while that password is current,
+ * so one racing a password change cannot outlive it. */
+export type PasswordProof = string;
+
+/** The current password is still the one `proof` matched (none: no check needed). */
+function stillCurrent(proof: PasswordProof | undefined): boolean {
+	return proof === undefined || readRecord()?.password.hash === proof;
+}
+
+/** Sets or replaces the password and revokes every session. With `proof`,
+ * only while the password it matched is still current (false otherwise). */
+export async function setPassword(password: string, proof?: PasswordProof): Promise<boolean> {
 	const salt = randomBytes(16);
 	const hash = await serial(() => derive(password, salt, KDF));
+	if (!stillCurrent(proof)) return false;
 	writeRecord({ version: 1, password: { salt: salt.toString("base64"), hash: hash.toString("base64"), N: KDF.N, r: KDF.r, p: KDF.p }, sessions: [] });
+	return true;
 }
 
-/** Turns remote access off: the password and every session go. */
-export function clearPassword(): void {
+/** Turns remote access off: the password and every session go. With
+ * `proof`, only while the password it matched is still current. */
+export function clearPassword(proof?: PasswordProof): boolean {
+	if (!stillCurrent(proof)) return false;
 	fs.rmSync(loginFile(), { force: true });
 	cached = null;
+	return true;
 }
 
-export async function verifyPassword(password: string): Promise<boolean> {
+/** The proof for a right password, else null. */
+export async function verifyPassword(password: string): Promise<PasswordProof | null> {
 	const record = readRecord();
-	if (!record) return false;
+	if (!record) return null;
 	const want = Buffer.from(record.password.hash, "base64");
 	const got = await serial(() => derive(password, Buffer.from(record.password.salt, "base64"), record.password));
-	return got.length === want.length && timingSafeEqual(got, want);
+	return got.length === want.length && timingSafeEqual(got, want) ? record.password.hash : null;
 }
 
 const digest = (token: string) => createHash("sha256").update(token).digest("hex");
@@ -142,10 +159,11 @@ const digest = (token: string) => createHash("sha256").update(token).digest("hex
 const hostKey = (headers: Headers) => (headers.get("host") ?? "").trim().toLowerCase();
 
 /** A new session token for this request's Host (only its digest is
- * stored), or null when the password was removed meanwhile. */
-export function createSession(headers: Headers): string | null {
+ * stored), or null when the password `proof` matched was changed or
+ * removed meanwhile. */
+export function createSession(headers: Headers, proof: PasswordProof): string | null {
 	const record = editableRecord();
-	if (!record) return null;
+	if (!record || record.password.hash !== proof) return null;
 	const token = randomBytes(32).toString("base64url");
 	record.sessions.push({ id: digest(token), expires: Date.now() + SESSION_MS, host: hostKey(headers) });
 	writeRecord(record);
@@ -281,12 +299,19 @@ export function chargeLoginAttempt(key: string, now = Date.now(), global = true)
  * forwards it. */
 export const CURRENT_PASSWORD_HEADER = "x-lh-current-password";
 
-/** Checks the current password a session re-entered, charged to this
- * client's login rate limit. Not to the global cap: the sender is already
- * logged in, and failures charged there would let one device lock every
- * other out of /login. */
+/** The bucket a session's re-entered current passwords are charged to:
+ * its own token, so one cookie gets five tries per window whatever
+ * address it claims, and another device's session keeps its own. */
+export function sessionAttemptKey(headers: Headers): string {
+	return `session:${digest(sessionToken(headers) ?? "")}`;
+}
+
+/** Checks the current password a session re-entered, charged to that
+ * session (sessionAttemptKey). Not to the global cap: the sender is
+ * already logged in, and failures charged there would let one device
+ * lock every other out of /login. */
 export async function confirmCurrentPassword(headers: Headers): Promise<{ ok: true } | { ok: false; retryAfter?: number }> {
-	const key = clientKey(headers);
+	const key = sessionAttemptKey(headers);
 	const wait = loginRetryAfter(key, Date.now(), false);
 	if (wait > 0) return { ok: false, retryAfter: wait };
 	// URI-encoded by the client: header values must be ASCII, passwords need not be.
@@ -294,9 +319,10 @@ export async function confirmCurrentPassword(headers: Headers): Promise<{ ok: tr
 	try { password = decodeURIComponent(headers.get(CURRENT_PASSWORD_HEADER) ?? ""); } catch { /* malformed: a wrong password */ }
 	if (password === "") return { ok: false };
 	const release = chargeLoginAttempt(key, Date.now(), false);
-	if (password === null || !(await verifyPassword(password))) return { ok: false };
+	const proof = password === null ? null : await verifyPassword(password);
+	if (!proof) return { ok: false };
 	release();
-	return { ok: true };
+	return stillCurrent(proof) ? { ok: true } : { ok: false };
 }
 
 /** A same-origin path to return to after login, printable ASCII only (it

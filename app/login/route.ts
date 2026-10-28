@@ -79,10 +79,11 @@ export async function POST(req: Request): Promise<Response> {
 	if (wait > 0) return page(429, next, "Too many failed attempts. Try again later.", { "Retry-After": String(wait) });
 	const release = chargeLoginAttempt(key);
 	const password = form?.get("password");
-	if (typeof password !== "string" || !password || !(await verifyPassword(password))) return page(401, next, "Wrong password.");
+	const proof = typeof password === "string" && password ? await verifyPassword(password) : null;
+	if (!proof) return page(401, next, "Wrong password.");
 	release();
-	// Remote access was turned off while the password was being checked.
-	const token = createSession(req.headers);
-	if (!token) return page(403, next, null);
+	// The password was changed or removed while this one was being checked.
+	const token = createSession(req.headers, proof);
+	if (!token) return passwordConfigured() ? page(401, next, "Wrong password.") : page(403, next, null);
 	return redirect(next, { "Set-Cookie": sessionCookie(token, req.headers) });
 }
