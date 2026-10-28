@@ -10,6 +10,7 @@ import { createSubscriptions } from "../../electron/subscriptions.cjs";
 import { chatGPTControl } from "../../electron/chatgpt-ipc.cjs";
 import { subscriptionControl } from "../../electron/subscription-ipc.cjs";
 import { emit } from "../core/events.ts";
+import { e2eChatGPTBaseUrl } from "../agent/e2e-providers.ts";
 import type { ChatGPTStatus } from "../core/contracts/chatgpt.ts";
 import type { NativeSubscriptionSnapshot } from "../core/contracts/subscriptions.ts";
 import { configureWebSubscriptionRuntime, publishWebSubscriptionPacket, webSubscriptionsEnabled, type SubscriptionRuntimeChannel as Channel, type SubscriptionRuntimePacket as Packet } from "../agent/subscription-runtime.ts";
@@ -56,6 +57,7 @@ export function createWebSubscriptionOwner(options: {
 		store: options.chatgptStore ?? fileStore(path.join(options.directory, "chatgpt-credentials.json")),
 		openExternal,
 		onChange: (packet?: Packet) => { if (packet) notify("lh:chatgpt", packet); },
+		resource: e2eChatGPTBaseUrl(),
 	});
 	const native = createSubscriptions({
 		directory: options.directory, sdk: options.sdk, loadSDK, openExternal,

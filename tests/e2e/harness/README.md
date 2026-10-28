@@ -44,6 +44,14 @@ with fast refresh.
   limit.
   `stub.requests` records every request and `stub.setResponder()` swaps the
   script mid-file.
+  The stub also speaks the Responses API (`/v1/responses`, text replies)
+  that ChatGPT uses. Pass `startStubProvider(responder, { chatgptModels })`
+  and boot with `LH_E2E_CHATGPT_BASE_URL=<stub.baseUrl>`: the web-mode
+  ChatGPT owner then reads its account catalog (`GET /v1/models`) and sends
+  its turns to the stub. The variable is honoured only under `LH_E2E=1`
+  and only for a `http://127.0.0.1:<port>/v1` URL. The ChatGPT credential
+  file is `chatgpt-credentials.json` next to `LH_AUTH_FILE`;
+  `subscription-held-back.e2e.ts` writes a fake one.
 - `server.ts`: `bootServer({ ticket, providers, settings, env? })` returns
   `{ url, dataDir, api, json, log, stop }`. It writes `settings` to a fresh
   `LH_DATA_DIR` under `~/.cache/lh-e2e/<ticket>/`, strips proxy and credential
