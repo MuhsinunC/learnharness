@@ -499,8 +499,12 @@ test("(h) a refused repair shows the server's reason, then the chat says plainly
 	breakChat(id, false); // the learner's one message and its rejection: nothing older to condense
 	const page = await openChat(id, '[data-testid="repair-chat"]');
 	try {
-		await (await sidebarRow(page, "Nothing to drop")).click({ button: "right" });
-		await page.waitForSelector('[data-testid="ctx-repair"]');
+		// The page waited for the banner's hydration, not the sidebar's: a
+		// right-click before the row hydrates opens no menu, so retry it.
+		await until(async () => {
+			await (await sidebarRow(page, "Nothing to drop")).click({ button: "right" });
+			return page.waitForSelector('[data-testid="ctx-repair"]', { timeout: 2_000 }).catch(() => null);
+		}, "the session menu's Repair", 60_000, 500);
 		assert.equal((await clickForPost(page, '[data-testid="ctx-repair"]', "/repair")).status(), 422);
 		await page.waitForFunction(
 			() => document.querySelector('[data-testid="ctx-repair-error"]')?.textContent === "Nothing older in this chat can be condensed.",
