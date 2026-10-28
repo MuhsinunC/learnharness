@@ -35,12 +35,13 @@ thinking level doesn't affect the window.
 | Consumer | Path |
 |---|---|
 | Composer footer "used / window" | `/api/models` `contextWindow` (custom over default) → `catalogLimits` → stats bar |
-| Compaction trigger, `min(threshold, window − 16k)` | the engine model's `contextWindow` (below) |
+| Compaction trigger, `min(threshold, window − reply reserve)` (docs/context-recovery.md, "The reply's room") | the engine model's `contextWindow` (below) |
 | Activity dock job limits | `catalogContextLimits()` |
 | Engine model, and pi-ai's max-tokens clamp (`window − context − 4096`) | `ResolvedModelSpec.contextWindow`, set in `src/server/chat-handler.ts` (`withContextWindow`) from the same settings read as the spec, for the turn, the compaction kick and every role engine (jobs, extraction) → `piEngineForSpec` in `src/agent/models.ts`; native subscription transports carry it across (`src/agent/subscription-stream.ts`). The claude-code stream has no max-tokens surface |
 
 With the default 150k threshold, a window **above** the default doesn't move
-the compaction trigger. Only a window below about 166k lowers it. To compact
+the compaction trigger. Only a window below the threshold plus the reply's room
+(about 170k for a 16k max output) lowers it. To compact
 later on a bigger window, raise Settings → Agent → Context → Compaction
 threshold as well.
 

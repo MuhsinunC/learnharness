@@ -48,6 +48,7 @@ import { emit } from "../core/events.ts";
 import type { ChatStore } from "../core/ports.ts";
 import {
 	heuristicContextTokens,
+	outputReserveTokens,
 	saveCompactionMarker,
 	sessionKind,
 	subagentSummarizer,
@@ -68,9 +69,9 @@ function learnedContextLimit(modelId: string): number | undefined {
 
 /** Remember the limit the chat's newest rejection states for its model —
  *  its own settings key, never the user's window. */
-export function learnStatedLimit(engine: PiEngine, messages: readonly LhMessage[]): void {
+export function learnStatedLimit(model: { provider: string; id: string }, messages: readonly LhMessage[]): void {
 	const stated = reportedContextLimit(lastOverflowText(messages));
-	const modelId = modelIdOf(engine);
+	const modelId = `${model.provider}:${model.id}`;
 	if (!stated || learnedContextLimit(modelId) === stated) return;
 	updateSettings((record) => ({ ...record, learnedContextLimits: { ...record.learnedContextLimits, [modelId]: stated } }));
 }
@@ -78,8 +79,10 @@ export function learnStatedLimit(engine: PiEngine, messages: readonly LhMessage[
 /** THE WINDOW SEAM: the window this app may trust for the engine's
  *  model — LH-38's per-(provider, model) custom window when set (the spec
  *  carries it: chat-handler's withContextWindow), else the catalog
- *  default; never above a limit the provider has stated. The threshold
- *  compaction and recovery both read it here. */
+ *  default; never above a limit the provider has stated (the engine's
+ *  own window already honours one learned before it was built; this
+ *  read also covers one learned since). The threshold compaction and
+ *  recovery both read it here. */
 export function contextWindowFor(engine: PiEngine): number | undefined {
 	const learned = learnedContextLimit(modelIdOf(engine));
 	if (learned === undefined) return engine.model.contextWindow;
@@ -87,7 +90,8 @@ export function contextWindowFor(engine: PiEngine): number | undefined {
 }
 
 /** Share of the target window a recovered request may fill: the rest is
- *  the tool declarations, the reply's max_tokens, and chars/4's error. */
+ *  the tool declarations, the reply's max_tokens, and chars/4's error.
+ *  Never more than leaves the reply its room (outputReserveTokens). */
 const RECOVERY_FILL = 0.6;
 
 /** Per-line cap for the learner's dropped lines in the fallback marker. */
@@ -166,6 +170,8 @@ function droppedSpanSummary(record: ChatRecord, previous: LhMarkerMessage | null
 export interface RecoveryDeps extends Omit<CompactionDeps, "thresholdTokens" | "canStart" | "keepRecentTokens"> {
 	/** The window to fit (recoveryWindowTokens). */
 	windowTokens: number;
+	/** The input share of it: the fill, less the reply's room. */
+	fitTokens: number;
 	/** The rejected request's estimate (chars/4), measured once. */
 	failedRequestTokens: number;
 	/** The learner-facing line the moment divider shows. */
@@ -183,6 +189,7 @@ export function recoveryDeps(chatStore: ChatStore, record: ChatRecord, engine: P
 	const kind = sessionKind(record);
 	const systemPromptTokens = systemPromptTokensFor(kind);
 	const failedRequestTokens = heuristicContextTokens(record.messages, systemPromptTokens);
+	const windowTokens = recoveryWindowTokens(lastOverflowText(record.messages), contextWindowFor(engine), failedRequestTokens);
 	return {
 		chatStore,
 		engine,
@@ -190,7 +197,8 @@ export function recoveryDeps(chatStore: ChatStore, record: ChatRecord, engine: P
 		kind,
 		systemPromptTokens,
 		failedRequestTokens,
-		windowTokens: recoveryWindowTokens(lastOverflowText(record.messages), contextWindowFor(engine), failedRequestTokens),
+		windowTokens,
+		fitTokens: Math.max(Math.min(Math.floor(windowTokens * RECOVERY_FILL), windowTokens - outputReserveTokens(windowTokens, engine.model.maxTokens)), 1),
 		notice,
 	};
 }
@@ -198,6 +206,7 @@ export function recoveryDeps(chatStore: ChatStore, record: ChatRecord, engine: P
 /** The plain explanations that replace a rejection recovery could not fix. */
 export const overflowExplanation = {
 	stillTooLong: (model: string) => `This chat is still too long for ${model}, even after condensing its older part. Start a new session, or pick a model with a larger context window.`,
+	retryFailed: (model: string) => `This chat is still too long for ${model} after condensing its older part once. Press Repair this chat to condense it further, or start a new session.`,
 	backgroundOff: (model: string) => `This chat grew too long for ${model}. Condensing it automatically needs background use for this connection: turn background use on, or press Repair this chat.`,
 	notCondensed: (model: string) => `This chat grew too long for ${model} and could not be condensed automatically. Press Repair this chat to condense it.`,
 };
@@ -218,21 +227,40 @@ export function explainOverflow(chatStore: ChatStore, chatId: string, explanatio
 	emit("record-changed", { chatId });
 }
 
+/** Where a recovery may cut: in what precedes the trailing rejections
+ *  (cutting AT one would push the learner's last message into the
+ *  summary), after the active marker's kept boundary. cutFor(keep) is
+ *  null when no cut keeping `keep` tokens lies in between. */
+function cutWithin(messages: readonly LhMessage[]) {
+	let end = messages.length;
+	while (end > 0 && contextOverflowState(messages[end - 1]) !== null) end--;
+	const base = messages.slice(0, end);
+	const previous = activeCompactionOf(messages);
+	const floor = previous ? Math.max(keptIndexFor(messages, previous), 0) : 0;
+	const cutFor = (keep: number) => {
+		const cut = compactionCutIndex(base, Math.max(Math.floor(keep), 1));
+		return cut > floor && cut < base.length ? cut : null;
+	};
+	return { base, previous, floor, cutFor };
+}
+
+/** Can a recovery still shrink this chat's request (LH-50)? Something
+ *  older is left to condense, and the system prompt alone fits. A failed
+ *  retry alone is not hopeless — it may have overrun an output budget —
+ *  so only a chat where this is false is marked unrecoverable. */
+export function condensable(deps: RecoveryDeps, messages: readonly LhMessage[]): boolean {
+	return deps.systemPromptTokens < deps.fitTokens && cutWithin(messages).cutFor(1) !== null;
+}
+
 /** One recovery compaction. The caller holds the compaction gate
  *  (holdCompactionGate). */
 export async function recoverContext(deps: RecoveryDeps, chatId: string): Promise<RecoveryOutcome> {
 	const record = deps.chatStore.getChat(chatId);
 	if (!record) return "unchanged";
 	const messages = record.messages;
-	// The cut walks what precedes the trailing rejections: cutting AT one
-	// would push the learner's last message into the summary.
-	let end = messages.length;
-	while (end > 0 && contextOverflowState(messages[end - 1]) !== null) end--;
-	const base = messages.slice(0, end);
-	const previous = activeCompactionOf(messages);
-	const floor = previous ? Math.max(keptIndexFor(messages, previous), 0) : 0;
+	const { base, previous, floor, cutFor } = cutWithin(messages);
 
-	const fit = Math.floor(deps.windowTokens * RECOVERY_FILL);
+	const fit = deps.fitTokens;
 	const budget = Math.max(fit - deps.systemPromptTokens, 0);
 	const topic = lessonTopic(record);
 	const markerAt = (cut: number, body: string) => {
@@ -248,10 +276,6 @@ export async function recoverContext(deps: RecoveryDeps, chatId: string): Promis
 	// The next request: system prompt + the marker (the summary head) + the kept tail.
 	const fits = (marker: LhMarkerMessage, cut: number) =>
 		deps.systemPromptTokens + estimateMessageTokens(marker) + estimateTokens(messages.slice(cut)) <= fit;
-	const cutFor = (keep: number) => {
-		const cut = compactionCutIndex(base, Math.max(Math.floor(keep), 1));
-		return cut > floor && cut < base.length ? cut : null;
-	};
 
 	emit("compaction-changed", { chatId, running: true });
 	try {

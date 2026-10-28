@@ -49,7 +49,7 @@ import { registerTurn, rememberTurnFailure, unregisterTurn } from "./turn-runs.t
 import { persistTurn, triggerExtraction, TurnPersistenceError } from "./turn-service.ts";
 import { hasProbeDone, danglingQuestionOf } from "../core/native-messages.ts";
 import { awaitCompaction, ensureCompacted, kickCompaction, effectiveThresholdTokens, holdCompactionGate, keepRecentTokensFor, sessionKind, systemPromptTokensFor } from "./compaction.ts";
-import { contextWindowFor, explainOverflow, learnStatedLimit, overflowExplanation, recoverContext, recoveryAttempted, recoveryDeps } from "./context-recovery.ts";
+import { condensable, contextWindowFor, explainOverflow, learnStatedLimit, overflowExplanation, recoverContext, recoveryAttempted, recoveryDeps } from "./context-recovery.ts";
 import { contextOverflowState } from "../core/context-overflow.ts";
 import { refreshConnectionCatalog } from "./model-catalog.ts";
 import { emit } from "../core/events.ts";
@@ -155,16 +155,26 @@ function resolveEngine(role: ModelRole): PiEngine | undefined {
 	if (spec && !providerKeyPresent(spec.provider)) {
 		throw new ProviderKeyMissingError(spec.provider, [ROLE_SLOT[role]]);
 	}
-	return spec ? piEngineForSpec(withContextWindow(spec, record?.contextWindows)) : undefined;
+	return spec ? piEngineForSpec(withContextWindow(spec, record)) : undefined;
 }
 
-/** The spec with its pair's custom context window (LH-38), from the same
- *  settings read that resolved it — every engine built here carries the
- *  window, so the engine model, pi-ai's max-tokens clamp and the
+/** The spec with its pair's custom context window (LH-38) and the limit
+ *  its provider stated (LH-40), from the same settings read that resolved
+ *  it — every engine built here carries the window, capped at that limit
+ *  (LH-50), so the engine model, pi-ai's max-tokens clamp and the
  *  compaction trigger agree. */
-function withContextWindow(spec: ResolvedModelSpec, windows: Record<string, number> | undefined): ResolvedModelSpec {
-	const contextWindow = windows?.[contextWindowKey(spec.provider, spec.id)];
-	return contextWindow === undefined ? spec : { ...spec, contextWindow };
+function withContextWindow(
+	spec: ResolvedModelSpec,
+	settings: { contextWindows?: Record<string, number>; learnedContextLimits?: Record<string, number> } | null | undefined,
+): ResolvedModelSpec {
+	const key = contextWindowKey(spec.provider, spec.id);
+	const contextWindow = settings?.contextWindows?.[key];
+	const contextLimit = settings?.learnedContextLimits?.[key];
+	return {
+		...spec,
+		...(contextWindow !== undefined ? { contextWindow } : {}),
+		...(contextLimit !== undefined ? { contextLimit } : {}),
+	};
 }
 
 setJobRespawn((jobId) => void jobRunner.runJob(jobId));
@@ -187,13 +197,21 @@ function recoverFromOverflow(
 	// plain explanation (Repair stays offered unless nothing can help).
 	const explain = (text: (model: string) => string, model: string, unrecoverable = false) =>
 		explainOverflow(stores.chatStore, chatId, text(model), unrecoverable);
+	// Learn first: the summarizer's engine then runs at the stated limit.
+	learnStatedLimit(conversation, record.messages);
 	let engine: PiEngine;
-	try { engine = piEngineForSpec(conversation, true); } catch { return explain(overflowExplanation.notCondensed, conversation.id); }
+	try { engine = piEngineForSpec(withContextWindow(conversation, stores.settingsStore.readSettings()), true); }
+	catch { return explain(overflowExplanation.notCondensed, conversation.id); }
 	const modelName = engine.model.name || engine.model.id;
-	learnStatedLimit(engine, record.messages);
-	if (recoveryAttempted(record.messages)) return explain(overflowExplanation.stillTooLong, modelName, true);
-	if (!connectionBackgroundAllowed(conversation.provider)) return explain(overflowExplanation.backgroundOff, modelName);
 	const deps = recoveryDeps(stores.chatStore, record, engine, `This chat had grown too long for ${modelName}; I condensed the older part and continued.`);
+	// The retry failed too: unrecoverable only when nothing is left to
+	// condense; otherwise Repair stays offered (LH-50).
+	if (recoveryAttempted(record.messages)) {
+		return condensable(deps, record.messages)
+			? explain(overflowExplanation.retryFailed, modelName)
+			: explain(overflowExplanation.stillTooLong, modelName, true);
+	}
+	if (!connectionBackgroundAllowed(conversation.provider)) return explain(overflowExplanation.backgroundOff, modelName);
 	const recover = () => holdCompactionGate(chatId, () => recoverContext(deps, chatId));
 	void (async () => {
 		// A compaction already holding the gate: wait for it (bounded), once.
@@ -231,14 +249,14 @@ export async function handleRepairRequest(chatId: string): Promise<Response> {
 			: "This chat is not broken: its last reply did not fail for length.";
 		return Response.json({ error }, { status: 409 });
 	}
-	const effective = effectiveSettings();
-	const spec = resolveConversationSpec(record.settings, effective.models.strong);
+	const spec = resolveConversationSpec(record.settings, effectiveSettings().models.strong);
 	if (!spec) return Response.json(modelsNotConfigured(["strong"]), { status: 503 });
+	learnStatedLimit(spec, record.messages);
+	// Read after learning: the engine runs at the stated limit.
 	let engine: PiEngine;
-	try { engine = piEngineForSpec(withContextWindow(spec, effective.contextWindows), false); }
+	try { engine = piEngineForSpec(withContextWindow(spec, effectiveSettings()), false); }
 	catch { return Response.json({ error: "The selected model is unavailable." }, { status: 503 }); }
 	const modelName = engine.model.name || engine.model.id;
-	learnStatedLimit(engine, record.messages);
 	const notice = `This chat had grown too long for ${modelName}; I condensed the older part.`;
 	const run = holdCompactionGate(chatId, () => recoverContext(recoveryDeps(stores.chatStore, record, engine, notice), chatId));
 	if (!run) return Response.json({ error: "This session is already being condensed. Try again in a moment." }, { status: 409 });
@@ -304,7 +322,7 @@ export async function handleChatInput(
 		console.info(`[chat ${chatId}] turn refused — ${JSON.stringify(envelope)}`);
 		return Response.json(envelope, { status: 503 });
 	}
-	const conversation = withContextWindow(resolved, effective.contextWindows);
+	const conversation = withContextWindow(resolved, effective);
 
 	// THE KEY-PRESENCE GATE (provider-key interlude, owner, 2026-09-25): a
 	// pinned model is not enough — its PROVIDER's key must be present, or
@@ -362,7 +380,7 @@ export async function handleChatInput(
 			canStart: () => connectionBackgroundAllowed(conversation.provider),
 			modelId: modelIdForCompaction,
 			kind: sessionKind(record),
-			thresholdTokens: effectiveThresholdTokens(effective.compaction?.thresholdTokens, compactionWindow),
+			thresholdTokens: effectiveThresholdTokens(effective.compaction?.thresholdTokens, compactionWindow, conversationEngine.model.maxTokens),
 			keepRecentTokens: keepRecentTokensFor(compactionWindow),
 			systemPromptTokens: systemPromptTokensFor(sessionKind(record)),
 		},
@@ -712,7 +730,7 @@ export async function handleChatInput(
 						const spec = resolveConversationSpec(stores.chatStore.getChat(chatId)?.settings, fresh.models.strong);
 						if (!spec || !connectionBackgroundAllowed(spec.provider)) return null;
 						let kickEngine: PiEngine;
-						try { kickEngine = piEngineForSpec(withContextWindow(spec, fresh.contextWindows), true); } catch { return null; }
+						try { kickEngine = piEngineForSpec(withContextWindow(spec, fresh), true); } catch { return null; }
 						const kickModelId = `${kickEngine.model.provider}:${kickEngine.model.id}`;
 						const freshRecord = stores.chatStore.getChat(chatId);
 						if (!freshRecord) return null;
@@ -722,7 +740,7 @@ export async function handleChatInput(
 							canStart: () => connectionBackgroundAllowed(spec.provider),
 							modelId: kickModelId,
 							kind: sessionKind(freshRecord),
-							thresholdTokens: effectiveThresholdTokens(fresh.compaction?.thresholdTokens, contextWindowFor(kickEngine)),
+							thresholdTokens: effectiveThresholdTokens(fresh.compaction?.thresholdTokens, contextWindowFor(kickEngine), kickEngine.model.maxTokens),
 							keepRecentTokens: keepRecentTokensFor(contextWindowFor(kickEngine)),
 							systemPromptTokens: systemPromptTokensFor(sessionKind(freshRecord)),
 						};
