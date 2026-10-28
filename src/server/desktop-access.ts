@@ -61,7 +61,8 @@ export function desktopPageAuthorized(
  *     so a session writes a key (a value, never a URL) only with the
  *     current password re-entered (proxy.ts checks it).
  * Every route must be listed: web-login.e2e.ts fails on one that is not,
- * so a new route is classified before it ships. */
+ * so a new route is classified before it ships, and proxy.ts refuses a
+ * session any /api path that matches no entry. */
 export const API_ROUTES = {
 	"/api/activity": "session",
 	"/api/activity/abort": "session",
@@ -114,23 +115,23 @@ const ROUTE_PATTERNS = Object.entries(API_ROUTES).map(([route, kind]) => ({
 }));
 const STRICTNESS: Record<APIRouteClass, number> = { session: 0, "key-write": 1, computer: 2 };
 
-/** The class of the route a path reaches, or null for no route. A path
- * that fits several patterns (attachments/file and attachments/[id]) gets
- * the strictest, so router precedence never matters. */
-export function apiRouteClass(path: string): APIRouteClass | null {
-	const at = routePath(path);
+/** The class of the route a routePath() reaches, or null for no route
+ * (proxy.ts refuses those to a session). A path that fits several patterns
+ * (attachments/file and attachments/[id]) gets the strictest, so router
+ * precedence never matters. */
+export function apiRouteClass(route: string): APIRouteClass | null {
 	let found: APIRouteClass | null = null;
-	for (const { kind, re } of ROUTE_PATTERNS) if (re.test(at) && (found === null || STRICTNESS[kind] > STRICTNESS[found])) found = kind;
+	for (const { kind, re } of ROUTE_PATTERNS) if (re.test(route) && (found === null || STRICTNESS[kind] > STRICTNESS[found])) found = kind;
 	return found;
 }
 
 /** A request a session may not send once a password exists (API_ROUTES). */
-export function computerOnlyRequest(method: string, path: string, desktop: boolean): boolean {
-	return apiRouteClass(path) === "computer" || (desktop && keyWriteRequest(method, path));
+export function computerOnlyRequest(method: string, kind: APIRouteClass | null, desktop: boolean): boolean {
+	return kind === "computer" || (desktop && keyWriteRequest(method, kind));
 }
 
-export function keyWriteRequest(method: string, path: string): boolean {
-	return apiRouteClass(path) === "key-write" && method !== "GET" && method !== "HEAD" && method !== "OPTIONS";
+export function keyWriteRequest(method: string, kind: APIRouteClass | null): boolean {
+	return kind === "key-write" && method !== "GET" && method !== "HEAD" && method !== "OPTIONS";
 }
 
 /** The one spelling of a request path that proxy.ts tests: percent-decoded

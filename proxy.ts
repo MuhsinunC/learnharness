@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { computerOnlyMessage } from "./src/core/remote-access.ts";
-import { computerOnlyRequest, desktopAPIAuthorized, desktopPageAuthorized, isDesktopServer, keyWriteRequest, routePath } from "./src/server/desktop-access.ts";
+import { apiRouteClass, computerOnlyRequest, desktopAPIAuthorized, desktopPageAuthorized, isDesktopServer, keyWriteRequest, routePath } from "./src/server/desktop-access.ts";
 import { ACCESS_HEADER, confirmCurrentPassword, CURRENT_PASSWORD_HEADER, decideAccess, sameOriginRequest, type Access } from "./src/server/web-login.ts";
 
 /** Applies to every API method, including SSE and spending/settings routes.
@@ -19,12 +19,15 @@ export function proxy(request: NextRequest) {
 	const { pathname, search } = request.nextUrl;
 	const route = routePath(pathname);
 	const api = route.startsWith("/api");
+	const kind = api ? apiRouteClass(route) : null;
 	// CSRF, in both modes and for every kind of access: a page on another
 	// origin (another server on 127.0.0.1 is the same site, so the session
-	// cookie goes along) cannot change anything. Origin, else
-	// Sec-Fetch-Site decides; a client that sends neither (curl, the
-	// desktop main process) is not a browser page and passes as before.
-	if (api && !["GET", "HEAD", "OPTIONS"].includes(request.method) && !sameOriginRequest(request.headers)) {
+	// cookie goes along) cannot change anything, nor reach a route that acts
+	// on the computer by any method (GET /api/claude-code runs the
+	// executable). Origin, else Sec-Fetch-Site decides; a client that sends
+	// neither (curl, the desktop main process) is not a browser page and
+	// passes as before.
+	if (api && (kind === "computer" || !["GET", "HEAD", "OPTIONS"].includes(request.method)) && !sameOriginRequest(request.headers)) {
 		return NextResponse.json({ error: "Change LearnHarness only from its own pages." }, { status: 403, headers: { "Cache-Control": "no-store" } });
 	}
 	let access: Access | null;
@@ -44,13 +47,18 @@ export function proxy(request: NextRequest) {
 	}
 	// Sessions exist only once a password is set (web-login.ts), so this never
 	// changes anything without one.
-	if (access === "session" && computerOnlyRequest(request.method, route, isDesktopServer())) {
+	// A session reaches only classified routes (API_ROUTES): a spelling the
+	// table does not know would be a 404 anyway, so it never passes through.
+	if (access === "session" && api && kind === null) {
+		return NextResponse.json({ error: "No such API route." }, { status: 404, headers: { "Cache-Control": "no-store" } });
+	}
+	if (access === "session" && computerOnlyRequest(request.method, kind, isDesktopServer())) {
 		return NextResponse.json({ error: computerOnlyMessage(isDesktopServer()), computerOnly: true }, { status: 403, headers: { "Cache-Control": "no-store" } });
 	}
 	if (access) headers.set(ACCESS_HEADER, access);
 	// Web mode, password set: a session swaps or deletes a key only with the
 	// current password re-entered, so a stolen cookie alone cannot.
-	if (access === "session" && !isDesktopServer() && keyWriteRequest(request.method, route)) {
+	if (access === "session" && !isDesktopServer() && keyWriteRequest(request.method, kind)) {
 		return confirmCurrentPassword(request.headers).then((result) => result.ok
 			? NextResponse.next({ request: { headers } })
 			: NextResponse.json(
@@ -71,11 +79,11 @@ export function proxy(request: NextRequest) {
 
 /** The installable-app files (LH-46): browsers fetch the manifest and its
  * icons without cookies even when logged in, so the login wall lets these
- * through. GET and HEAD only, exact paths plus the /pwa/ folder, and only
- * in their plain spelling (the raw path already equals routePath()). */
+ * through. GET and HEAD only, these exact files, and only in their plain
+ * spelling (the raw path already equals routePath()). */
+const PUBLIC_ASSETS = new Set(["/manifest.webmanifest", "/apple-icon.png", "/pwa/icon-192.png", "/pwa/icon-512.png", "/pwa/icon-maskable-512.png"]);
 function publicAsset(method: string, pathname: string, route: string): boolean {
-	if ((method !== "GET" && method !== "HEAD") || pathname !== route) return false;
-	return route === "/manifest.webmanifest" || route === "/apple-icon.png" || route.startsWith("/pwa/");
+	return (method === "GET" || method === "HEAD") && pathname === route && PUBLIC_ASSETS.has(route);
 }
 
 export const config = { matcher: "/((?!_next/).*)" };
