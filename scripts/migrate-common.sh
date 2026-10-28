@@ -250,7 +250,15 @@ ship_running() {
         esac
     fi
     processes comm > "$tmp/ship-comm" || fail "Could not read the process listing. $state_msg"
-    if awk '{sub(/^[[:space:]]*[0-9]+[[:space:]]+/,"");if($0 ~ /\/ShipIt$/)found=1}END{exit !found}' "$tmp/ship-comm"; then return 0; fi
+    # Squirrel runs ShipIt from the updating app's own Squirrel.framework, so other apps'
+    # ShipIt never count: only one inside a LearnHarness.app or a bundle with our id.
+    while IFS= read -r line; do
+        [[ $line =~ ^[[:space:]]*[0-9]+[[:space:]]+(/.*/ShipIt)$ ]] || continue
+        ship_exe=${BASH_REMATCH[1]}; ship_app=${ship_exe%%/Contents/Frameworks/Squirrel.framework/*}
+        [ "$ship_app" != "$ship_exe" ] || continue
+        case "$ship_app" in */LearnHarness.app) return 0;; esac
+        [ "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$ship_app/Contents/Info.plist" 2>/dev/null)" != "$bundle_id" ] || return 0
+    done < "$tmp/ship-comm"
     if exists "$HOME/Library/Caches/$label/ShipItState.plist" && [ "$ship_record_noted" = no ]; then
         printf 'Note: an old update record was found; continuing.\n'
         ship_record_noted=yes
