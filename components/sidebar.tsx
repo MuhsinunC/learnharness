@@ -708,8 +708,8 @@ function SessionsSidebar() {
 	}, [pathname, closeDrawer]);
 	const drawer = compact && open;
 	// The drawer animates only once opened, so loading closed never slides it out.
-	const drawerUsedRef = useRef(false);
-	if (drawer) drawerUsedRef.current = true;
+	const [drawerUsed, setDrawerUsed] = useState(false);
+	if (drawer && !drawerUsed) setDrawerUsed(true);
 
 	/* The drawer is modal (LH-56): focus moves in on open (to the drawer
 	   itself: the search would raise the iOS keyboard, the close button its
@@ -768,7 +768,7 @@ function SessionsSidebar() {
 				"shrink-0 overflow-hidden outline-none",
 				// The drawer slides over the page.
 				compact
-					? cn("fixed inset-y-0 left-0 z-50 w-72 max-w-[85vw] pl-[env(safe-area-inset-left)] shadow-xl", drawerUsedRef.current && "transition-[translate] duration-200", !open && "-translate-x-full")
+					? cn("fixed inset-y-0 left-0 z-50 w-72 max-w-[85vw] pl-[env(safe-area-inset-left)] shadow-xl", drawerUsed && "transition-[translate] duration-200", !open && "-translate-x-full")
 					: cn("sidebar-motion duration-200", open ? "w-72" : "w-0"),
 			)}
 			aria-hidden={!open}
