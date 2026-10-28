@@ -4,7 +4,10 @@ import { nativeInputCause, needsContinuation, type LhMessage } from "../core/nat
 
 export interface AdmissionScope { accountId: string; epoch: number; authorityRevision: number; selectedModelId: string }
 /** heldBack: the app never sent the request (LH-50); its length rejection
- *  is the turn's reply, so it is kept where every other kind drops it. */
+ *  is the turn's reply, so it is kept where every other kind drops it,
+ *  unless the request's only new input was automatic and no foreground
+ *  work is owed: that input goes back to its queue, and a rejection
+ *  answering nothing is not kept. */
 export type NoDispatchKind = "background" | "all" | "other" | "heldBack";
 const USAGE_KEY = Symbol.for("lh.subscription.unadmittedUsage");
 const usageGlobal = globalThis as typeof globalThis & { [USAGE_KEY]?: WeakSet<object> };
@@ -114,7 +117,9 @@ export class SubscriptionRequestCycle implements SubscriptionDispatchLifecycle {
   const retainedIds = new Set(messages.map(idOf).filter((id): id is string => !!id));
   this.options.restoreAutomatic(this.automatic, retainedIds);
   this.resolveFirst(false); // queue deferral is installed before initial fire cargo returns
-  const heldBack = this.denied === "heldBack";
+  // Automatic-only input is deferred as by any denial (LH-55): keeping
+  // the rejection would answer nothing, and each redelivery would add one.
+  const heldBack = this.denied === "heldBack" && (this.foregroundOwed || this.automatic.size === 0);
   this.held = this.held.filter((e) => (e.type === "turn_start") || ((e.type === "message_start" || e.type === "message_end") && (heldBack || e.message.role !== "assistant") && !this.automatic.has(idOf(e.message) ?? "")));
   if (heldBack) {
    // Undispatched for admission, usage and consent, but the view and the
