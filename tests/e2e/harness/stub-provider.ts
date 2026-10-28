@@ -74,6 +74,21 @@ export function lastToolName(req: StubRequest): string | undefined {
 	return undefined;
 }
 
+/** The input a real provider counts against the window: the serialized
+ *  messages and tool declarations, at chars/4. */
+export function inputTokens(req: StubRequest): number {
+	return Math.ceil((JSON.stringify(req.messages).length + JSON.stringify(req.body.tools ?? []).length) / 4);
+}
+
+/** The output the request reserves (max_completion_tokens or max_tokens; 0 when absent). */
+export function maxOutputTokens(req: StubRequest): number {
+	const body = req.body as { max_tokens?: number; max_completion_tokens?: number };
+	return body.max_completion_tokens ?? body.max_tokens ?? 0;
+}
+
+/** What providers that count input + max_tokens against the window see. */
+export const requestTokens = (req: StubRequest) => inputTokens(req) + maxOutputTokens(req);
+
 /** Did any assistant message in the transcript call this tool? */
 export function calledTool(req: StubRequest, name: string): boolean {
 	return req.messages.some((m) => m.tool_calls?.some((c) => c.function.name === name));
