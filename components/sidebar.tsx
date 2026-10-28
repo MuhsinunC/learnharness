@@ -21,6 +21,7 @@ import { fuzzyScore } from "@/src/core";
 import { useServerEvent, useServerResync } from "@/components/server-events";
 import type { ChatListItem } from "@/src/core";
 import { isTypingSurface, kbdEventForAction } from "@/src/core";
+import { COMPACT_QUERY } from "@/components/compact-query";
 import { notifySettingsSaved } from "@/components/settings-signal";
 import { repairChatRequest } from "@/components/repair-chat";
 
@@ -54,18 +55,15 @@ import type { UpdateState } from "@/components/settings/update-settings.tsx";
 const SIDEBAR_AUTOCLOSE = 928;
 
 /*
- * Phones and tablets (LH-44): in the browser the sidebar is an off-canvas
- * DRAWER over the page under 640px, and under 1024px (Tailwind's lg) on a
- * touch screen: a modal with a backdrop, closed on load, closed again by
- * Escape, a backdrop tap or any navigation, and never written to the
- * persisted preference (288px inline would leave a phone ~100px of page).
- * A mouse-driven window from 640px up keeps the inline sidebar and its
- * preference (LH-56). max-width rather than range syntax keeps this one
- * rule independent of range-query support (the build itself targets
- * Safari 16.4 and up). Electron keeps the narrow rule above; its window
- * floor is 640px.
+ * Phones and tablets (LH-44): in the browser, where COMPACT_QUERY matches
+ * (components/compact-query.ts: under 640px, and under 1024px on a touch
+ * screen), the sidebar is an off-canvas DRAWER over the page: a modal with
+ * a backdrop, closed on load, closed again by Escape, a backdrop tap or any
+ * navigation, and never written to the persisted preference (288px inline
+ * would leave a phone ~100px of page). A mouse-driven window from 640px up
+ * keeps the inline sidebar and its preference (LH-56). Electron keeps the
+ * narrow rule above; its window floor is 640px.
  */
-const COMPACT_QUERY = "(max-width: 39.98rem), (max-width: 63.98rem) and (pointer: coarse)";
 
 // Module scope, guarded for SSR (the server has no navigator).
 const IS_ELECTRON = typeof navigator !== "undefined" && navigator.userAgent.includes("Electron");
