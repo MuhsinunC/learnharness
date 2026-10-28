@@ -12,7 +12,7 @@ thinking level doesn't affect the window.
   has no entry for the pair, Maximum equals Default.
 - **Minimum** is `min(48,384, Default)`: `COMPACTION_THRESHOLD_FLOOR` (32k) plus
   `COMPACTION_RESERVE_TOKENS` (16,384), the smallest window whose compaction
-  trigger (`window − 16k`) stays at the threshold floor. A lower value is
+  trigger (`window − 16k`, pi's reserve) stays at the threshold floor. A lower value is
   refused in the field, and the route answers 400 `below_minimum`.
 - Enter, **Save**, or clicking away commits the value; the field always shows what is
   stored. An empty field, or the Default itself, resets the pair to Default,

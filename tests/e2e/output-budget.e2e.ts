@@ -129,6 +129,10 @@ test("a custom window above the real limit: one recovery, then on-time compactio
 		assert.ok(requestTokens(r) <= LIMIT, `input ${inputTokens(r)} + max_tokens ${maxOutputTokens(r)} fits ${LIMIT}`);
 	}
 	assert.ok(later.some((r) => maxOutputTokens(r) < MAX_OUTPUT), "max_tokens shrinks as the input grows");
+	// The threshold keeps the reply its room (a quarter of the window, less
+	// estimate error); a threshold that ignored it left ~4k near the limit.
+	const room = Math.min(...later.map(maxOutputTokens));
+	assert.ok(room >= LIMIT / 5, `the reply keeps its room (smallest max_tokens ${room})`);
 	const recovery = recoveryMarkers(c).at(-1)!;
 	assert.ok(
 		c.messages.slice(c.messages.indexOf(c.messages.find((m) => m.id === recovery.id)!) + 1).some((m) => m.customType === "compaction" && !m.details?.notice),
@@ -142,6 +146,8 @@ test("a custom window above the real limit: one recovery, then on-time compactio
 	const failed = c.messages.at(-1)!;
 	assert.ok(failed.contextOverflow, "the failure is explained");
 	assert.notEqual(failed.contextOverflow!.unrecoverable, true, "Repair is still offered");
+	const listed = await server.json<{ chats: Array<{ id: string; repairable?: boolean }> }>("/api/chats");
+	assert.equal(listed.chats.find((row) => row.id === id)?.repairable, true, "the session menu offers Repair");
 	const repaired = await server.api(`/api/chats/${id}/repair`, { method: "POST" });
 	assert.equal(repaired.status, 200, await repaired.text());
 	const before = rejections;
