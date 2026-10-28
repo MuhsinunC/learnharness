@@ -27,6 +27,7 @@ import { useEffect, useRef, useState } from "react";
 import { AUTH_KEYS, type AuthKeyStatus } from "@/src/core";
 import { SettingsGroup } from "./controls.tsx";
 import { SubscriptionConnections } from "./subscription-connections.tsx";
+import { ComputerOnlyNote, useComputerOnly } from "./remote-access.tsx";
 import { ProviderMenuList } from "./model-menu.tsx";
 import { MenuShell } from "@/components/menu-shell";
 import { notifySettingsSaved } from "@/components/settings-signal";
@@ -342,6 +343,8 @@ export function KeysSection({
 	/** The paste editor for a freshly chosen Add-provider target. */
 	const [adding, setAdding] = useState<ProviderKeyInfo | null>(null);
 	const [addError, setAddError] = useState<string | null>(null);
+	/** A phone in the desktop app reads key status but saves nothing (proxy.ts). */
+	const computerOnly = useComputerOnly();
 
 	// Escape folds any open editor (unfolded row or the Add-provider paste)
 	// WITHOUT closing the dialog. Claimed at document CAPTURE phase — the
@@ -426,6 +429,7 @@ export function KeysSection({
 	return (
 		<>
 			<SettingsGroup label="Model API keys" testid="group-provider-keys">
+				{computerOnly && <ComputerOnlyNote testid="keys-computer-only" />}
 				{providerRows.map((status) => (
 					<KeyTableRow
 						key={status.id}
@@ -440,7 +444,7 @@ export function KeysSection({
 							return err;
 						}}
 						onCancel={() => setOpenRow(null)}
-						onDelete={() => deleteKey(status.id)}
+						onDelete={computerOnly ? undefined : () => deleteKey(status.id)}
 						testid={`key-${status.id.toLowerCase()}`}
 					/>
 				))}
@@ -486,7 +490,7 @@ export function KeysSection({
 							return err;
 						}}
 						onCancel={() => setOpenRow(null)}
-						onDelete={() => deleteKey(status.id)}
+						onDelete={computerOnly ? undefined : () => deleteKey(status.id)}
 						testid={`key-${status.id.toLowerCase()}`}
 					/>
 				))}

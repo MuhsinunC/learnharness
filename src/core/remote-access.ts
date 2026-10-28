@@ -6,3 +6,7 @@ export function remotePasswordProblem(password: unknown): string | null {
 	if (typeof password !== "string" || password.length < REMOTE_PASSWORD_MIN) return `The password needs at least ${REMOTE_PASSWORD_MIN} characters.`;
 	return password.length > REMOTE_PASSWORD_MAX ? `The password can have at most ${REMOTE_PASSWORD_MAX} characters.` : null;
 }
+
+/** What a logged-in phone gets for a credential or host-process change in the
+ * desktop app (src/server/desktop-access.ts computerOnlyRequest). */
+export const COMPUTER_ONLY_ERROR = "Change this on the computer running LearnHarness.";

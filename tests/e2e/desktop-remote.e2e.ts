@@ -129,6 +129,7 @@ test("(desktop) only the window sets the password; then Settings shows the serve
 	const chrome = await launchChrome(TICKET, ["--no-proxy-server"]);
 	try {
 		const page = await chrome.browser.newPage();
+		await page.setViewport({ width: 1280, height: 800 });
 		// What main.cjs gives the window: the cookie for its pages, the header for its API calls.
 		await page.setCookie({ name: "lh_desktop", value: PAGE_KEY, url: `http://127.0.0.1:${port}`, httpOnly: true, sameSite: "Strict" });
 		await page.setExtraHTTPHeaders(WINDOW_API);
@@ -178,6 +179,58 @@ test("(desktop) a phone behind tailscale serve logs in and uses the app; the win
 
 	assert.equal((await raw("/logout", { method: "POST", headers: phone() })).status, 303);
 	assert.equal((await raw("/api/settings", { headers: phone() })).status, 403);
+});
+
+test("(desktop) keys and the Claude Code connection change only from the window; a phone reads status and keeps using the app", async () => {
+	const local = { origin: `http://127.0.0.1:${port}` };
+	const send = (pathname: string, method: string, headers: Record<string, string>, body?: unknown) =>
+		raw(pathname, { method, headers: { "content-type": "application/json", ...headers }, body: body === undefined ? undefined : JSON.stringify(body) });
+	// The window: keys and the Claude Code mode as before.
+	assert.equal((await send("/api/keys/OPENROUTER_API_KEY", "PUT", { ...WINDOW_API, ...local }, { value: "e2e-dummy-key-not-real" })).status, 200);
+	assert.equal((await send("/api/keys/OPENROUTER_API_KEY", "DELETE", { ...WINDOW_API, ...local })).status, 200);
+	assert.equal((await send("/api/claude-code", "PUT", { ...WINDOW_API, ...local }, { mode: "off" })).status, 200);
+
+	const login = await raw("/login", {
+		method: "POST",
+		headers: viaServe({ "content-type": "application/x-www-form-urlencoded", origin: `https://${TS_HOST}` }),
+		body: new URLSearchParams({ password: PASSWORD, next: "/" }).toString(),
+	});
+	const cookie = [login.headers["set-cookie"]].flat().join("\n").split(";")[0]!;
+	const phone = viaServe({ cookie, origin: `https://${TS_HOST}` });
+	assert.equal((await raw("/api/keys", { headers: phone })).status, 200, "a phone may read key status");
+	for (const [pathname, method, body] of [
+		["/api/keys/OPENROUTER_API_KEY", "PUT", { value: "attacker-chosen-key-value" }],
+		["/api/keys/OPENROUTER_API_KEY", "DELETE", undefined],
+		["/api/claude-code", "PUT", { mode: "endpoint" }],
+		["/api/claude-code/endpoint", "DELETE", undefined],
+		["/api/claude-code/login", "POST", {}],
+		["/api/subscriptions", "POST", { providerId: "chatgpt", op: "login" }],
+	] as const) {
+		const res = await send(pathname, method, phone, body);
+		assert.equal(res.status, 403, `${method} ${pathname}`);
+		assert.deepEqual(JSON.parse(res.body), { error: "Change this on the computer running LearnHarness.", computerOnly: true });
+	}
+	assert.equal((await send("/api/chats", "POST", phone, { title: "From the phone" })).status, 200, "chats still work");
+	assert.equal((await send("/api/settings/general", "PUT", phone, { autoUpdate: true })).status, 200, "ordinary settings still save");
+
+	const chrome = await launchChrome(TICKET, [`--host-resolver-rules=MAP ${TS_HOST} 127.0.0.1`, "--no-proxy-server"]);
+	try {
+		const page = await chrome.browser.newPage();
+		await page.setViewport({ width: 1280, height: 800 });
+		await page.setCookie({ name: "lh_session", value: cookie.split("=")[1]!, url: `http://${TS_HOST}:${port}` });
+		await page.goto(`http://${TS_HOST}:${port}/`, { waitUntil: "domcontentloaded", timeout: 120_000 });
+		await until(async () => {
+			await page.click('[data-testid="settings-entry"]');
+			return page.waitForSelector('[data-testid="settings-nav-keys"]', { timeout: 2000 });
+		}, "the settings dialog to open", 120_000, 500);
+		await page.click('[data-testid="settings-nav-keys"]');
+		for (const note of ["keys-computer-only", "claude-code-computer-only"]) {
+			await page.waitForSelector(`[data-testid="${note}"]`, { timeout: 60_000 });
+			assert.equal(await page.$eval(`[data-testid="${note}"]`, (el) => el.textContent), "Change this on the computer running LearnHarness.");
+		}
+	} finally {
+		await chrome.close();
+	}
 });
 
 test("(desktop) the window changes and removes the password without the current one, and that ends phone sessions", async () => {

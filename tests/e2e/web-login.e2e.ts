@@ -145,6 +145,7 @@ test("(a) no password: loopback needs no login, remote requests get nothing, and
 	const chrome = await launchChrome(TICKET, ["--no-proxy-server"]);
 	try {
 		const tab = await chrome.browser.newPage();
+		await tab.setViewport({ width: 1280, height: 800 });
 		await tab.goto(server.url, { waitUntil: "domcontentloaded", timeout: 120_000 });
 		await openGeneralSettings(tab);
 		assert.equal(await tab.$eval('[data-testid="remote-access-cli"]', (el) => el.textContent), "npm run remote-access:set-password");
@@ -250,6 +251,7 @@ test("(d) headless Chrome on the tailnet logs in through the login page, uses th
 	const chrome = await launchChrome(TICKET, [`--host-resolver-rules=MAP ${TS_HOST} 127.0.0.1`, "--no-proxy-server"]);
 	try {
 		const page = await chrome.browser.newPage();
+		await page.setViewport({ width: 1280, height: 800 });
 		const origin = `http://${TS_HOST}:${port}`;
 		await page.goto(`${origin}/chat/new`, { waitUntil: "domcontentloaded", timeout: 120_000 });
 		assert.equal(new URL(page.url()).pathname, "/login");
@@ -306,6 +308,7 @@ test("(e) this computer's own browser logs in too, and changes the password in S
 	const chrome = await launchChrome(TICKET, ["--no-proxy-server"]);
 	try {
 		const page = await chrome.browser.newPage();
+		await page.setViewport({ width: 1280, height: 800 });
 		await page.goto(`${server.url}/`, { waitUntil: "domcontentloaded", timeout: 120_000 });
 		assert.equal(new URL(page.url()).pathname, "/login", "loopback is no exception once a password exists");
 		await page.type("#password", PASSWORD);

@@ -46,3 +46,13 @@ export function desktopPageAuthorized(
 	const cookie = (headers.get("cookie") ?? "").split(";").map((part) => part.trim()).find((part) => part.startsWith("lh_desktop="));
 	return expected !== null && matches(cookie?.slice("lh_desktop=".length), expected);
 }
+
+/** Credential and host-process writes (LH-43): provider keys, the Claude Code
+ * connection, endpoint and sign-in (which may spawn processes on this
+ * computer), and subscription controls. In the desktop app only its own
+ * window may make them, so a leaked remote-access password cannot swap a
+ * key or endpoint, redirect the learner's traffic, or start a process. */
+export function computerOnlyRequest(method: string, pathname: string): boolean {
+	if (method === "GET" || method === "HEAD" || method === "OPTIONS") return false;
+	return pathname.startsWith("/api/keys/") || pathname === "/api/claude-code" || pathname.startsWith("/api/claude-code/") || pathname.startsWith("/api/subscriptions");
+}
