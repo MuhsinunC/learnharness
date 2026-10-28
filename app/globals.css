@@ -246,6 +246,22 @@ body {
 	line-height: 1.25;
 }
 
+/* Touch screens (LH-44): iOS Safari zooms the whole page into any field
+   whose text is under 16px when it takes focus, so on a coarse pointer
+   every text field gets a 16px floor: the 11px chrome inputs, and the
+   prose inputs when the appearance size is set below 16 (above it they
+   keep it). Unlayered, so it beats the size utilities; the serif title
+   field is already larger. maximum-scale=1 would stop the zoom too, but
+   it also blocks pinch zoom on Android. */
+@media (pointer: coarse) {
+	:where(input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"]), textarea, select):not(.font-title) {
+		font-size: max(16px, 1em);
+	}
+	.lh-input {
+		font-size: max(16px, var(--lh-prose-size));
+	}
+}
+
 /* Thin dark native scrollbar (app-wide): dark thumb, transparent track. */
 * {
 	scrollbar-width: thin;
