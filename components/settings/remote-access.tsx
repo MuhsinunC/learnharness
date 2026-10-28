@@ -17,11 +17,14 @@ type RemoteAccess = {
 };
 
 /** One GET per 30 s for every row that asks (KeysSection, the sign-in
- * rows and RemoteAccessSettings open together); a change refreshes it. */
+ * rows and RemoteAccessSettings open together); a change refreshes it.
+ * Only an answer is kept: a failed read is asked again next time. */
 let shared: { at: number; state: Promise<RemoteAccess | null> } | null = null;
 function remoteAccessState(fresh = false): Promise<RemoteAccess | null> {
 	if (fresh || !shared || Date.now() - shared.at >= 30_000) {
-		shared = { at: Date.now(), state: fetch("/api/remote-access").then((r) => r.json() as Promise<RemoteAccess>).catch(() => null) };
+		const state = fetch("/api/remote-access").then((r) => (r.ok ? r.json() as Promise<RemoteAccess> : null)).catch(() => null);
+		shared = { at: Date.now(), state };
+		void state.then((s) => { if (!s && shared?.state === state) shared = null; });
 	}
 	return shared.state;
 }
