@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { computerOnlyMessage } from "./src/core/remote-access.ts";
-import { computerOnlyRequest, desktopAPIAuthorized, desktopPageAuthorized, isDesktopServer, keyWriteRequest } from "./src/server/desktop-access.ts";
-import { ACCESS_HEADER, confirmCurrentPassword, CURRENT_PASSWORD_HEADER, decideAccess, type Access } from "./src/server/web-login.ts";
+import { computerOnlyRequest, desktopAPIAuthorized, desktopPageAuthorized, isDesktopServer, keyWriteRequest, routePath } from "./src/server/desktop-access.ts";
+import { ACCESS_HEADER, confirmCurrentPassword, CURRENT_PASSWORD_HEADER, decideAccess, sameOriginRequest, type Access } from "./src/server/web-login.ts";
 
 /** Applies to every API method, including SSE and spending/settings routes.
  * No public callback or worker bypass: internal jobs call server functions,
@@ -10,13 +10,23 @@ import { ACCESS_HEADER, confirmCurrentPassword, CURRENT_PASSWORD_HEADER, decideA
  * Web login (LH-43): the one place pages, API, SSE and attachments are
  * gated, in web mode and in the desktop app alike (trust rule:
  * src/server/web-login.ts). Requests that pass carry ACCESS_HEADER for the
- * routes that care; a client's own copy is always dropped first. */
+ * routes that care; a client's own copy is always dropped first. Every
+ * route test reads routePath(), the one normalised spelling of the path. */
 export function proxy(request: NextRequest) {
 	const headers = new Headers(request.headers);
 	headers.delete(ACCESS_HEADER);
 	headers.delete(CURRENT_PASSWORD_HEADER);
 	const { pathname, search } = request.nextUrl;
-	const api = pathname.startsWith("/api");
+	const route = routePath(pathname);
+	const api = route.startsWith("/api");
+	// CSRF, in both modes and for every kind of access: a page on another
+	// origin (another server on 127.0.0.1 is the same site, so the session
+	// cookie goes along) cannot change anything. Origin, else
+	// Sec-Fetch-Site decides; a client that sends neither (curl, the
+	// desktop main process) is not a browser page and passes as before.
+	if (api && !["GET", "HEAD", "OPTIONS"].includes(request.method) && !sameOriginRequest(request.headers)) {
+		return NextResponse.json({ error: "Change LearnHarness only from its own pages." }, { status: 403, headers: { "Cache-Control": "no-store" } });
+	}
 	let access: Access | null;
 	if (isDesktopServer()) {
 		// The window's per-launch secret: a header on its API calls, a cookie on
@@ -34,13 +44,13 @@ export function proxy(request: NextRequest) {
 	}
 	// Sessions exist only once a password is set (web-login.ts), so this never
 	// changes anything without one.
-	if (access === "session" && computerOnlyRequest(request.method, pathname, isDesktopServer())) {
+	if (access === "session" && computerOnlyRequest(request.method, route, isDesktopServer())) {
 		return NextResponse.json({ error: computerOnlyMessage(isDesktopServer()), computerOnly: true }, { status: 403, headers: { "Cache-Control": "no-store" } });
 	}
 	if (access) headers.set(ACCESS_HEADER, access);
 	// Web mode, password set: a session swaps or deletes a key only with the
 	// current password re-entered, so a stolen cookie alone cannot.
-	if (access === "session" && !isDesktopServer() && keyWriteRequest(request.method, pathname)) {
+	if (access === "session" && !isDesktopServer() && keyWriteRequest(request.method, route)) {
 		return confirmCurrentPassword(request.headers).then((result) => result.ok
 			? NextResponse.next({ request: { headers } })
 			: NextResponse.json(
@@ -48,7 +58,7 @@ export function proxy(request: NextRequest) {
 				{ status: result.retryAfter ? 429 : 403, headers: { "Cache-Control": "no-store", ...(result.retryAfter ? { "Retry-After": String(result.retryAfter) } : {}) } },
 			));
 	}
-	if (access || pathname === "/login") return NextResponse.next({ request: { headers } });
+	if (access || route === "/login") return NextResponse.next({ request: { headers } });
 	if (api) {
 		return NextResponse.json({ error: "Log in to LearnHarness first." }, { status: 401, headers: { "Cache-Control": "no-store" } });
 	}

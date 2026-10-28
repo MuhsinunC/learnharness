@@ -47,30 +47,110 @@ export function desktopPageAuthorized(
 	return expected !== null && matches(cookie?.slice("lh_desktop=".length), expected);
 }
 
-/** Host-affecting routes (LH-43): once a remote-access password exists, a
- * logged-in browser session may not use them; only the desktop window
- * (its secret header) may. A stolen session cookie must not become a way
- * to run a binary, read a file, send credentials to a new endpoint or sign
- * in to an account on this computer.
- *   - /api/claude-code, /endpoint, /login: the executable path (runs it,
- *     GET included), the endpoint base URL and token, `claude auth login`.
- *   - /api/subscriptions, /browser: ChatGPT, Copilot and Grok sign-in (web mode).
- *   - POST /api/attachments/file: reads an image at a path on this computer.
- *   - /api/keys/* writes, in the desktop app only: there the window can do
- *     it. In web mode a password makes every browser a session, so key
- *     writes (a value, never a URL) need the current password instead
- *     (keyWriteRequest; proxy.ts checks it). */
-export function computerOnlyRequest(method: string, rawPathname: string, desktop: boolean): boolean {
-	const pathname = decoded(rawPathname);
-	if (/^\/api\/(claude-code|subscriptions)(\/|$)/.test(pathname) || pathname === "/api/attachments/file") return true;
-	return desktop && keyWriteRequest(method, pathname);
+/** How a logged-in browser session may use each API route (LH-43), keyed
+ * by its folder under app/api. Once a remote-access password exists:
+ *   - "session": a logged-in browser may use it.
+ *   - "computer": it acts on this computer, so only the desktop window
+ *     (its secret header) may. A stolen session cookie must not become a
+ *     way to run a binary, read a file, send credentials to a new endpoint
+ *     or sign in to an account here: the Claude Code executable path (run
+ *     on GET too), endpoint and `claude auth login`; ChatGPT, Copilot and
+ *     Grok sign-in; reading an image at a path (attachments/file).
+ *   - "key-write": PUT/DELETE of an API key. In the desktop app only the
+ *     window may. In web mode a password makes every browser a session,
+ *     so a session writes a key (a value, never a URL) only with the
+ *     current password re-entered (proxy.ts checks it).
+ * Every route must be listed: web-login.e2e.ts fails on one that is not,
+ * so a new route is classified before it ships. */
+export const API_ROUTES = {
+	"/api/activity": "session",
+	"/api/activity/abort": "session",
+	"/api/attachments": "session",
+	"/api/attachments/[id]": "session",
+	"/api/attachments/file": "computer",
+	"/api/chat": "session",
+	"/api/chats": "session",
+	"/api/chats/[id]": "session",
+	"/api/chats/[id]/artifact-ui": "session",
+	"/api/chats/[id]/dismiss": "session",
+	"/api/chats/[id]/markdown": "session",
+	"/api/chats/[id]/repair": "session",
+	"/api/chats/[id]/settings": "session",
+	"/api/chats/[id]/steer": "session",
+	"/api/chats/[id]/stream": "session",
+	"/api/claude-code": "computer",
+	"/api/claude-code/endpoint": "computer",
+	"/api/claude-code/login": "computer",
+	"/api/events": "session",
+	"/api/graph": "session",
+	"/api/graph/costs": "session",
+	"/api/graph/coverage/extract": "session",
+	"/api/graph/import": "session",
+	"/api/graph/nodes/[id]": "session",
+	"/api/graph/positions": "session",
+	"/api/graph/render-settings": "session",
+	"/api/graph/status": "session",
+	"/api/jobs": "session",
+	"/api/keys": "session",
+	"/api/keys/[id]": "key-write",
+	"/api/models": "session",
+	"/api/remote-access": "session",
+	"/api/search": "session",
+	"/api/settings": "session",
+	"/api/settings/[section]": "session",
+	"/api/settings/context-windows": "session",
+	"/api/settings/prompts": "session",
+	"/api/settings/prompts/[...segment]": "session",
+	"/api/stt/token": "session",
+	"/api/subscriptions": "computer",
+	"/api/subscriptions/browser": "computer",
+} as const satisfies Record<string, "session" | "computer" | "key-write">;
+
+export type APIRouteClass = (typeof API_ROUTES)[keyof typeof API_ROUTES];
+
+const ROUTE_PATTERNS = Object.entries(API_ROUTES).map(([route, kind]) => ({
+	kind,
+	re: new RegExp(`^${route.replace(/\[\.\.\.[^\]]+\]/g, ".+").replace(/\[[^\]]+\]/g, "[^/]+")}$`),
+}));
+const STRICTNESS: Record<APIRouteClass, number> = { session: 0, "key-write": 1, computer: 2 };
+
+/** The class of the route a path reaches, or null for no route. A path
+ * that fits several patterns (attachments/file and attachments/[id]) gets
+ * the strictest, so router precedence never matters. */
+export function apiRouteClass(path: string): APIRouteClass | null {
+	const at = routePath(path);
+	let found: APIRouteClass | null = null;
+	for (const { kind, re } of ROUTE_PATTERNS) if (re.test(at) && (found === null || STRICTNESS[kind] > STRICTNESS[found])) found = kind;
+	return found;
 }
 
-export function keyWriteRequest(method: string, rawPathname: string): boolean {
-	return decoded(rawPathname).startsWith("/api/keys/") && method !== "GET" && method !== "HEAD" && method !== "OPTIONS";
+/** A request a session may not send once a password exists (API_ROUTES). */
+export function computerOnlyRequest(method: string, path: string, desktop: boolean): boolean {
+	return apiRouteClass(path) === "computer" || (desktop && keyWriteRequest(method, path));
 }
 
-/** Match what the router matches: a percent-encoded name must not slip past. */
-function decoded(pathname: string): string {
-	try { return decodeURIComponent(pathname); } catch { return pathname; }
+export function keyWriteRequest(method: string, path: string): boolean {
+	return apiRouteClass(path) === "key-write" && method !== "GET" && method !== "HEAD" && method !== "OPTIONS";
+}
+
+/** The one spelling of a request path that proxy.ts tests: percent-decoded
+ * until stable (a double encoding cannot hide a name), backslashes as
+ * slashes, repeated slashes and dot segments resolved, no trailing slash,
+ * lower case. Next 16.3.2's router did not route any encoded or
+ * mixed-case spelling to an API route (LH-43 probe), so this is a margin:
+ * a router that did would still meet the gate. */
+export function routePath(pathname: string): string {
+	let path = pathname;
+	for (let i = 0; i < 4; i++) {
+		let next: string;
+		try { next = decodeURIComponent(path); } catch { break; }
+		if (next === path) break;
+		path = next;
+	}
+	const out: string[] = [];
+	for (const segment of path.toLowerCase().replace(/\\/g, "/").split("/")) {
+		if (segment === "..") out.pop();
+		else if (segment !== "" && segment !== ".") out.push(segment);
+	}
+	return `/${out.join("/")}`;
 }
