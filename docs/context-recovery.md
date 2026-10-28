@@ -69,11 +69,18 @@ Pi's shape, with Codex's clipping and option 2 as the fallback
   failed, because that window is exactly what may be wrong. Fit is judged
   as the wire request will be (LH-50): the system prompt and tool declarations, the
   new marker and the kept tail, plus the reply's room (see "The reply's
-  room"), all at pi-ai's chars/3.5, must stay within the target. The prompt
-  and declarations are the chat's last turn's, noted when its agent is built
-  (in memory; with no turn since boot, the composed prompt alone). The
-  failed request is measured once. The usage anchor is not used, because it
-  describes the last request that succeeded.
+  room"), all at pi-ai's chars/3.5, must stay within the target. The
+  prompt, declarations, marker and tail fill only 0.8 of what the reply's
+  room leaves (LH-55): pi-ai's flat 4,096-token margin does not cover a
+  provider that counts 15-20% more than chars/3.5 (the OB-0645 live check
+  measured OpenRouter's pre-flight count at about 1.18x). The prompt and
+  declarations are the chat's last turn's, measured as pi-ai sends them
+  (the declarations, not the tool objects) when its agent is built. They
+  are kept in memory and dropped with the chat; with no turn since boot,
+  the kind's composed prompt and every tool its registry can hold stand in
+  (an over-count of the gated tools). The failed request is measured once.
+  The usage anchor is not used, because it describes the last request that
+  succeeded.
 - **Compact.** First, one model summary: half the budget for the kept tail,
   half for the summary, which carries a word cap. The summarizer's input is
   clipped to the target: the prior summary always rides whole, and only the
@@ -102,6 +109,11 @@ Pi's shape, with Codex's clipping and option 2 as the fallback
   explanation that keeps Repair offered: background use off for the
   connection ("turn background use on, or press Repair this chat"), no
   engine, or a compaction still holding the gate after a 30-second wait.
+  When the system prompt and tool declarations alone leave no room
+  (`floorFitTokens <= 0`), recovery and Repair explain at once that the
+  chat is still too long, mark it unrecoverable and leave its history as
+  it is (LH-55): no marker, no retry. Recovery resolves its spec afresh,
+  as Repair does, so a window or model changed during the turn applies.
 - **Notice.** `details.notice` is shown in the transcript in place of
   "Context compacted": "This chat had grown too long for \<model\>; I condensed
   the older part and continued."
@@ -136,8 +148,13 @@ threshold also estimates each kind's own system prompt (the prober's is about 40
 of the teacher's). The footer's "/ N" and the model menus show the window
 that runs (`/api/models` `contextWindow` is capped at the learned limit,
 which it also returns as `learnedContextLimit`), and the context-window
-field's caption adds "Provider limit: N" when that limit is below the
-configured window; the field itself keeps the user's value.
+field's caption adds "Provider limit: N (saving a window clears it)" when
+that limit is below the configured window; the field itself keeps the
+user's value. Saving the field for a pair, a value or a reset to the
+Default, forgets that pair's learned limit (LH-55): the user's word on the
+window replaces it, and the next rejection teaches the real limit again.
+Before LH-55 a learned limit capped the engine window for good, and raising
+the custom window did nothing.
 
 ## The window seam (LH-38)
 
@@ -208,6 +225,15 @@ window, a 3.6k-token prompt and 3k of tool declarations).
 - **API-key providers (pi-ai APIs, OpenRouter, the e2e stub):** pi-ai's
   clamp sets max_tokens against the engine model's window, which carries the
   learned limit; length rejections pass through unchanged.
+- **Subscription request cycle** (`src/agent/subscription-request-cycle.ts`,
+  ChatGPT and native subscriptions): a held-back request is its own
+  no-dispatch kind, `heldBack` (LH-55). It stays undispatched for admission,
+  usage and background consent (no lease is taken, no usage is accepted,
+  admission resolves false, staged automatic input goes back to its queue),
+  but the view and the record keep the rejection, so recovery runs. Before
+  LH-55 it was an admission denial: the cycle dropped the rejection and the
+  turn ended on the learner's message, with no reply and no Repair
+  (`tests/e2e/subscription-held-back.e2e.ts`).
 - **Native subscriptions** (`src/agent/subscription-stream.ts`): the
   transport model takes the engine model's window, so pi-ai's clamp uses the
   learned limit. A length rejection used to be replaced by the generic
