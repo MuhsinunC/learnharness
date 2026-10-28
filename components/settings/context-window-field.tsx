@@ -13,7 +13,7 @@ export function contextWindowCaption(entry: ModelCatalogEntry): string {
 	// A lower limit the provider stated is what runs (LH-50) until a save
 	// here replaces it (LH-55).
 	return entry.learnedContextLimit !== undefined && entry.learnedContextLimit < (entry.customContextWindow ?? entry.defaultContextWindow)
-		? `${caption} · Provider limit: ${formatTokens(entry.learnedContextLimit)} (saving a window clears it)`
+		? `${caption} · Provider limit: ${formatTokens(entry.learnedContextLimit)} (saving a new value clears it)`
 		: caption;
 }
 
