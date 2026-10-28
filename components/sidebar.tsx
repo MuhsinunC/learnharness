@@ -729,11 +729,13 @@ function SessionsSidebar() {
 	}, [drawer]);
 	// Escape closes it, claimed at the document level so it never reaches
 	// the window chain (abort the turn). A menu or dialog over it owns
-	// Escape while it is up (one Esc, one layer).
+	// Escape while it is up, and so does a focused field (one Esc, one
+	// layer): React's root is the document, so the field's stopPropagation
+	// cannot keep this listener from running.
 	useEffect(() => {
 		if (!drawer || ctxChatId !== null || deleting) return;
 		const onKeyDown = (e: KeyboardEvent) => {
-			if (e.key !== "Escape") return;
+			if (e.key !== "Escape" || (e.target instanceof Element && e.target.matches("input, textarea"))) return;
 			e.preventDefault();
 			e.stopPropagation();
 			closeDrawer();

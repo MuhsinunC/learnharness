@@ -551,6 +551,15 @@ test("a phone: the drawer is a modal dialog, Escape closes it without aborting a
 		await page.keyboard.press("Escape");
 		await closed("a second Escape");
 
+		// Escape in the search only leaves the search; the next one closes the drawer.
+		await w.openSidebar();
+		await w.press("[data-testid=session-search]");
+		await page.keyboard.press("Escape");
+		await w.settle(400);
+		if (await w.drawerClosed()) w.problems.push("Escape in the session search also closed the drawer");
+		await page.keyboard.press("Escape");
+		await closed("Escape after leaving the search");
+
 		// A backdrop tap with the search focused also hands focus back to the toggle.
 		await w.openSidebar();
 		await page.$eval("[data-testid=session-search]", (el) => (el as HTMLElement).focus());
