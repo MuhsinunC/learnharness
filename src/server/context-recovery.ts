@@ -18,8 +18,10 @@
  * that fails, comes back empty, or still does not fit, a deterministic
  * marker (lesson topic, the prior summary verbatim, plan tree, the
  * learner's dropped lines) with a progressively shorter kept tail. Fit is
- * judged by chars/4 — never the usage anchor, which describes the last
- * request that SUCCEEDED.
+ * judged as the wire request will be (LH-50): the system prompt and tool
+ * declarations, the marker and kept tail, and the reply's room, all at
+ * pi-ai's own chars/3.5 — never the usage anchor, which describes the
+ * last request that SUCCEEDED.
  */
 
 import {
@@ -44,6 +46,7 @@ import {
 	type LhMessage,
 	type LhUserMessage,
 } from "../core/index.ts";
+import { estimateTextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { emit } from "../core/events.ts";
 import type { ChatStore } from "../core/ports.ts";
 import {
@@ -89,10 +92,20 @@ export function contextWindowFor(engine: PiEngine): number | undefined {
 	return Math.min(engine.model.contextWindow ?? Infinity, learned);
 }
 
-/** Share of the target window a recovered request may fill: the rest is
- *  the tool declarations, the reply's max_tokens, and chars/4's error.
- *  Never more than leaves the reply its room (outputReserveTokens). */
-const RECOVERY_FILL = 0.6;
+/** pi-ai's estimate, the one its max-tokens clamp applies: chars/3.5,
+ *  where this module's estimates count chars/4. */
+const WIRE_CHARS_PER_TOKEN = 3.5;
+
+const g = globalThis as typeof globalThis & { __lhRequestPrefix?: Map<string, number> };
+const requestPrefixes = () => (g.__lhRequestPrefix ??= new Map());
+
+/** Remember what every request of this chat carries before its messages:
+ *  the last turn's system prompt and tool declarations, in wire tokens.
+ *  In memory; a chat with no turn since boot falls back to its composed
+ *  prompt alone. */
+export function noteRequestPrefix(chatId: string, systemPrompt: string, tools: readonly unknown[]): void {
+	requestPrefixes().set(chatId, estimateTextTokens(systemPrompt) + estimateTextTokens(JSON.stringify(tools)));
+}
 
 /** Per-line cap for the learner's dropped lines in the fallback marker. */
 const FALLBACK_LINE_CHARS = 300;
@@ -170,7 +183,9 @@ function droppedSpanSummary(record: ChatRecord, previous: LhMarkerMessage | null
 export interface RecoveryDeps extends Omit<CompactionDeps, "thresholdTokens" | "canStart" | "keepRecentTokens"> {
 	/** The window to fit (recoveryWindowTokens). */
 	windowTokens: number;
-	/** The input share of it: the fill, less the reply's room. */
+	/** What the marker and the kept tail may fill, in wire tokens: the
+	 *  window less the reply's room (outputReserveTokens) and the system
+	 *  prompt and tool declarations. At most 0 when those leave no room. */
 	fitTokens: number;
 	/** The rejected request's estimate (chars/4), measured once. */
 	failedRequestTokens: number;
@@ -190,6 +205,7 @@ export function recoveryDeps(chatStore: ChatStore, record: ChatRecord, engine: P
 	const systemPromptTokens = systemPromptTokensFor(kind);
 	const failedRequestTokens = heuristicContextTokens(record.messages, systemPromptTokens);
 	const windowTokens = recoveryWindowTokens(lastOverflowText(record.messages), contextWindowFor(engine), failedRequestTokens);
+	const prefixTokens = requestPrefixes().get(record.id) ?? Math.ceil((systemPromptTokens * 4) / WIRE_CHARS_PER_TOKEN);
 	return {
 		chatStore,
 		engine,
@@ -198,7 +214,7 @@ export function recoveryDeps(chatStore: ChatStore, record: ChatRecord, engine: P
 		systemPromptTokens,
 		failedRequestTokens,
 		windowTokens,
-		fitTokens: Math.max(Math.min(Math.floor(windowTokens * RECOVERY_FILL), windowTokens - outputReserveTokens(windowTokens, engine.model.maxTokens)), 1),
+		fitTokens: windowTokens - outputReserveTokens(windowTokens, engine.model.maxTokens) - prefixTokens,
 		notice,
 	};
 }
@@ -245,11 +261,12 @@ function cutWithin(messages: readonly LhMessage[]) {
 }
 
 /** Can a recovery still shrink this chat's request (LH-50)? Something
- *  older is left to condense, and the system prompt alone fits. A failed
- *  retry alone is not hopeless — it may have overrun an output budget —
- *  so only a chat where this is false is marked unrecoverable. */
+ *  older is left to condense, and the system prompt and tool declarations
+ *  leave room under the window. A failed retry alone is not hopeless — it
+ *  may have overrun an output budget — so only a chat where this is false
+ *  is marked unrecoverable. */
 export function condensable(deps: RecoveryDeps, messages: readonly LhMessage[]): boolean {
-	return deps.systemPromptTokens < deps.fitTokens && cutWithin(messages).cutFor(1) !== null;
+	return deps.fitTokens > 0 && cutWithin(messages).cutFor(1) !== null;
 }
 
 /** One recovery compaction. The caller holds the compaction gate
@@ -260,8 +277,8 @@ export async function recoverContext(deps: RecoveryDeps, chatId: string): Promis
 	const messages = record.messages;
 	const { base, previous, floor, cutFor } = cutWithin(messages);
 
-	const fit = deps.fitTokens;
-	const budget = Math.max(fit - deps.systemPromptTokens, 0);
+	// The marker and kept tail's share, in this module's chars/4 tokens.
+	const budget = Math.max(Math.floor((deps.fitTokens * WIRE_CHARS_PER_TOKEN) / 4), 0);
 	const topic = lessonTopic(record);
 	const markerAt = (cut: number, body: string) => {
 		const details: CompactionDetails = {
@@ -273,21 +290,21 @@ export async function recoverContext(deps: RecoveryDeps, chatId: string): Promis
 		};
 		return newCompactionMarker(`${topic}\n\n${body}`, details);
 	};
-	// The next request: system prompt + the marker (the summary head) + the kept tail.
+	// The next request's messages: the marker (the summary head) + the kept tail.
 	const fits = (marker: LhMarkerMessage, cut: number) =>
-		deps.systemPromptTokens + estimateMessageTokens(marker) + estimateTokens(messages.slice(cut)) <= fit;
+		estimateMessageTokens(marker) + estimateTokens(messages.slice(cut)) <= budget;
 
 	emit("compaction-changed", { chatId, running: true });
 	try {
 		// The model summary: half the budget for the kept tail, half for the
-		// summary; the summarizer's own request is clipped to the window too
+		// summary; the summarizer's own request is clipped to the same share
 		// (it runs on the same over-window model), oldest transcript first.
 		const cut = cutFor(budget / 2);
 		if (cut !== null) {
 			const planTreeText = planTreeToText(record.tree, messages);
 			const kind = deps.kind;
 			const maxWords = Math.max(Math.floor((budget / 2) * 0.6), 50);
-			const room = fit * 4 - buildCompactionPrompt({ spanText: "", planTreeText, kind, maxWords }).length;
+			const room = budget * 4 - buildCompactionPrompt({ spanText: "", planTreeText, kind, maxWords }).length;
 			if (room > 0) {
 				try {
 					const summarize = deps.summarize ?? subagentSummarizer;

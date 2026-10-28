@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { after, before, test } from "node:test";
 import { bootServer, until, type LhServer } from "./harness/server.ts";
+import { launchChrome, type HeadlessChrome } from "./harness/chrome.ts";
 import { inputTokens, maxOutputTokens, reply, requestTokens, startStubProvider, type StubProvider, type StubRequest, type StubResponder } from "./harness/stub-provider.ts";
 
 // LH-50, the live OB-0645 run: OpenRouter qwen/qwen3-14b (real window
@@ -13,7 +14,9 @@ import { inputTokens, maxOutputTokens, reply, requestTokens, startStubProvider, 
 // anchor behaves as with a real provider. The learner pastes ~2k tokens a
 // turn. Before LH-50 the first rejection recovered, then the next turns
 // were rejected again (max_tokens kept asking 16,384 against the 1M
-// window), and the chat ended unrecoverable with Repair refused.
+// window), and the chat ended unrecoverable with Repair refused. The
+// second case is the live single huge paste: its recovery's retry was
+// rejected too (27,684 text + 3,796 tool + 16,384 out).
 
 const LIMIT = 40_960;
 const MAX_OUTPUT = 16_384;
@@ -61,6 +64,7 @@ const responder: StubResponder = (req) => {
 
 let stub: StubProvider;
 let server: LhServer;
+let chrome: HeadlessChrome;
 
 before(async () => {
 	stub = await startStubProvider(responder);
@@ -77,9 +81,11 @@ before(async () => {
 	});
 	// A keyed provider, so the catalog and the threshold see its window (as in context-recovery.e2e.ts).
 	await server.json(`/api/keys/OPENROUTER_API_KEY`, { method: "PUT", body: { value: "e2e-dummy-key-not-real" } });
+	chrome = await launchChrome("lh-50");
 });
 
 after(async () => {
+	await chrome?.close();
 	await server?.stop();
 	await stub?.close();
 });
@@ -88,9 +94,17 @@ const chat = (id: string) => server.json<Chat>(`/api/chats/${id}`);
 const isReply = (m: Msg | undefined) => m?.role === "assistant" && m.stopReason !== "error";
 const replies = (c: Chat) => c.messages.filter(isReply).length;
 const recoveryMarkers = (c: Chat) => c.messages.filter((m) => m.customType === "compaction" && m.details?.notice);
+const settingsFile = () => path.join(server.dataDir, "settings.json");
 const learned = () =>
-	(JSON.parse(fs.readFileSync(path.join(server.dataDir, "settings.json"), "utf-8")) as { learnedContextLimits?: Record<string, number> })
-		.learnedContextLimits?.[`${STUB}:stub-q`];
+	(JSON.parse(fs.readFileSync(settingsFile(), "utf-8")) as { learnedContextLimits?: Record<string, number> }).learnedContextLimits?.[`${STUB}:stub-q`];
+
+/** A new chat, with no limit learned from an earlier case. */
+async function newChat(title: string): Promise<string> {
+	const { learnedContextLimits: _learned, ...rest } = JSON.parse(fs.readFileSync(settingsFile(), "utf-8")) as Record<string, unknown>;
+	fs.writeFileSync(settingsFile(), JSON.stringify(rest, null, "\t"));
+	rejections = 0;
+	return (await server.json<{ id: string }>("/api/chats", { body: { title } })).id;
+}
 
 /** One learner turn; settles on a new reply or on an explained failure. */
 async function turn(id: string, text: string): Promise<Chat> {
@@ -105,7 +119,7 @@ async function turn(id: string, text: string): Promise<Chat> {
 }
 
 test("a custom window above the real limit: one recovery, then on-time compaction under input + max_tokens, and Repair stays usable", async () => {
-	const { id } = await server.json<{ id: string }>("/api/chats", { body: { title: "Derivatives by hand" } });
+	const id = await newChat("Derivatives by hand");
 
 	// 1. Gradual growth until the provider first rejects; that one recovers.
 	let part = 0;
@@ -117,6 +131,25 @@ test("a custom window above the real limit: one recovery, then on-time compactio
 	assert.equal(rejections, 1, "one rejection, and the recovery's retry fit");
 	assert.ok(isReply(c.messages.at(-1)), "the recovered reply landed");
 	assert.equal(learned(), LIMIT, "the stated limit is learned");
+	// The footer and the window caption show the window that runs, not the custom 1M.
+	const row = (await server.json<{ models: Array<{ id: string; contextWindow: number; customContextWindow?: number; learnedContextLimit?: number }> }>("/api/models"))
+		.models.find((m) => m.id === "stub-q");
+	assert.deepEqual([row?.contextWindow, row?.customContextWindow, row?.learnedContextLimit], [LIMIT, 1_000_000, LIMIT]);
+	const page = await chrome.browser.newPage();
+	try {
+		await page.goto(`${server.url}/chat/${id}`, { waitUntil: "domcontentloaded", timeout: 180_000 });
+		await page.waitForFunction(() => /\/ 41k$/.test(document.querySelector('[data-testid="stats-context"]')?.textContent ?? ""), { timeout: 60_000 });
+		await until(async () => {
+			await page.click('[data-testid="stats-model"]');
+			return page.waitForSelector('[data-testid="model-menu"]', { timeout: 2000 });
+		}, "the composer model menu to open", 180_000, 500);
+		await page.waitForFunction(
+			() => document.querySelector('[data-testid="composer-context-window"]')?.textContent?.includes("Provider limit: 41k"),
+			{ timeout: 60_000 },
+		);
+	} finally {
+		await page.close();
+	}
 
 	// 2. The same growth continues: the threshold compaction fires before
 	// any request reaches the window, and max_tokens is clamped to the
@@ -154,4 +187,22 @@ test("a custom window above the real limit: one recovery, then on-time compactio
 	c = await turn(id, paste(++part));
 	assert.ok(isReply(c.messages.at(-1)), "the first send after Repair is answered");
 	assert.equal(rejections, before, "and is not rejected");
+});
+
+test("one huge paste: the recovery's retry fits the window with the tool declarations and the reply's room", async () => {
+	const id = await newChat("One huge paste");
+	await turn(id, paste(1));
+	// ~22k tokens of pasted notes in one message, like the live 69k-char paste.
+	const start = stub.requests.length;
+	const c = await turn(id, `Part 2: all my notes at once. ${"A derivative measures how fast a quantity changes at an instant. ".repeat(1_400)}`);
+	const requests = stub.requests.slice(start).filter(isTurnRequest);
+	assert.equal(rejections, 1, "only the first request is rejected");
+	assert.equal(requests.length, 2, "the rejected turn and one retry");
+	assert.ok(requestTokens(requests[1]!) <= LIMIT, `the retry fits: input ${inputTokens(requests[1]!)} + max_tokens ${maxOutputTokens(requests[1]!)}`);
+	assert.equal(recoveryMarkers(c).length, 1);
+	assert.ok(isReply(c.messages.at(-1)), "the retry is answered");
+	// The next turn goes through too.
+	const after = await turn(id, paste(3));
+	assert.ok(isReply(after.messages.at(-1)));
+	assert.equal(rejections, 1, "no later rejection");
 });

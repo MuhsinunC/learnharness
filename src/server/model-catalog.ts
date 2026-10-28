@@ -170,6 +170,19 @@ function customContextWindows(): Record<string, number> {
 	return settingsStore.readSettings()?.contextWindows ?? {};
 }
 
+/** The limits providers stated (LH-40), read the same way. */
+function learnedContextLimits(): Record<string, number> {
+	return settingsStore.readSettings()?.learnedContextLimits ?? {};
+}
+
+/** The window that runs for a pair (LH-50): the custom value, else the
+ *  catalog's, never above a limit the provider stated — what the engine
+ *  uses (chat-handler's withContextWindow). */
+function runningWindow(model: Model<Api>, custom: Record<string, number>, learned: Record<string, number>): number {
+	const key = contextWindowKey(model.provider, model.id);
+	return Math.min(custom[key] ?? model.contextWindow, learned[key] ?? Infinity);
+}
+
 /** One pair's Default, Minimum and Maximum (core/context-windows.ts) —
  *  undefined when the pair is not in its provider's catalog. */
 export function contextWindowBounds(provider: string, id: string): { defaultWindow: number; minWindow: number; maxWindow: number } | undefined {
@@ -183,9 +196,10 @@ export function contextWindowBounds(provider: string, id: string): { defaultWind
 }
 
 /** Project one catalog model to the client DTO. `contextWindow` is the
- *  window that runs (custom over default). */
-export function toModelDto(model: Model<Api>, custom: Record<string, number> = {}, imageSupport?: ImageSupportSettings): ModelDto {
+ *  window that runs (custom over default, capped at a learned limit). */
+export function toModelDto(model: Model<Api>, custom: Record<string, number> = {}, imageSupport?: ImageSupportSettings, learned: Record<string, number> = {}): ModelDto {
 	const customWindow = custom[contextWindowKey(model.provider, model.id)];
+	const learnedLimit = learned[contextWindowKey(model.provider, model.id)];
 	return {
 		id: model.id,
 		name: model.name,
@@ -200,8 +214,9 @@ export function toModelDto(model: Model<Api>, custom: Record<string, number> = {
 			cacheRead: model.cost.cacheRead,
 			cacheWrite: model.cost.cacheWrite,
 		},
-		contextWindow: customWindow ?? model.contextWindow,
+		contextWindow: runningWindow(model, custom, learned),
 		...(customWindow !== undefined ? { customContextWindow: customWindow } : {}),
+		...(learnedLimit !== undefined ? { learnedContextLimit: learnedLimit } : {}),
 		defaultContextWindow: model.contextWindow,
 		maxContextWindow: maxContextWindow(model.provider, model.id, model.contextWindow),
 		maxTokens: model.maxTokens,
@@ -218,11 +233,9 @@ export function toModelDto(model: Model<Api>, custom: Record<string, number> = {
 export function catalogContextLimits(): Map<string, number> {
 	const keyed = keyedProviderIds();
 	const custom = customContextWindows();
+	const learned = learnedContextLimits();
 	const index = new Map<string, number>();
-	const add = (model: Model<Api>) => {
-		const key = contextWindowKey(model.provider, model.id);
-		index.set(key, custom[key] ?? model.contextWindow);
-	};
+	const add = (model: Model<Api>) => index.set(contextWindowKey(model.provider, model.id), runningWindow(model, custom, learned));
 	for (const provider of piModels().getProviders()) {
 		if (!keyed.has(provider.id)) continue;
 		for (const model of piModels().getModels(provider.id)) add(model);
@@ -238,14 +251,15 @@ export function catalogContextLimits(): Map<string, number> {
 export function modelCatalog(): ModelCatalogResponse {
 	const keyed = keyedProviderIds();
 	const custom = customContextWindows();
+	const learned = learnedContextLimits();
 	const { imageSupport } = effectiveSettings();
 	const models = piModels()
 		.getProviders()
 		.filter((p) => keyed.has(p.id))
 		.flatMap((p) => piModels().getModels(p.id))
-		.map((m) => toModelDto(m, custom, imageSupport))
+		.map((m) => toModelDto(m, custom, imageSupport, learned))
 		.sort((a, b) => (a.provider === b.provider ? a.id.localeCompare(b.id) : a.provider.localeCompare(b.provider)))
-		.concat([...chatGPTModels(), ...nativeSubscriptionModels()].map((m) => toModelDto(m, custom, imageSupport)));
+		.concat([...chatGPTModels(), ...nativeSubscriptionModels()].map((m) => toModelDto(m, custom, imageSupport, learned)));
 	return {
 		models,
 		defaults: catalogDefaults(),

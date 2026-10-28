@@ -9,7 +9,11 @@ import { CommitInput } from "./controls.tsx";
 
 /** The field's caption, shared by Settings and the composer menu. */
 export function contextWindowCaption(entry: ModelCatalogEntry): string {
-	return `Default: ${formatTokens(entry.defaultContextWindow)} · Maximum: ${formatTokens(entry.maxContextWindow)}`;
+	const caption = `Default: ${formatTokens(entry.defaultContextWindow)} · Maximum: ${formatTokens(entry.maxContextWindow)}`;
+	// A lower limit the provider stated is what runs (LH-50).
+	return entry.learnedContextLimit !== undefined && entry.learnedContextLimit < (entry.customContextWindow ?? entry.defaultContextWindow)
+		? `${caption} · Provider limit: ${formatTokens(entry.learnedContextLimit)}`
+		: caption;
 }
 
 /**
