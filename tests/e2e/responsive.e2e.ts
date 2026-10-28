@@ -4,10 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import { after, before, test } from "node:test";
 import type { ElementHandle, Page } from "puppeteer-core";
-import { bootServer, REPO_ROOT, until, type LhServer } from "./harness/server.ts";
+import { bootServer, until, type LhServer } from "./harness/server.ts";
 import { launchChrome, type HeadlessChrome } from "./harness/chrome.ts";
 import { calledTool, lastToolName, reply, startStubProvider, type StubProvider, type StubRequest } from "./harness/stub-provider.ts";
 import { png } from "./harness/png.ts";
+import { COMPACT_QUERY } from "../../components/compact-query.ts";
 
 // LH-44: the pages the desktop app renders fit a phone (390×844, touch),
 // a tablet (768×1024, touch) and a desktop window (1280×800). On every
@@ -301,9 +302,6 @@ class Walk {
 	}
 }
 
-/** The drawer's media query, read from its one definition in components/sidebar.tsx. */
-const COMPACT_QUERY = /const COMPACT_QUERY = "([^"]+)";/.exec(fs.readFileSync(path.join(REPO_ROOT, "components", "sidebar.tsx"), "utf8"))![1]!;
-
 /** Whether the page, as emulated, matches COMPACT_QUERY (the drawer) rather than the inline sidebar. */
 async function isCompact(page: Page): Promise<boolean> {
 	return page.evaluate((query) => matchMedia(query).matches, COMPACT_QUERY);
@@ -319,10 +317,11 @@ async function newWalk(vp: Viewport, context = chrome.browser.defaultBrowserCont
 async function walk(vp: Viewport): Promise<string[]> {
 	const w = await newWalk(vp);
 	const page = w.page;
-	const compact = await isCompact(page);
 	try {
 		// The viewport meta: device width, and cover so the safe-area insets are real on iOS.
 		await w.goto("/");
+		// Asked of the app page itself: about:blank has no viewport meta.
+		const compact = await isCompact(page);
 		const meta = await page.$eval('meta[name="viewport"]', (el) => el.getAttribute("content") ?? "");
 		assert.match(meta, /width=device-width/);
 		assert.match(meta, /viewport-fit=cover/);
@@ -799,6 +798,143 @@ test("a phone: Back with the drawer open lets the page it returns to take focus"
 			await within(() => page.$eval(composer, (el) => document.activeElement === el), 3000),
 			`the home composer has focus after Back (focus is on ${await focusLabel(page)})`,
 		);
+	} finally {
+		await page.close();
+	}
+});
+
+/** The quiz page behind the drawer, as the tests below watch it: the dock's
+ *  walked rows and confidence, the page's key events, and the transcript. */
+async function quizPage(w: Walk): Promise<() => Promise<unknown>> {
+	await w.goto(`/chat/${quizId}`);
+	await w.page.waitForSelector("[data-testid=question-dock]", { timeout: 60_000 });
+	await w.settle(1000);
+	await w.page.evaluate(() => {
+		const seen: string[] = [];
+		(window as unknown as { pageKeys: string[] }).pageKeys = seen;
+		for (const name of ["lh:kbd-cycle-thinking", "lh:kbd-cycle-fields", "lh:kbd-rename-session", "lh:kbd-abort-turn"]) window.addEventListener(name, () => seen.push(name));
+	});
+	return async () => ({
+		...(await w.page.evaluate(() => ({
+			confidence: (document.querySelector("[data-testid=confidence-slider]") as HTMLInputElement | null)?.value,
+			walked: document.querySelectorAll("[data-kbdrow].ring-1").length,
+			pageKeys: (window as unknown as { pageKeys: string[] }).pageKeys,
+		}))),
+		messages: (await server.json<{ messages: unknown[] }>(`/api/chats/${quizId}`)).messages.length,
+	});
+}
+
+async function shiftTab(page: Page): Promise<void> {
+	await page.keyboard.down("Shift");
+	await page.keyboard.press("Tab");
+	await page.keyboard.up("Shift");
+}
+
+test("a phone: no key pressed in the open drawer acts on the quiz behind it (Tab, Shift+Tab, F2, Enter, Space, arrows)", async () => {
+	const w = await newWalk(PHONE);
+	try {
+		const watch = await quizPage(w);
+		const before = await watch();
+		await w.openSidebar();
+		for (const key of ["Tab", "F2", "Enter", " ", "ArrowRight", "ArrowDown", "ArrowUp", "ArrowLeft"] as const) await w.page.keyboard.press(key);
+		await shiftTab(w.page);
+		await w.settle(600);
+		assert.deepEqual(await watch(), before, "the quiz page behind the open drawer did not act");
+		assert.equal(await w.drawerClosed(), false, "the drawer stays open");
+	} finally {
+		await w.page.close();
+	}
+});
+
+test("a phone: with the session menu or the delete dialog open over the drawer, keys drive only that layer", async () => {
+	const w = await newWalk(PHONE);
+	const { page } = w;
+	try {
+		const watch = await quizPage(w);
+		const before = await watch();
+		await w.openSidebar();
+		await w.press(`[data-testid=session-row-menu][data-chat-id="${quizId}"]`);
+		await page.waitForSelector("[data-testid=session-context-menu]", { timeout: 10_000 });
+		await w.settle();
+		// The menu walks its own items (↓ enters at the first) and takes Enter (Rename); the quiz stays put.
+		await page.keyboard.press("ArrowDown");
+		await page.keyboard.press("ArrowDown");
+		assert.equal(await page.evaluate(() => (document.activeElement as HTMLElement | null)?.dataset.testid), "ctx-export-md", "↓ walks the menu");
+		await page.keyboard.press("ArrowUp");
+		await page.keyboard.press("ArrowRight");
+		await page.keyboard.press("ArrowLeft");
+		await page.keyboard.press("Enter");
+		await page.waitForSelector("[data-testid=session-rename-input]", { timeout: 5000 });
+		await page.keyboard.press("Escape");
+		await w.settle();
+		assert.deepEqual(await watch(), before, "the quiz behind the session menu did not act");
+		// The delete dialog: arrows (and Space/Enter when focus is not on its buttons) leave the quiz alone.
+		await w.press(`[data-testid=session-row-menu][data-chat-id="${quizId}"]`);
+		await w.press("[data-testid=ctx-delete]");
+		await page.waitForSelector("[data-testid=delete-cancel]", { timeout: 10_000 });
+		await w.settle();
+		const keys = ["ArrowDown", "ArrowRight", "ArrowUp", "ArrowLeft"];
+		if (!(await page.evaluate(() => !!document.activeElement?.closest("[role=dialog]:not([data-testid=sidebar])")))) keys.push(" ", "Enter");
+		for (const key of keys) await page.keyboard.press(key as "ArrowDown");
+		await w.settle(600);
+		assert.ok(await page.$("[data-testid=delete-cancel]"), "the delete dialog is still up");
+		assert.deepEqual(await watch(), before, "the quiz behind the delete dialog did not act");
+		await w.press("[data-testid=delete-cancel]");
+	} finally {
+		await page.close();
+	}
+});
+
+test("a phone: Escape on the cheat sheet over the open drawer closes the cheat sheet only", async () => {
+	const w = await newWalk(PHONE);
+	const { page } = w;
+	try {
+		await w.goto(`/chat/${lessonId}`);
+		await w.openSidebar();
+		await page.keyboard.type("?");
+		await page.waitForSelector("[data-testid=cheat-sheet]", { timeout: 5000 });
+		await page.keyboard.press("Escape");
+		await until(async () => (await page.$("[data-testid=cheat-sheet]")) === null, "Escape to close the cheat sheet", 5000);
+		await w.settle(400);
+		assert.equal(await w.drawerClosed(), false, "the drawer under the cheat sheet stays open");
+	} finally {
+		await page.close();
+	}
+});
+
+test("a phone: Escape with the close button's hint showing dismisses the hint only", async () => {
+	const w = await newWalk(PHONE);
+	const { page } = w;
+	try {
+		await w.goto(`/chat/${lessonId}`);
+		await w.openSidebar();
+		await page.$eval('[aria-label="Close sidebar"]', (el) => (el as HTMLElement).focus());
+		await page.waitForSelector("[role=tooltip]", { timeout: 5000 });
+		await page.keyboard.press("Escape");
+		await until(async () => (await page.$("[role=tooltip]")) === null, "Escape to dismiss the hint", 5000);
+		await w.settle(400);
+		assert.equal(await w.drawerClosed(), false, "the drawer stays open");
+	} finally {
+		await page.close();
+	}
+});
+
+test("a phone: Escape in the drawer's session search leaves the search, not a popover behind the drawer", async () => {
+	const w = await newWalk(PHONE);
+	const { page } = w;
+	try {
+		await w.goto(`/chat/${lessonId}`);
+		await w.press("[data-testid=stats-summary]");
+		await page.waitForSelector("[data-testid=stats-detail]", { timeout: 10_000 });
+		// ⌘B and a programmatic focus: no pointerdown, so the popover stays up.
+		await page.evaluate(() => window.dispatchEvent(new CustomEvent("lh:kbd-toggle-sidebar")));
+		await until(async () => (await page.$eval("[data-testid=sidebar]", (el) => el.getAttribute("aria-hidden"))) === "false" && (await w.sidebarSettled()), "⌘B to open the drawer", 10_000);
+		await page.$eval("[data-testid=session-search]", (el) => (el as HTMLElement).focus());
+		await page.keyboard.press("Escape");
+		await w.settle(400);
+		assert.notEqual(await page.evaluate(() => (document.activeElement as HTMLElement | null)?.dataset.testid), "session-search", "Escape left the search");
+		assert.equal(await w.drawerClosed(), false, "the drawer stays open");
+		assert.ok(await page.$("[data-testid=stats-detail]"), "the stats popover behind the drawer is still open");
 	} finally {
 		await page.close();
 	}
