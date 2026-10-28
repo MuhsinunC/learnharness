@@ -183,12 +183,13 @@ test("(a) no password: loopback needs no login, remote requests get nothing, and
 	fs.mkdirSync(bin, { recursive: true });
 	fs.writeFileSync(path.join(bin, "claude"), `#!/bin/sh\necho "$*" >> '${runs}'\necho "2.0.0 (Claude Code)"\n`, { mode: 0o755 });
 	try {
-		for (const extra of [{ "sec-fetch-site": "cross-site" }, { "sec-fetch-site": "same-site" }, { origin: `http://127.0.0.1:${port + 1}` }, { origin: "https://evil.example" }] as Array<Record<string, string>>) {
+		// same-site first: another server on 127.0.0.1 (an <img> there sends no Origin).
+		for (const extra of [{ "sec-fetch-site": "same-site" }, { "sec-fetch-site": "cross-site" }, { origin: `http://127.0.0.1:${port + 1}` }, { origin: "https://evil.example" }] as Array<Record<string, string>>) {
 			const res = await raw("/api/claude-code", { headers: local(extra) });
+			assert(!fs.existsSync(runs), `${JSON.stringify(extra)} made it run the executable`);
 			assert.equal(res.status, 403, JSON.stringify(extra));
 			assert.deepEqual(JSON.parse(res.body), { error: "Change LearnHarness only from its own pages." }, JSON.stringify(extra));
 		}
-		assert(!fs.existsSync(runs), "no other page made it run the executable");
 		const own = await raw("/api/claude-code", { headers: local({ "sec-fetch-site": "same-origin" }) });
 		assert.equal(own.status, 200, own.body);
 		assert(fs.existsSync(runs), "the app's own page does run it (so the refusals above were real)");
