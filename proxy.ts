@@ -58,7 +58,7 @@ export function proxy(request: NextRequest) {
 				{ status: result.retryAfter ? 429 : 403, headers: { "Cache-Control": "no-store", ...(result.retryAfter ? { "Retry-After": String(result.retryAfter) } : {}) } },
 			));
 	}
-	if (access || route === "/login") return NextResponse.next({ request: { headers } });
+	if (access || route === "/login" || publicAsset(request.method, pathname, route)) return NextResponse.next({ request: { headers } });
 	if (api) {
 		return NextResponse.json({ error: "Log in to LearnHarness first." }, { status: 401, headers: { "Cache-Control": "no-store" } });
 	}
@@ -67,6 +67,15 @@ export function proxy(request: NextRequest) {
 	const login = new URL("/login", request.url);
 	login.searchParams.set("next", pathname + search);
 	return NextResponse.redirect(login, 303);
+}
+
+/** The installable-app files (LH-46): browsers fetch the manifest and its
+ * icons without cookies even when logged in, so the login wall lets these
+ * through. GET and HEAD only, exact paths plus the /pwa/ folder, and only
+ * in their plain spelling (the raw path already equals routePath()). */
+function publicAsset(method: string, pathname: string, route: string): boolean {
+	if ((method !== "GET" && method !== "HEAD") || pathname !== route) return false;
+	return route === "/manifest.webmanifest" || route === "/apple-icon.png" || route.startsWith("/pwa/");
 }
 
 export const config = { matcher: "/((?!_next/).*)" };

@@ -626,6 +626,44 @@ test("(c) a login that races turning remote access off gets the off page, never 
 	assert.equal(cli(["set-password", "--stdin"], `${PASSWORD}\n`).status, 0);
 });
 
+test("(j) the installable-app files load without a login; nothing near them does", async () => {
+	// Browsers fetch the manifest and icons without cookies (LH-46 adds the files; 404 until then).
+	for (const asset of ["/manifest.webmanifest", "/apple-icon.png?a1b2c3", "/pwa/icon-192.png", "/pwa/icon-512.png", "/pwa/icon-maskable-512.png"]) {
+		for (const method of ["GET", "HEAD"]) {
+			for (const headers of [viaServe("100.70.0.23"), local()]) {
+				const res = await raw(asset, { method, headers });
+				assert(![303, 401].includes(res.status), `${method} ${asset} must not need a login (${res.status} ${res.headers.location ?? ""})`);
+				assert(!res.body.includes(chatId) && !res.body.includes("Remote"), `${asset}: the pass-through renders no app data`);
+			}
+		}
+	}
+	for (const [method, near] of [
+		["POST", "/manifest.webmanifest"],
+		["GET", "/manifest.webmanifest.json"],
+		["GET", "/apple-icon.png/x"],
+		["GET", "/pwa"],
+		["GET", "/pwa/../chat/new"],
+		["GET", "/pwa/%2e%2e/chat/new"],
+		["GET", "/pwa/..%2Fchat/new"],
+		["GET", "/%70wa/icon-192.png"],
+		["GET", "/PWA/icon-192.png"],
+		["GET", "/pwa-x/icon.png"],
+	] as const) {
+		const res = await raw(near, { method, headers: viaServe("100.70.0.23") });
+		assert.equal(res.status, 303, `${method} ${near} still needs a login`);
+		assert.match(res.headers.location ?? "", /^\/login\?next=/, near);
+	}
+	// iOS standalone: the wall, its form and its redirect stay same-origin, under /, in the same window.
+	const wall = await raw("/chat/new", { headers: viaServe("100.70.0.23") });
+	assert.equal(wall.headers.location, "/login?next=%2Fchat%2Fnew");
+	const page = (await raw("/login?next=%2Fchat%2Fnew", { headers: viaServe("100.70.0.23") })).body;
+	assert.match(page, /<form method="post" action="\/login">/);
+	assert.doesNotMatch(page, /target=|https?:\/\//, "no new window and no absolute URL on the login page");
+	const res = await login("100.70.0.23", PASSWORD, "/chat/new");
+	assert.equal(res.status, 303);
+	assert.equal(res.headers.location, "/chat/new", "a relative redirect back into the app");
+});
+
 test("the server log holds no password and no session token", async () => {
 	await until(() => server.log().length > 0, "server output");
 	assert(!server.log().includes(PASSWORD));
