@@ -91,7 +91,7 @@ test("Chrome at phone size reads the manifest and reports no installability erro
 		const page = await chrome.browser.newPage();
 		await page.setViewport(PHONE);
 		await page.goto(server.url, { waitUntil: "load", timeout: 180_000 });
-		await page.waitForSelector("[data-testid=open-chain-table]", { timeout: 60_000 });
+		await page.waitForSelector('[aria-label="Open sidebar"]', { visible: true, timeout: 60_000 });
 		const width = await page.evaluate(() => ({ scrollWidth: document.scrollingElement!.scrollWidth, innerWidth }));
 		assert.equal(width.innerWidth, PHONE.width);
 		assert.ok(width.scrollWidth <= PHONE.width, `the page is wider than the screen: ${JSON.stringify(width)}`);
