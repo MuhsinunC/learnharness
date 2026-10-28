@@ -424,13 +424,16 @@ async function walk(vp: Viewport): Promise<string[]> {
 		}
 		await w.press("[data-testid=settings-nav-agent]");
 		const field = '[data-testid="context-window-row-e2e-stub:stub-a"] [data-testid="input-context-window"]';
-		await (await w.el(field)).scrollIntoView();
-		await w.press(field);
-		await page.keyboard.press("End");
-		for (let i = 0; i < 12; i++) await page.keyboard.press("Backspace");
-		await page.type(field, "150000");
-		await page.keyboard.press("Enter");
-		await page.waitForSelector("[data-testid=context-window-dialog]", { timeout: 10_000 });
+		// Typing can race the field remounting after a save: retype until the value holds.
+		await until(async () => {
+			await (await w.el(field)).scrollIntoView();
+			await w.press(field);
+			await page.$eval(field, (el) => (el as HTMLInputElement).select());
+			await page.type(field, "150000");
+			if ((await page.$eval(field, (el) => (el as HTMLInputElement).value)) !== "150000") return null;
+			await page.keyboard.press("Enter");
+			return page.waitForSelector("[data-testid=context-window-dialog]", { timeout: 5000 });
+		}, `${vp.name}: the context-window modal`, 60_000, 500);
 		await w.settle();
 		await w.check("context-window-modal", ["[data-testid=context-window-understood]", "[data-testid=context-window-confirm]", "[data-testid=context-window-cancel]"]);
 		await w.press("[data-testid=context-window-cancel]");
