@@ -387,6 +387,9 @@ export interface UserSettings {
 	 *  `provider:id` (LH-40, server-written, never the user's value): the
 	 *  threshold compaction uses min(window, learned limit). */
 	learnedContextLimits?: Record<string, number>;
+	/** When the user last saved each pair's window (epoch ms, LH-55): a
+	 *  rejection older than it no longer teaches a limit. */
+	learnedLimitsClearedAt?: Record<string, number>;
 	/** Per (provider, model) "supports images" overrides (LH-39); absent
 	 *  pairs resolve from the catalog's input metadata. */
 	imageSupport?: ImageSupportSettings;
@@ -678,6 +681,9 @@ export function sanitizeUserSettings(raw: unknown): UserSettings | null {
 	}
 	if (r.learnedContextLimits !== null && typeof r.learnedContextLimits === "object" && !Array.isArray(r.learnedContextLimits)) {
 		out.learnedContextLimits = sanitizeContextWindows(r.learnedContextLimits as Record<string, unknown>);
+	}
+	if (r.learnedLimitsClearedAt !== null && typeof r.learnedLimitsClearedAt === "object" && !Array.isArray(r.learnedLimitsClearedAt)) {
+		out.learnedLimitsClearedAt = sanitizeContextWindows(r.learnedLimitsClearedAt as Record<string, unknown>);
 	}
 	if (r.imageSupport !== undefined) out.imageSupport = sanitizeImageSupport(r.imageSupport);
 	// Unknown top-level keys ride along untouched (forward-compat). One

@@ -73,7 +73,12 @@ Pi's shape, with Codex's clipping and option 2 as the fallback
   prompt, declarations, marker and tail fill only 0.8 of what the reply's
   room leaves (LH-55): pi-ai's flat 4,096-token margin does not cover a
   provider that counts 15-20% more than chars/3.5 (the OB-0645 live check
-  measured OpenRouter's pre-flight count at about 1.18x). The prompt and
+  measured OpenRouter's pre-flight count at about 1.18x). When the margin
+  leaves no room but the held-back floor itself still does, the retry gets
+  that whole room rather than none, and the fallback's shortest tail is a
+  quarter of the budget, so recovery never drops the whole history. The
+  target never exceeds the window of the engine the recovery runs on, so a
+  chat moved to a smaller model aims at that model. The prompt and
   declarations are the chat's last turn's, measured as pi-ai sends them
   (the declarations, not the tool objects) when its agent is built. They
   are kept in memory and dropped with the chat; with no turn since boot,
@@ -110,8 +115,8 @@ Pi's shape, with Codex's clipping and option 2 as the fallback
   connection ("turn background use on, or press Repair this chat"), no
   engine, or a compaction still holding the gate after a 30-second wait.
   When the system prompt and tool declarations alone would be held back
-  under the target (`prefixFits`, the held-back floor without the 0.8
-  margin, which only sizes the retry), recovery and Repair explain at once
+  under the target (`floorFitTokens <= 0`: no room under the held-back
+  floor even without the margin), recovery and Repair explain at once
   that the chat is still too long, mark it unrecoverable and leave its
   history as it is (LH-55): no marker, no retry. Recovery resolves its spec afresh,
   as Repair does, so a window or model changed during the turn applies.
@@ -149,11 +154,15 @@ threshold also estimates each kind's own system prompt (the prober's is about 40
 of the teacher's). The footer's "/ N" and the model menus show the window
 that runs (`/api/models` `contextWindow` is capped at the learned limit,
 which it also returns as `learnedContextLimit`), and the context-window
-field's caption adds "Provider limit: N (saving a window clears it)" when
+field's caption adds "Provider limit: N (saving a new value clears it)" when
 that limit is below the configured window; the field itself keeps the
 user's value. Saving the field for a pair, a value or a reset to the
 Default, forgets that pair's learned limit (LH-55): the user's word on the
-window replaces it, and the next rejection teaches the real limit again.
+window replaces it. The save time is kept per pair
+(`learnedLimitsClearedAt`), and only a rejection newer than it teaches a
+limit again, so Repair or recovery on the chat whose old rejection taught
+the limit does not write it back. Re-saving the value already stored sends
+nothing, hence "a new value".
 Before LH-55 a learned limit capped the engine window for good, and raising
 the custom window did nothing.
 
@@ -231,7 +240,12 @@ window, a 3.6k-token prompt and 3k of tool declarations).
   no-dispatch kind, `heldBack` (LH-55). It stays undispatched for admission,
   usage and background consent (no lease is taken, no usage is accepted,
   admission resolves false, staged automatic input goes back to its queue),
-  but the view and the record keep the rejection, so recovery runs. Before
+  but the view and the record keep the rejection, so recovery runs. A
+  request whose only new input is automatic (a steer turn, no foreground
+  work owed) is deferred like any denial instead: its input goes back to
+  its queue and no rejection is kept, so redeliveries add none; the
+  learner's next turn meets the same window and is recovered or explained
+  once, with the deferred input riding that run. Before
   LH-55 it was an admission denial: the cycle dropped the rejection and the
   turn ended on the learner's message, with no reply and no Repair
   (`tests/e2e/subscription-held-back.e2e.ts`).
