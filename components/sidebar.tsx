@@ -60,9 +60,10 @@ const SIDEBAR_AUTOCLOSE = 928;
  * Escape, a backdrop tap or any navigation, and never written to the
  * persisted preference (288px inline would leave a phone ~100px of page).
  * A mouse-driven window from 640px up keeps the inline sidebar and its
- * preference (LH-56). max-width, not range syntax: iOS Safari reads
- * "(width < …)" only from 16.4. Electron keeps the narrow rule above; its
- * window floor is 640px.
+ * preference (LH-56). max-width rather than range syntax keeps this one
+ * rule independent of range-query support (the build itself targets
+ * Safari 16.4 and up). Electron keeps the narrow rule above; its window
+ * floor is 640px.
  */
 const COMPACT_QUERY = "(max-width: 39.98rem), (max-width: 63.98rem) and (pointer: coarse)";
 
