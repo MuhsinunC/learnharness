@@ -540,6 +540,17 @@ test("(h) wrong passwords typed next to a key count against that device only, ne
 	assert.equal((await login("100.70.0.31", PASSWORD)).status, 303, "thirty failures beside keys did not lock new logins out");
 });
 
+test("(h) wrong current passwords when changing remote access count against that device only, never toward the login cap", async () => {
+	const cookie = cookieOf(await login("100.70.0.32", PASSWORD));
+	for (let device = 0; device < 6; device++) {
+		const change = (method: "PUT" | "DELETE") => remoteAccess(viaServe(`100.70.3.${device}`, { cookie, origin: `https://${TS_HOST}` }), method, method === "PUT" ? { password: "attacker-chosen", current: "not the password" } : { current: "not the password" });
+		for (let i = 0; i < 5; i++) assert.equal((await change(i % 2 ? "DELETE" : "PUT")).status, 403, `device ${device}, try ${i}`);
+		assert.equal((await change("PUT")).status, 429, `device ${device} is locked out`);
+	}
+	assert.equal((await login("100.70.0.33", PASSWORD)).status, 303, "thirty failures in Settings did not lock new logins out");
+	assert.equal((await raw("/api/settings", { headers: viaServe("100.70.0.33", { cookie }) })).status, 200, "and the password never changed");
+});
+
 test("(i) a session works only through the Host it was issued for", async () => {
 	const phone = cookieOf(await login("100.70.0.16", PASSWORD));
 	const laptop = cookieOf(await loginLocal("100.70.0.16"));

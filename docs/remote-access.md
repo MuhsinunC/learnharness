@@ -110,7 +110,8 @@ Safe:
 - The login cookie can't be read by scripts, and it works only on the
   address it was issued for: a cookie from the computer's own browser
   (`127.0.0.1`) is refused through the `ts.net` address, and the other way
-  round.
+  round. After updating to a version with this check, every device logs in
+  once more.
 - No other page can change anything in LearnHarness. Pages from other
   websites don't get the cookie, but a page from another program serving
   on `127.0.0.1` (any port) counts as the same site and does, so
@@ -118,8 +119,9 @@ Safe:
   doesn't come from its own pages.
 - Wrong passwords are rate-limited: five failures lock that device out for
   15 minutes, and thirty failed logins in total lock every new login out
-  for 15 minutes (devices already logged in keep working). A wrong password
-  typed next to an API key counts only against that device, so one device
+  for 15 minutes (devices already logged in keep working). A wrong current
+  password typed in a logged-in browser (next to an API key, or to change or
+  turn off remote access) counts only against that device, so one device
   can't lock the others out. The limit goes by the address
   `tailscale serve` reports for the phone; a program on the computer itself
   can claim any address, which is why the total cap exists for logins.

@@ -6,7 +6,7 @@
  * Who may write (trust rule: src/server/web-login.ts):
  *   - the desktop window (proxy.ts stamps "desktop" for its secret header);
  *   - a logged-in session that re-enters the current password (charged to
- *     the login rate limit).
+ *     that device's login rate limit, not the global cap).
  * A browser that is "local" only because no password exists yet can NOT set
  * the first one: that is the desktop window's or the CLI's job
  * (`npm run remote-access:set-password`), never plain HTTP.
@@ -61,10 +61,12 @@ async function writeRefusal(req: Request, body: { current?: unknown } | null): P
 			? "Change remote access in the LearnHarness window."
 			: "Set the first password on this computer with: npm run remote-access:set-password");
 	}
+	// This device's bucket only, as for key writes: the sender is logged in,
+	// and failures charged to the global cap would lock every device out of /login.
 	const key = clientKey(req.headers);
-	const wait = loginRetryAfter(key);
+	const wait = loginRetryAfter(key, Date.now(), false);
 	if (wait > 0) return Response.json({ error: "Too many failed attempts. Try again later." }, { status: 429, headers: { "Retry-After": String(wait) } });
-	const release = chargeLoginAttempt(key);
+	const release = chargeLoginAttempt(key, Date.now(), false);
 	if (typeof body?.current !== "string" || !(await verifyPassword(body.current))) return refuse("Enter the current password to change remote access.");
 	release();
 	return null;
