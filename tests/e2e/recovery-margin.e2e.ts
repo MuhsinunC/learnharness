@@ -19,6 +19,8 @@ import { maxOutputTokens, reply, startStubProvider, type StubProvider, type Stub
 // (d) A stated limit that leaves the prompt and tool declarations a
 // little room: the recovery condenses into that room (never to nothing),
 // its retry is still held back, and the learner gets the explanation.
+// (e) A rejected chat smaller than a quarter of the budget: its last
+// message alone is the last-resort tail, and the retry is answered.
 
 const LIMIT = 40_960;
 const MAX_OUTPUT = 16_384;
@@ -206,9 +208,13 @@ test("(c) saving a custom window clears the pair's learned limit, and Repair doe
 	const row = await modelRow("stub-q");
 	assert.deepEqual([row?.contextWindow, row?.customContextWindow, row?.learnedContextLimit], [200_000, 200_000, undefined], "the saved window runs");
 	assert.equal(readSettings().learnedContextLimits?.[`${STUB}:stub-q`], undefined);
-	// The chat's old rejection still states 40,960: Repair must not learn it again.
+	// The chat's old rejection still states 40,960: Repair must neither
+	// learn it again nor condense toward it. The chat fits the saved
+	// window, so nothing is dropped.
+	const condensed = markers(await chat(id)).length;
 	const repaired = await server.api(`/api/chats/${id}/repair`, { method: "POST" });
 	assert.equal(repaired.status, 200, await repaired.text());
+	assert.equal(markers(await chat(id)).length, condensed, "Repair did not condense toward the old 40,960");
 	const after = await modelRow("stub-q");
 	assert.deepEqual([after?.contextWindow, after?.learnedContextLimit], [200_000, undefined], "Repair learned nothing from the old rejection");
 	assert.equal(readSettings().learnedContextLimits?.[`${STUB}:stub-q`], undefined);
@@ -228,6 +234,22 @@ test("(d) the prefix fits but the retry is still held back: the history keeps it
 	assert.equal(sent.length, 1, "the rejected turn only: the recovery retry was held back, never sent");
 	const failed = c.messages.at(-1)!;
 	assert.equal(failed.heldBack, true, "the last request was held back");
-	assert.match(failed.errorMessage ?? "", /^This chat is still too long for stub-y/, "the learner gets the explanation");
+	// Older history is still left to condense, so Repair stays offered.
+	assert.equal(
+		failed.errorMessage,
+		"This chat is still too long for stub-y after condensing its older part once. Press Repair this chat to condense it further, or start a new session.",
+	);
+	assert.notEqual(failed.contextOverflow?.unrecoverable, true, "Repair is still offered");
 	assert.equal(failed.contextOverflow?.providerText, undefined, "no provider text: the held-back retry reached no provider");
+});
+
+test("(e) a rejected chat whose history is smaller than a quarter of the budget still condenses to its last message and is answered", async () => {
+	const id = await newChat("A short chat, rejected anyway");
+	await turn(id, paste(1));
+	await turn(id, paste(2));
+	forced = 1;
+	const c = await turn(id, paste(3));
+	assert.equal(rejections, 1);
+	assert.equal(markers(c).filter((m) => m.details?.notice).length, 1, "the last-resort cut landed");
+	assert.ok(isReply(c.messages.at(-1)), "the retry is answered, not marked unrecoverable");
 });
