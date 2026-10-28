@@ -107,10 +107,22 @@ Safe:
   needs the login, whatever the request looks like. The only exception is the
   desktop app's own window, which proves itself with a private key made fresh
   at every launch; a phone never gets that key.
-- The login cookie can't be read by scripts and isn't sent by other websites,
-  and other websites can't submit the login or logout form. Wrong passwords
-  are rate-limited: five failures lock that device out for 15 minutes, and
-  thirty failures in total lock everyone out for 15 minutes.
+- The login cookie can't be read by scripts, and it works only on the
+  address it was issued for: a cookie from the computer's own browser
+  (`127.0.0.1`) is refused through the `ts.net` address, and the other way
+  round.
+- No other page can change anything in LearnHarness. Pages from other
+  websites don't get the cookie, but a page from another program serving
+  on `127.0.0.1` (any port) counts as the same site and does, so
+  LearnHarness refuses every change (and the login and logout forms) that
+  doesn't come from its own pages.
+- Wrong passwords are rate-limited: five failures lock that device out for
+  15 minutes, and thirty failed logins in total lock every new login out
+  for 15 minutes (devices already logged in keep working). A wrong password
+  typed next to an API key counts only against that device, so one device
+  can't lock the others out. The limit goes by the address
+  `tailscale serve` reports for the phone; a program on the computer itself
+  can claim any address, which is why the total cap exists for logins.
 - The first password can only be set in the desktop app or with the terminal
   command, never by a web page. Changing it from a browser needs the current
   password.
@@ -126,6 +138,11 @@ Safe:
   password next to it, so a stolen login cookie alone can't swap a key.
 - The password is stored only as a slow scrypt hash, in `web-login.json` in the
   data folder (readable only by your user).
+- Programs running on the computer as your user are outside this
+  protection. They can read the data folder, including `web-login.json`,
+  and they may see the login cookie of the computer's own browser
+  (browsers share cookies between all ports of `127.0.0.1`). Only programs
+  you trust should run there.
 
 Not safe, don't do it:
 - **`npm run dev` with remote access.** A development server has built-in
