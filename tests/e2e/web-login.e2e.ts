@@ -7,6 +7,7 @@ import { after, before, test } from "node:test";
 import type { Page } from "puppeteer-core";
 import { bootServer, REPO_ROOT, until, type LhServer } from "./harness/server.ts";
 import { launchChrome } from "./harness/chrome.ts";
+import { API_ROUTES } from "../../src/server/desktop-access.ts";
 
 // LH-43: the web login, in web mode (`npm start`: the harness serves the
 // production build on 127.0.0.1, as scripts/web-server.mjs would). A phone
@@ -78,6 +79,36 @@ function login(ip: string, password: string, next = "/", extra: Record<string, s
 	});
 }
 
+/** A login posted to this computer's own address, for a browser that then
+ * opens server.url (a session works only on the Host it was issued for). */
+function loginLocal(ip: string): Promise<RawResponse> {
+	return raw("/login", {
+		method: "POST",
+		headers: local({ "content-type": "application/x-www-form-urlencoded", origin: server.url, "x-forwarded-for": ip }),
+		body: new URLSearchParams({ password: PASSWORD, next: "/" }).toString(),
+	});
+}
+
+/** CSRF: posts to /api/chats and /api/graph/import from other origins
+ * (another server on 127.0.0.1 is the same site, so a session cookie goes
+ * along) are refused before any route runs; the app's own page still gets
+ * through. */
+async function crossOriginRefused(headers: Record<string, string>, ownOrigin: string): Promise<void> {
+	const send = (extra: Record<string, string>) => Promise.all([
+		raw("/api/chats", { method: "POST", headers: { ...headers, ...JSON_BODY, ...extra }, body: JSON.stringify({ title: "Cross-origin" }) }),
+		raw("/api/graph/import", { method: "POST", headers: { ...headers, "content-type": "multipart/form-data; boundary=lh43", ...extra }, body: "--lh43--\r\n" }),
+	]);
+	for (const extra of [{ origin: `http://127.0.0.1:${port + 1}` }, { origin: "https://evil.example" }, { origin: "null" }, { "sec-fetch-site": "same-site" }, { "sec-fetch-site": "cross-site" }] as Array<Record<string, string>>) {
+		for (const res of await send(extra)) {
+			assert.equal(res.status, 403, JSON.stringify(extra));
+			assert.deepEqual(JSON.parse(res.body), { error: "Change LearnHarness only from its own pages." }, JSON.stringify(extra));
+		}
+	}
+	const [chat, graph] = await send({ origin: ownOrigin, "sec-fetch-site": "same-origin" });
+	assert.equal(chat.status, 200, "the app's own page creates a chat");
+	assert.equal(graph.status, 400, "and reaches the import route itself (no files)");
+}
+
 /** The `lh_session=…` pair from a login response. */
 function cookieOf(res: RawResponse): string {
 	const set = [res.headers["set-cookie"] ?? []].flat().find((c) => c.startsWith("lh_session="));
@@ -143,6 +174,7 @@ test("(a) no password: loopback needs no login, remote requests get nothing, and
 	assert(!fs.existsSync(path.join(server.dataDir, "web-login.json")));
 	const pathRead = await raw("/api/attachments/file", { method: "POST", headers: { ...local(), ...JSON_BODY }, body: JSON.stringify({ path: "/nonexistent/lh-43.png" }) });
 	assert(![401, 403].includes(pathRead.status), `without a password, host routes answer this computer as before (${pathRead.status})`);
+	await crossOriginRefused(local(), server.url);
 
 	const chrome = await launchChrome(TICKET, ["--no-proxy-server"]);
 	try {
@@ -221,6 +253,13 @@ test("(c) parallel wrong logins cannot outrun the limit", async () => {
 	assert.deepEqual(statuses, [401, 401, 401, 401, 401, 429, 429, 429]);
 });
 
+test("(c) the limit goes by the address serve adds (rightmost X-Forwarded-For), so a rotating forged one gains nothing", async () => {
+	for (let i = 0; i < 5; i++) assert.equal((await login(`203.0.113.${i}, 100.70.0.21`, "wrong password")).status, 401);
+	const blocked = await login("198.51.100.7, 100.70.0.21", PASSWORD);
+	assert.equal(blocked.status, 429, "five failures from one tailnet address, whatever was forged in front of it");
+	assert.equal((await login("100.70.0.21, 100.70.0.22", PASSWORD)).status, 303, "the forged entry is not charged either");
+});
+
 test("(c) a next that is not a plain same-origin ASCII path falls back to /", async () => {
 	for (const next of ["/€uro", "//evil.example/x", "/\\evil.example", "https://evil.example/", "/a b", "/login?next=/x"]) {
 		const res = await login("100.70.0.10", PASSWORD, next);
@@ -274,7 +313,7 @@ test("(d) headless Chrome on the tailnet logs in through the login page, uses th
 
 		await page.evaluate(async () => { await fetch("/logout", { method: "POST" }); });
 		assert.equal(await page.evaluate(async () => (await fetch("/api/settings")).status), 401);
-		assert.equal((await raw("/api/settings", { headers: viaServe("100.70.0.4", { cookie: `lh_session=${cookie.value}` }) })).status, 401, "the server revoked it, not only the browser");
+		assert.equal((await raw("/api/settings", { headers: viaServe("100.70.0.4", { host: `${TS_HOST}:${port}`, cookie: `lh_session=${cookie.value}` }) })).status, 401, "the server revoked it, not only the browser");
 	} finally {
 		await chrome.close();
 	}
@@ -312,7 +351,7 @@ test("(h) with a password, a session cannot run binaries, read paths, move endpo
 	try {
 		const page = await chrome.browser.newPage();
 		await page.setViewport({ width: 1280, height: 800 });
-		await page.setCookie({ name: "lh_session", value: cookie.split("=")[1]!, url: server.url });
+		await page.setCookie({ name: "lh_session", value: cookieOf(await loginLocal("100.70.0.12")).split("=")[1]!, url: server.url });
 		await page.goto(`${server.url}/`, { waitUntil: "domcontentloaded", timeout: 120_000 });
 		await until(async () => {
 			await page.click('[data-testid="settings-entry"]');
@@ -328,7 +367,7 @@ test("(h) with a password, a session cannot run binaries, read paths, move endpo
 	}
 });
 
-test("(h) in web mode a session changes a key only with the current password, charged like a login", async () => {
+test("(h) in web mode a session changes a key only with the current password, charged to that device", async () => {
 	const keyWrite = (ip: string, method: "PUT" | "DELETE", password?: string) => {
 		const cookieFor = sessions.get(ip)!;
 		return raw("/api/keys/OPENROUTER_API_KEY", {
@@ -360,7 +399,7 @@ test("(h) in web mode a session changes a key only with the current password, ch
 	try {
 		const page = await chrome.browser.newPage();
 		await page.setViewport({ width: 1280, height: 800 });
-		await page.setCookie({ name: "lh_session", value: cookieOf(await login("100.70.0.15", PASSWORD)).split("=")[1]!, url: server.url });
+		await page.setCookie({ name: "lh_session", value: cookieOf(await loginLocal("100.70.0.15")).split("=")[1]!, url: server.url });
 		await page.goto(`${server.url}/`, { waitUntil: "domcontentloaded", timeout: 120_000 });
 		await until(async () => {
 			await page.click('[data-testid="settings-entry"]');
@@ -443,6 +482,8 @@ test("(g) SSE, the turn stream, the chat export and attachments need the session
 		assert.equal((await raw(route, { headers: local(), headOnly: true })).status, 401, `${route} from loopback`);
 	}
 	assert.equal((await raw("/api/attachments", { method: "POST", headers: local() })).status, 401);
+	assert.equal((await raw("/api/settings/models", { headers: local() })).status, 401);
+	assert.equal((await raw("/api/chat", { method: "POST", headers: { ...local(), ...JSON_BODY }, body: JSON.stringify({ chatId, input: { type: "text", text: "hi" } }) })).status, 401, "spending routes too");
 	const cookie = cookieOf(await login("100.70.0.8", PASSWORD));
 	const events = await raw("/api/events", { headers: viaServe("100.70.0.8", { cookie }), headOnly: true });
 	assert.equal(events.status, 200);
@@ -483,6 +524,106 @@ test("(f) the launcher listens only on 127.0.0.1: no other address, no -H/-p, an
 	});
 	assert.equal(dev.status, 78, dev.stderr);
 	assert.match(dev.stderr, /development server must never be on your tailnet/);
+});
+
+test("(h) wrong passwords typed next to a key count against that device only, never toward the login cap", async () => {
+	const cookie = cookieOf(await login("100.70.0.30", PASSWORD));
+	for (let device = 0; device < 6; device++) {
+		const keyWrite = () => raw("/api/keys/OPENROUTER_API_KEY", {
+			method: "PUT",
+			headers: { ...viaServe(`100.70.1.${device}`, { cookie, origin: `https://${TS_HOST}` }), ...JSON_BODY, "x-lh-current-password": "not the password" },
+			body: JSON.stringify({ value: "e2e-dummy-key-not-real" }),
+		});
+		for (let i = 0; i < 5; i++) assert.equal((await keyWrite()).status, 403, `device ${device}, try ${i}`);
+		assert.equal((await keyWrite()).status, 429, `device ${device} is locked out`);
+	}
+	assert.equal((await login("100.70.0.31", PASSWORD)).status, 303, "thirty failures beside keys did not lock new logins out");
+});
+
+test("(i) a session works only through the Host it was issued for", async () => {
+	const phone = cookieOf(await login("100.70.0.16", PASSWORD));
+	const laptop = cookieOf(await loginLocal("100.70.0.16"));
+	assert.equal((await raw("/api/settings", { headers: viaServe("100.70.0.16", { cookie: phone }) })).status, 200);
+	assert.equal((await raw("/api/settings", { headers: local({ cookie: laptop }) })).status, 200);
+	for (const [label, headers] of [
+		["the phone's cookie on 127.0.0.1", local({ cookie: phone })],
+		["the laptop's cookie through ts.net", viaServe("100.70.0.16", { cookie: laptop })],
+		["the laptop's cookie through ts.net with a port", viaServe("100.70.0.16", { host: `${TS_HOST}:${port}`, cookie: laptop })],
+		["the laptop's cookie as localhost", { host: `localhost:${port}`, cookie: laptop }],
+		["the laptop's cookie from another loopback port", { host: `127.0.0.1:${port + 1}`, cookie: laptop }],
+	] as Array<[string, Record<string, string>]>) {
+		assert.equal((await raw("/api/settings", { headers })).status, 401, label);
+	}
+});
+
+test("(i) encoded and odd spellings of /api get the API's refusal, never the route", async () => {
+	for (const spelling of ["/%61pi/chat", "/%61pi/claude-code", "/%61pi/remote-access", "/%2561pi/settings", "/API/settings", "/api%2Fsettings"]) {
+		for (const headers of [local(), viaServe("100.70.0.17")]) {
+			const res = await raw(spelling, { headers });
+			assert.equal(res.status, 401, `${spelling} ${headers.host}`);
+			assert.deepEqual(JSON.parse(res.body), { error: "Log in to LearnHarness first." }, spelling);
+		}
+	}
+	const cookie = cookieOf(await login("100.70.0.17", PASSWORD));
+	for (const spelling of ["/%61pi/claude-code", "/%41PI/Claude-Code", "/api/claude%2Dcode", "/%61pi/subscriptions/browser", "/api/attachments/%66ile"]) {
+		const res = await raw(spelling, { method: "POST", headers: { ...viaServe("100.70.0.17", { cookie, origin: `https://${TS_HOST}` }), ...JSON_BODY }, body: "{}" });
+		assert.equal(res.status, 403, spelling);
+		assert.deepEqual(JSON.parse(res.body), { error: WEB_COMPUTER_ONLY, computerOnly: true }, spelling);
+	}
+	// Next redirects these to the plain path before the gate, which then applies.
+	for (const spelling of ["/api/claude-code/", "//api/claude-code", "/api\\claude-code"]) {
+		const res = await raw(spelling, { headers: viaServe("100.70.0.17", { cookie }) });
+		assert.equal(res.status, 308, spelling);
+		assert.equal(res.headers.location, "/api/claude-code", spelling);
+	}
+});
+
+test("(i) every API route is classified, and a session reaches none of the computer-only ones", async () => {
+	const app = path.join(REPO_ROOT, "app");
+	const routes: string[] = [];
+	const walk = (dir: string) => {
+		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+			if (entry.isDirectory()) walk(path.join(dir, entry.name));
+			else if (/^route\.(ts|tsx|js|mjs)$/.test(entry.name)) routes.push(`/${path.relative(app, dir).split(path.sep).join("/")}`);
+		}
+	};
+	walk(path.join(app, "api"));
+	assert(routes.length > 30);
+	assert.deepEqual(routes.sort(), Object.keys(API_ROUTES).sort(), "classify every app/api route in API_ROUTES (src/server/desktop-access.ts)");
+
+	const cookie = cookieOf(await login("100.70.0.18", PASSWORD));
+	for (const [route, kind] of Object.entries(API_ROUTES)) {
+		if (kind !== "computer") continue;
+		const source = fs.readFileSync(path.join(app, route, "route.ts"), "utf8");
+		const methods = [...source.matchAll(/export (?:const|async function|function) (GET|POST|PUT|PATCH|DELETE)\b/g)].map((m) => m[1]!);
+		assert(methods.length > 0, route);
+		for (const method of methods) {
+			const res = await raw(route.replace(/\[[^\]]+\]/g, "x"), { method, headers: { ...viaServe("100.70.0.18", { cookie, origin: `https://${TS_HOST}` }), ...JSON_BODY }, body: method === "GET" ? undefined : "{}" });
+			assert.equal(res.status, 403, `${method} ${route}`);
+			assert.deepEqual(JSON.parse(res.body), { error: WEB_COMPUTER_ONLY, computerOnly: true }, `${method} ${route}`);
+		}
+	}
+});
+
+test("(i) cross-origin posts are refused with a session cookie too", async () => {
+	const cookie = cookieOf(await login("100.70.0.19", PASSWORD));
+	await crossOriginRefused(viaServe("100.70.0.19", { cookie }), `https://${TS_HOST}`);
+	const laptop = cookieOf(await loginLocal("100.70.0.19"));
+	await crossOriginRefused(local({ cookie: laptop }), server.url);
+});
+
+test("(c) a login that races turning remote access off gets the off page, never a 500", async () => {
+	// Logins hash one at a time: the later ones finish after the record is gone.
+	const pending = Array.from({ length: 6 }, (_, i) => login(`100.70.2.${i}`, PASSWORD));
+	await Promise.race(pending);
+	fs.rmSync(path.join(server.dataDir, "web-login.json"));
+	const results = await Promise.all(pending);
+	for (const res of results) {
+		assert([303, 403].includes(res.status), `${res.status}: ${res.body.slice(0, 300)}`);
+		if (res.status === 403) assert.match(res.body, /Remote access is off/);
+	}
+	assert(results.some((res) => res.status === 403), "a login finished after the password was gone");
+	assert.equal(cli(["set-password", "--stdin"], `${PASSWORD}\n`).status, 0);
 });
 
 test("the server log holds no password and no session token", async () => {

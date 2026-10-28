@@ -27,6 +27,8 @@ const WINDOW_PAGE = { cookie: `lh_desktop=${PAGE_KEY}` };
 let server: LhServer;
 let port: number;
 let fakeTailscale: string;
+/** One line per `tailscale` run (fakeTailscale appends to it). */
+let tailscaleCalls: string;
 
 interface RawResponse { status: number; headers: http.IncomingHttpHeaders; body: string }
 
@@ -92,7 +94,8 @@ before(async () => {
 	// Stands in for `tailscale status --json` on a signed-in Mac.
 	const dir = fs.mkdtempSync(path.join(process.env.HOME!, ".cache", "lh-e2e", `${TICKET}-ts-`));
 	fakeTailscale = path.join(dir, "tailscale");
-	fs.writeFileSync(fakeTailscale, `#!/bin/sh\necho '{"BackendState":"Running","Self":{"DNSName":"${TS_HOST}."}}'\n`, { mode: 0o755 });
+	tailscaleCalls = path.join(dir, "calls");
+	fs.writeFileSync(fakeTailscale, `#!/bin/sh\necho run >> '${tailscaleCalls}'\necho '{"BackendState":"Running","Self":{"DNSName":"${TS_HOST}."}}'\n`, { mode: 0o755 });
 	await startDesktop(true);
 });
 
@@ -105,6 +108,28 @@ test("(desktop) before a password: the window works as before, and nothing remot
 	assert.equal((await raw("/")).status, 200, "the window's page loads need nothing yet");
 	assert.equal((await raw("/api/settings", { headers: WINDOW_API })).status, 200);
 	assert.equal((await raw("/api/settings")).status, 403, "loopback without the secret stays shut, as before");
+	const refusal = { error: "Desktop API access requires the trusted LearnHarness window." };
+	for (const method of ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]) {
+		const shut = await raw("/api/settings", { method });
+		assert.equal(shut.status, 403, `${method} without the secret`);
+		if (method !== "HEAD") assert.deepEqual(JSON.parse(shut.body), refusal, method);
+		const open = await raw("/api/settings", { method, headers: WINDOW_API });
+		assert(![401, 403].includes(open.status), `${method} with the secret reaches the route (${open.status})`);
+	}
+	for (const value of ["", "wrong", "0".repeat(64), `${SECRET}, ${SECRET}`, PAGE_KEY]) {
+		assert.equal((await raw("/api/settings", { headers: { "x-learnharness-desktop": value } })).status, 403, `secret ${JSON.stringify(value.slice(0, 8))}`);
+	}
+	for (const spelling of ["/%61pi/chat", "/%61pi/claude-code", "/%61pi/remote-access", "/API/settings"]) {
+		const res = await raw(spelling);
+		assert.equal(res.status, 403, spelling);
+		assert.deepEqual(JSON.parse(res.body), refusal, `${spelling}: the API's refusal, never a page or the route`);
+	}
+	const own = { origin: `http://127.0.0.1:${port}` };
+	for (const origin of [`http://127.0.0.1:${port + 1}`, "https://evil.example"]) {
+		const res = await raw("/api/chats", { method: "POST", headers: { ...WINDOW_API, origin, "content-type": "application/json" }, body: JSON.stringify({ title: "Cross-origin" }) });
+		assert.equal(res.status, 403, `${origin}, even with the secret`);
+	}
+	assert.equal((await raw("/api/chats", { method: "POST", headers: { ...WINDOW_API, ...own, "content-type": "application/json" }, body: JSON.stringify({ title: "Window" }) })).status, 200);
 	assert.deepEqual(await remoteAccess(), { available: true, desktop: true, enabled: false, access: "desktop", remotePort: port, restartNeeded: false, url: null });
 	assert.equal((await raw("/api/settings", { headers: viaServe() })).status, 403);
 	const page = await raw("/chat/new", { headers: viaServe() });
@@ -125,6 +150,15 @@ test("(desktop) only the window sets the password; then Settings shows the serve
 	assert.equal((await raw("/")).status, 303, "a header-less loopback page load is a forwarder until proven otherwise");
 	assert.equal((await raw("/", { headers: WINDOW_PAGE })).status, 200, "the window's cookie opens its pages");
 	assert.equal((await raw("/", { headers: { cookie: `lh_desktop=${SECRET}` } })).status, 303, "the raw secret is not the page key");
+	// Next's own static files skip the proxy: the login page and the window's first paint need them.
+	const chunk = (await raw("/", { headers: WINDOW_PAGE })).body.match(/\/_next\/static\/[^"']+\.js/)?.[0];
+	assert(chunk, "the app page links its scripts");
+	assert.equal((await raw(chunk, { headers: viaServe() })).status, 200, `${chunk} needs no login`);
+	// One `tailscale status` per 30 s, however often Settings asks.
+	const runs = () => (fs.existsSync(tailscaleCalls) ? fs.readFileSync(tailscaleCalls, "utf8").split("\n").filter(Boolean).length : 0);
+	const before = runs();
+	for (let i = 0; i < 3; i++) assert.equal((await remoteAccess()).url, `https://${TS_HOST}`);
+	assert(runs() - before <= 1, `tailscale ran ${runs() - before} times for three reads`);
 
 	const chrome = await launchChrome(TICKET, ["--no-proxy-server"]);
 	try {
@@ -216,11 +250,21 @@ test("(desktop) keys, Claude Code, sign-ins and path reads go only through the w
 	assert.equal((await send("/api/chats", "POST", phone, { title: "From the phone" })).status, 200, "chats still work");
 	assert.equal((await send("/api/settings/general", "PUT", phone, { autoUpdate: true })).status, 200, "ordinary settings still save");
 
+	// The browser's own login: a session works only on the Host it was issued for.
+	const browserLogin = await raw("/login", {
+		method: "POST",
+		headers: viaServe({ host: `${TS_HOST}:${port}`, "content-type": "application/x-www-form-urlencoded", origin: `http://${TS_HOST}:${port}` }),
+		body: new URLSearchParams({ password: PASSWORD, next: "/" }).toString(),
+	});
+	const browserCookie = [browserLogin.headers["set-cookie"]].flat().join("\n").split(";")[0]!;
+	assert.equal((await raw("/api/keys", { headers: viaServe({ cookie: browserCookie }) })).status, 403, "not through the port-less name");
 	const chrome = await launchChrome(TICKET, [`--host-resolver-rules=MAP ${TS_HOST} 127.0.0.1`, "--no-proxy-server"]);
 	try {
 		const page = await chrome.browser.newPage();
 		await page.setViewport({ width: 1280, height: 800 });
-		await page.setCookie({ name: "lh_session", value: cookie.split("=")[1]!, url: `http://${TS_HOST}:${port}` });
+		await page.setCookie({ name: "lh_session", value: browserCookie.split("=")[1]!, url: `http://${TS_HOST}:${port}` });
+		let accessReads = 0;
+		page.on("request", (req) => { if (new URL(req.url()).pathname === "/api/remote-access") accessReads++; });
 		await page.goto(`http://${TS_HOST}:${port}/`, { waitUntil: "domcontentloaded", timeout: 120_000 });
 		await until(async () => {
 			await page.click('[data-testid="settings-entry"]');
@@ -231,6 +275,7 @@ test("(desktop) keys, Claude Code, sign-ins and path reads go only through the w
 			await page.waitForSelector(`[data-testid="${note}"]`, { timeout: 60_000 });
 			assert.equal(await page.$eval(`[data-testid="${note}"]`, (el) => el.textContent), "Change this in the LearnHarness desktop app on the computer.");
 		}
+		assert.equal(accessReads, 1, "the key rows and the sign-in rows share one access read");
 	} finally {
 		await chrome.close();
 	}
@@ -256,6 +301,24 @@ test("(desktop) the window changes and removes the password without the current 
 	assert.equal((await raw("/api/settings", { headers: viaServe({ cookie: after }) })).status, 403, "off ends every session");
 	assert.equal((await raw("/")).status, 200, "and the window is back to needing nothing");
 	assert.equal((await put(WINDOW_API, { password: PASSWORD })).status, 200);
+});
+
+test("(desktop) a desktop server started without its secret refuses every API call", async () => {
+	const bare = await bootServer({
+		ticket: TICKET,
+		providers: [],
+		settings: { version: 1, graph: { enabled: false } },
+		readyPath: "/login",
+		env: { LH_DESKTOP_SERVER: "1", LH_TAILSCALE_BIN: fakeTailscale },
+	});
+	try {
+		for (const value of [undefined, "", SECRET]) {
+			const res = await fetch(`${bare.url}/api/settings`, { headers: value === undefined ? {} : { "x-learnharness-desktop": value } });
+			assert.equal(res.status, 403, `header ${value === undefined ? "absent" : JSON.stringify(value.slice(0, 8))}`);
+		}
+	} finally {
+		await bare.stop();
+	}
 });
 
 test("(desktop) a server that did not get the fixed port asks for a restart and still gates the phone", async () => {

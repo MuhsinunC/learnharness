@@ -66,7 +66,8 @@ with fast refresh.
   set `LH_E2E_KEEP=1` to keep it. `until(probe, label, ms)` polls.
   `port` pins the listen port (the desktop app's fixed remote port) and
   `headers` go on every `api()`/`json()` call and the boot probe (the
-  desktop secret header; see `desktop-remote.e2e.ts`).
+  desktop secret header; see `desktop-remote.e2e.ts`). `readyPath` moves
+  the boot probe off `/api/settings`, for a server that refuses it.
 - `chrome.ts`: `launchChrome(ticket)` starts headless system Chrome with a
   throwaway `--user-data-dir`. Set `CHROME_PATH` to override the binary.
 

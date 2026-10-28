@@ -42,6 +42,8 @@ export interface BootOptions {
 	port?: number;
 	/** Sent with every api()/json() call and the boot probe, e.g. the desktop secret header. */
 	headers?: Record<string, string>;
+	/** The boot probe waits for a 2xx here. Default /api/settings. */
+	readyPath?: string;
 	/** Default 6 minutes (a `next dev` first compile is slow on a busy machine). */
 	bootTimeoutMs?: number;
 }
@@ -293,9 +295,9 @@ export async function bootServer(opts: BootOptions): Promise<LhServer> {
 		await until(
 			async () => {
 				if (child.exitCode !== null) throw new Error(`the server exited (${child.exitCode})`);
-				return (await api("/api/settings")).ok;
+				return (await api(opts.readyPath ?? "/api/settings")).ok;
 			},
-			"the server to answer /api/settings",
+			`the server to answer ${opts.readyPath ?? "/api/settings"}`,
 			opts.bootTimeoutMs ?? 360_000,
 			1000,
 		);
