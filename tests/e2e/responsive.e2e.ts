@@ -271,13 +271,29 @@ class Walk {
 	/** Open the sessions sidebar: the drawer on touch widths, inline on the desktop. */
 	async openSidebar(): Promise<void> {
 		if ((await this.page.$eval("[data-testid=sidebar]", (el) => el.getAttribute("aria-hidden"))) === "true") await this.press('[aria-label="Open sidebar"]');
-		// Open, and slid all the way in (a loaded machine can stretch the 200ms slide).
 		await until(
-			() => this.page.$eval("[data-testid=sidebar]", (el) => el.getAttribute("aria-hidden") === "false" && el.getBoundingClientRect().left >= -0.5),
+			async () => (await this.page.$eval("[data-testid=sidebar]", (el) => el.getAttribute("aria-hidden") === "false")) && (await this.sidebarSettled()),
 			`${this.vp.name}: the sidebar to open`,
 			10_000,
 		);
 		await this.settle(400);
+	}
+
+	/** The sidebar's slide or width transition is over (a loaded machine
+	 *  stretches the 200ms): no transition is running or pending on it, and
+	 *  its box is on screen and the same across a few frames. Sampled from
+	 *  here, not with requestAnimationFrame, which never fires in a
+	 *  background tab. */
+	async sidebarSettled(): Promise<boolean> {
+		const box = () =>
+			this.page.$eval("[data-testid=sidebar]", (el) => {
+				const r = el.getBoundingClientRect(); // flushes style, so a just-started transition is listed
+				return { left: r.left, width: r.width, moving: el.getAnimations().length > 0 };
+			});
+		const a = await box();
+		await this.settle(50);
+		const b = await box();
+		return !a.moving && !b.moving && b.left >= -0.5 && a.left === b.left && a.width === b.width;
 	}
 
 	async drawerClosed(): Promise<boolean> {
@@ -612,14 +628,20 @@ test("a mouse-driven desktop window at 900px keeps the inline sidebar and its sa
 			await w.goto("/");
 			await w.page.evaluate((v) => localStorage.setItem("lh:sidebar-open", v), pref);
 			await w.goto("/");
-			await w.settle(600);
+			// The page renders closed until the saved preference applies after mount.
+			const hidden = pref === "1" ? "false" : "true";
+			await until(
+				async () => (await w.page.$eval("[data-testid=sidebar]", (el) => el.getAttribute("aria-hidden"))) === hidden && (await w.sidebarSettled()),
+				"the inline sidebar to settle",
+				10_000,
+			);
 			const got = await w.page.$eval("[data-testid=sidebar]", (el) => ({
 				hidden: el.getAttribute("aria-hidden"),
 				width: Math.round(el.getBoundingClientRect().width),
 				position: getComputedStyle(el).position,
 				backdrop: !!document.querySelector("[data-testid=sidebar-backdrop]"),
 			}));
-			const want = { hidden: pref === "1" ? "false" : "true", width: pref === "1" ? 288 : 0, position: "static", backdrop: false };
+			const want = { hidden, width: pref === "1" ? 288 : 0, position: "static", backdrop: false };
 			assert.deepEqual(got, want, `a 900px mouse window with the saved preference ${pref}`);
 		}
 		const small = await newWalk({ name: "small-desktop", width: 600, height: 800, deviceScaleFactor: 1, isMobile: false, hasTouch: false }, context);
@@ -645,8 +667,9 @@ test("a compact visit never writes the saved sidebar preference, so the desktop 
 		await phone.page.touchscreen.tap(PHONE.width - 10, PHONE.height / 2);
 		await until(() => phone.drawerClosed(), "a backdrop tap to close the drawer", 5000);
 		assert.equal(await phone.page.evaluate(() => localStorage.getItem("lh:sidebar-open")), "0");
+		await desk.page.bringToFront();
 		await desk.goto("/");
-		await desk.settle(600);
+		await until(() => desk.sidebarSettled(), "the desktop sidebar to settle", 10_000);
 		const box = await desk.page.$eval("[data-testid=sidebar]", (el) => ({ hidden: el.getAttribute("aria-hidden"), width: Math.round(el.getBoundingClientRect().width) }));
 		assert.deepEqual(box, { hidden: "true", width: 0 }, "the desktop sidebar stays closed as saved");
 	} finally {
@@ -666,8 +689,7 @@ test("the drawer's media query holds where matchMedia lacks range syntax (shimme
 			window.matchMedia = (query: string) => native(/[<>]/.test(query) ? "not all" : query);
 		});
 		await w.goto("/");
-		await w.settle(600);
-		assert.ok(await w.drawerClosed(), "the sidebar loads as the closed drawer, not inline");
+		assert.ok(await within(() => w.drawerClosed(), 5000), "the sidebar loads as the closed drawer, not inline");
 		// The built stylesheets carry no range syntax either.
 		// (A loop, not a nested function: tsx would wrap one in its __name helper, which the page lacks.)
 		const ranged = await w.page.evaluate(() => {
@@ -745,7 +767,7 @@ test("a tablet turned to a 1280px landscape with the drawer open: focus lands on
 		// Width only: a changed isMobile or hasTouch would make puppeteer reload the page.
 		await w.page.setViewport({ ...TABLET, width: 1280, height: 800 });
 		await until(() => w.page.$eval("[data-testid=sidebar]", (el) => getComputedStyle(el).position !== "fixed"), "the sidebar to go inline", 5000);
-		await w.settle(600);
+		await until(() => w.sidebarSettled(), "the inline sidebar to settle", 10_000);
 		const focus = await w.page.evaluate(() => {
 			const el = document.activeElement as HTMLElement | null;
 			return {
