@@ -14,10 +14,10 @@ import { fileURLToPath } from "node:url";
  * starts that build's standalone server.js, the server the desktop app
  * ships. No route compiles on first hit. LH_E2E_DEV=1 serves `next dev`
  * instead, for debugging. The child runs under `nice -n 10`, without
- * proxy or credential env vars, with LH_IGNORE_ENV_KEYS=1 (no real key
- * leaks in) and LH_E2E=1 (the stub provider seam in
- * src/agent/e2e-providers.ts and the Chrome-only demo browser in
- * headless.ts). Every seam is read from process.env at request time, so
+ * proxy or credential env vars, with its own HOME and PATH (hostless()),
+ * with LH_IGNORE_ENV_KEYS=1 (no real key leaks in) and LH_E2E=1 (the
+ * stub provider seam in src/agent/e2e-providers.ts and the Chrome-only
+ * demo browser in headless.ts). Every seam is read from process.env at request time, so
  * one build serves every test's env.
  */
 
@@ -116,6 +116,19 @@ function cleanEnv(): Record<string, string> {
 	return env;
 }
 
+/** A fresh HOME and a PATH of the system dirs plus a bin dir holding only
+ *  `node`, all under `root`, so a child never finds the host's Claude Code
+ *  or reads the real home. Node's own dir is left out: it may hold an
+ *  npm-global `claude`. The link serves `#!/usr/bin/env node` (next). */
+function hostless(root: string): { HOME: string; PATH: string } {
+	const home = path.join(root, "home");
+	const bin = path.join(root, "bin");
+	fs.mkdirSync(home, { recursive: true });
+	fs.mkdirSync(bin, { recursive: true });
+	fs.symlinkSync(process.execPath, path.join(bin, "node"));
+	return { HOME: home, PATH: [bin, "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(path.delimiter) };
+}
+
 /** sha256 of every tracked or unignored file outside tests/ and docs/
  *  (the lockfile and next.config.ts included), so any source edit rebuilds.
  *  next-env.d.ts is left out: Next rewrites it on every build and dev boot. */
@@ -165,7 +178,8 @@ export function productionBuild(): string {
 	fs.mkdirSync(CACHE, { recursive: true });
 	return withLock(path.join(CACHE, "build.lock"), () => {
 		if (fs.existsSync(server)) return dir; // another run built it while we waited
-		const env = { ...cleanEnv(), NODE_ENV: "production", NEXT_TELEMETRY_DISABLED: "1" } as NodeJS.ProcessEnv;
+		const envRoot = fs.mkdtempSync(path.join(CACHE, "env-build-"));
+		const env = { ...cleanEnv(), ...hostless(envRoot), NODE_ENV: "production", NEXT_TELEMETRY_DISABLED: "1" } as NodeJS.ProcessEnv;
 		const run = (cmd: string, args: string[]) => {
 			const res = spawnSync("nice", ["-n", "19", cmd, ...args], { cwd: REPO_ROOT, env, encoding: "utf8", timeout: BUILD_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024 });
 			if (res.status !== 0) throw new Error(`${path.basename(cmd)} ${args.join(" ")} failed (${res.status ?? res.signal}):\n${(res.stdout + res.stderr).slice(-4000)}`);
@@ -175,11 +189,15 @@ export function productionBuild(): string {
 		const nextEnv = path.join(REPO_ROOT, "next-env.d.ts");
 		const nextEnvBefore = fs.readFileSync(nextEnv);
 		try {
-			run(path.join(REPO_ROOT, "node_modules", ".bin", "next"), ["build"]);
+			try {
+				run(path.join(REPO_ROOT, "node_modules", ".bin", "next"), ["build"]);
+			} finally {
+				fs.writeFileSync(nextEnv, nextEnvBefore);
+			}
+			run(process.execPath, [path.join(REPO_ROOT, "scripts", "build-server.mjs")]);
 		} finally {
-			fs.writeFileSync(nextEnv, nextEnvBefore);
+			fs.rmSync(envRoot, { recursive: true, force: true });
 		}
-		run(process.execPath, [path.join(REPO_ROOT, "scripts", "build-server.mjs")]);
 		const staging = `${dir}.tmp-${process.pid}`;
 		fs.cpSync(path.join(REPO_ROOT, ".next", "standalone"), staging, { recursive: true, verbatimSymlinks: true });
 		fs.renameSync(staging, dir);
@@ -204,6 +222,8 @@ export async function bootServer(opts: BootOptions): Promise<LhServer> {
 
 	const env = cleanEnv();
 	Object.assign(env, {
+		...hostless(root),
+		LH_CLAUDE_CODE_TEST_NO_FIXED_DIRS: "1",
 		LH_E2E: "1",
 		LH_E2E_PROVIDERS: JSON.stringify(opts.providers),
 		LH_DATA_DIR: dataDir,
