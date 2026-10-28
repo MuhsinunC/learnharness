@@ -96,11 +96,19 @@ declare global {
 	}
 }
 
-const SidebarContext = createContext<{ open: boolean; toggle: () => void; compact: boolean; closeDrawer: () => void }>({
+const SidebarContext = createContext<{
+	open: boolean;
+	toggle: () => void;
+	compact: boolean;
+	closeDrawer: () => void;
+	/** The page header's open toggle, where focus returns when the drawer closes. */
+	toggleRef: React.RefObject<HTMLButtonElement | null>;
+}>({
 	open: false,
 	toggle: () => {},
 	compact: false,
 	closeDrawer: () => {},
+	toggleRef: { current: null },
 });
 
 export function useSidebar() {
@@ -184,6 +192,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
 		window.addEventListener("popstate", closeDrawer);
 		return () => window.removeEventListener("popstate", closeDrawer);
 	}, [closeDrawer]);
+	const toggleRef = useRef<HTMLButtonElement>(null);
 
 	const toggle = useCallback(() => {
 		if (compact) {
@@ -221,7 +230,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
 	}, [toggle]);
 
 	return (
-		<SidebarContext.Provider value={{ open: compact ? drawerOpen : open && !narrow, toggle, compact, closeDrawer }}>
+		<SidebarContext.Provider value={{ open: compact ? drawerOpen : open && !narrow, toggle, compact, closeDrawer, toggleRef }}>
 			{/* transitions gated on mount: no slide-in flash on page load.
 			    The side insets keep a landscape phone's notch off the page. */}
 			<div className={cn("flex h-dvh pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]", mounted && "[&_.sidebar-motion]:transition-[width,margin,opacity]")}>{children}</div>
@@ -242,7 +251,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
  *  The icon fades with the slot and is clipped by it as it collapses —
  *  no popping in either direction. */
 export function SidebarToggle() {
-	const { open: sidebarOpen, toggle, compact } = useSidebar();
+	const { open: sidebarOpen, toggle, compact, toggleRef } = useSidebar();
 	// The drawer covers the page: its toggle keeps the slot, so nothing
 	// slides under the backdrop.
 	const open = sidebarOpen && !compact;
@@ -255,6 +264,7 @@ export function SidebarToggle() {
 		>
 			<Hint label="Open sidebar" action="toggle-sidebar">
 			<Button
+				ref={toggleRef}
 				variant="ghost"
 				size="icon"
 				aria-label="Open sidebar"
@@ -456,7 +466,7 @@ export type SessionKindFilter = "teach" | "all" | "practice";
 const KIND_FILTER_KEY = "lh:session-kind-filter";
 
 function SessionsSidebar() {
-	const { open, toggle, compact, closeDrawer } = useSidebar();
+	const { open, toggle, compact, closeDrawer, toggleRef } = useSidebar();
 	const [chats, setChats] = useState<ChatListItem[] | null>(null);
 	const [query, setQuery] = useState("");
 	const [kindFilter, setKindFilter] = useState<SessionKindFilter>("all");
@@ -720,20 +730,23 @@ function SessionsSidebar() {
 	/* The drawer is modal (LH-56): focus moves in on open (to the drawer
 	   itself: the search would raise the iOS keyboard, the close button its
 	   hint) and back on close, once the page behind is no longer inert: to
-	   where it was, else the toggle. A page that took focus itself keeps it. */
+	   where it was, else the toggle, else (the window widened past the
+	   drawer) the inline sidebar's close button; never to a hidden control.
+	   A page that took focus itself keeps it. */
 	const asideRef = useRef<HTMLElement>(null);
+	const closeRef = useRef<HTMLButtonElement>(null);
 	useEffect(() => {
 		if (!drawer) return;
 		const aside = asideRef.current;
-		const opener = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null;
+		const opener = document.activeElement instanceof HTMLElement && !aside?.contains(document.activeElement) ? document.activeElement : null;
 		if (!aside?.contains(document.activeElement)) aside?.focus();
 		return () => {
 			const now = document.activeElement;
 			if (now && now !== document.body && !aside?.contains(now)) return;
-			const back = opener?.isConnected && !aside?.contains(opener) ? opener : null;
-			(back ?? document.querySelector<HTMLElement>('button[aria-label="Open sidebar"]'))?.focus();
+			const usable = (el: HTMLElement | null) => !!el?.isConnected && el !== document.body && !el.closest("[inert], [aria-hidden=true]") && el.getClientRects().length > 0;
+			[opener, toggleRef.current, closeRef.current].find(usable)?.focus();
 		};
-	}, [drawer]);
+	}, [drawer, toggleRef]);
 	// Escape closes it, claimed at the document level so it never reaches
 	// the window chain (abort the turn). A menu or dialog over it owns
 	// Escape while it is up, and so does a focused field (one Esc, one
@@ -812,6 +825,7 @@ function SessionsSidebar() {
 					</Hint>
 					<Hint label="Close sidebar" action="toggle-sidebar">
 						<Button
+							ref={closeRef}
 							variant="ghost"
 							size="icon"
 							aria-label="Close sidebar"
