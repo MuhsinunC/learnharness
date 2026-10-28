@@ -75,10 +75,17 @@ Pi's shape, with Codex's clipping and option 2 as the fallback
   provider that counts 15-20% more than chars/3.5 (the OB-0645 live check
   measured OpenRouter's pre-flight count at about 1.18x). When the margin
   leaves no room but the held-back floor itself still does, the retry gets
-  that whole room rather than none, and the fallback's shortest tail is a
-  quarter of the budget, so recovery never drops the whole history. The
-  target never exceeds the window of the engine the recovery runs on, so a
-  chat moved to a smaller model aims at that model. The prompt and
+  that whole room rather than none, so recovery never drops the whole
+  history. A rejection's stated limit counts only while the rejection is
+  in force: given by the model the recovery runs on (pi-ai stamps provider
+  and model on every reply) and newer than the user's last window save for
+  that pair (one of unknown age counts as older). Otherwise the target is
+  the known window, and when nothing needs dropping there Repair just
+  answers ok (the chat already fits). The target never exceeds the known
+  window either, so a custom window below the stated limit is what
+  recovery aims at. The fallback cuts down to the last message alone only
+  as a last resort, for a rejection in force when no larger tail can be
+  cut. The prompt and
   declarations are the chat's last turn's, measured as pi-ai sends them
   (the declarations, not the tool objects) when its agent is built. They
   are kept in memory and dropped with the chat; with no turn since boot,
@@ -159,9 +166,10 @@ that limit is below the configured window; the field itself keeps the
 user's value. Saving the field for a pair, a value or a reset to the
 Default, forgets that pair's learned limit (LH-55): the user's word on the
 window replaces it. The save time is kept per pair
-(`learnedLimitsClearedAt`), and only a rejection newer than it teaches a
-limit again, so Repair or recovery on the chat whose old rejection taught
-the limit does not write it back. Re-saving the value already stored sends
+(`learnedLimitsClearedAt`), and only a rejection newer than it, from the
+pair's own model, teaches a limit again or sets recovery's target, so
+Repair on the chat whose old rejection taught the limit neither writes it
+back nor condenses toward it. Re-saving the value already stored sends
 nothing, hence "a new value".
 Before LH-55 a learned limit capped the engine window for good, and raising
 the custom window did nothing.

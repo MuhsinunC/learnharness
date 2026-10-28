@@ -72,19 +72,29 @@ function learnedContextLimit(modelId: string): number | undefined {
 	return stores.settingsStore.readSettings()?.learnedContextLimits?.[modelId];
 }
 
+/** Does this rejection still speak for the pair (LH-55)? Only one the
+ *  pair's own model gave (pi-ai stamps provider and model on every
+ *  reply), newer than the user's last window save for the pair; one of
+ *  unknown age counts as older. */
+function rejectionInForce(overflow: LhMessage | undefined, model: { provider: string; id: string }, clearedAt: Record<string, number> | undefined): boolean {
+	if (overflow?.role !== "assistant" || overflow.provider !== model.provider || overflow.model !== model.id) return false;
+	const cleared = clearedAt?.[`${model.provider}:${model.id}`];
+	return cleared === undefined || overflow.timestamp > cleared;
+}
+
 /** Remember the limit the chat's newest rejection states for its model —
  *  its own settings key, never the user's window. A held-back request
- *  has no provider text, so it never teaches a limit, and a rejection
- *  older than the user's last window save for the pair no longer does
- *  (LH-55: that save cleared what it stated). */
+ *  has no provider text, so it never teaches a limit, nor does a
+ *  rejection no longer in force (rejectionInForce). */
 export function learnStatedLimit(model: { provider: string; id: string }, messages: readonly LhMessage[]): void {
 	const overflow = lastOverflow(messages);
 	const stated = reportedContextLimit(overflowProviderText(overflow));
+	if (!stated) return;
 	const modelId = `${model.provider}:${model.id}`;
-	if (!stated || learnedContextLimit(modelId) === stated) return;
-	const cleared = stores.settingsStore.readSettings()?.learnedLimitsClearedAt?.[modelId];
-	if (cleared !== undefined && overflow!.timestamp <= cleared) return;
-	updateSettings((record) => ({ ...record, learnedContextLimits: { ...record.learnedContextLimits, [modelId]: stated } }));
+	updateSettings((record) =>
+		rejectionInForce(overflow, model, record.learnedLimitsClearedAt) && record.learnedContextLimits?.[modelId] !== stated
+			? { ...record, learnedContextLimits: { ...record.learnedContextLimits, [modelId]: stated } }
+			: record);
 }
 
 /** THE WINDOW SEAM: the window this app may trust for the engine's
@@ -135,16 +145,17 @@ function lastOverflow(messages: readonly LhMessage[]): LhMessage | undefined {
 	return undefined;
 }
 
-/** The window to fit: the limit the rejection states, never above the
- *  known window (LH-55: the chat may have moved to a smaller model
- *  since); for a held-back request, the known window it was measured
- *  against (no provider contradicted it); otherwise the known window,
- *  but never more than half the request that just failed (the known
- *  window is exactly what may be wrong). */
-export function recoveryWindowTokens(overflow: LhMessage | undefined, knownWindowTokens: number | undefined, failedRequestTokens: number): number {
-	const stated = reportedContextLimit(overflowProviderText(overflow));
+/** The window to fit: the limit a rejection still in force states, never
+ *  above the known window (a custom window below it is what runs); for a
+ *  held-back request, or one no longer in force (another model's, or one
+ *  the user's window save replaced, LH-55), the known window (no provider
+ *  contradicted it); otherwise the known window, but never more than half
+ *  the request that just failed (the known window is exactly what may be
+ *  wrong). */
+export function recoveryWindowTokens(overflow: LhMessage | undefined, knownWindowTokens: number | undefined, failedRequestTokens: number, inForce: boolean): number {
+	const stated = inForce ? reportedContextLimit(overflowProviderText(overflow)) : undefined;
 	if (stated) return Math.min(stated, knownWindowTokens ?? Infinity);
-	if (knownWindowTokens !== undefined && heldBackRequest(overflow)) return knownWindowTokens;
+	if (knownWindowTokens !== undefined && (heldBackRequest(overflow) || !inForce)) return knownWindowTokens;
 	return Math.max(1, Math.min(knownWindowTokens ?? Infinity, Math.floor(failedRequestTokens / 2)));
 }
 
@@ -202,6 +213,10 @@ export interface RecoveryDeps extends Omit<CompactionDeps, "thresholdTokens" | "
 	 *  that room when the share leaves none. At most 0 when nothing can
 	 *  be sent: the chat is explained, never condensed. */
 	floorFitTokens: number;
+	/** Does the chat's rejection still speak for this engine's pair
+	 *  (rejectionInForce)? When not, the chat may already fit, and the
+	 *  1-token last-resort tail is never used. */
+	rejectionInForce: boolean;
 	/** The rejected request's estimate (chars/4), measured once. */
 	failedRequestTokens: number;
 	/** The learner-facing line the moment divider shows. */
@@ -218,7 +233,9 @@ export type RecoveryOutcome = "summarized" | "truncated" | "unchanged";
 export function recoveryDeps(chatStore: ChatStore, record: ChatRecord, engine: PiEngine, notice: string): RecoveryDeps {
 	const kind = sessionKind(record);
 	const failedRequestTokens = heuristicContextTokens(record.messages, systemPromptTokensFor(kind));
-	const windowTokens = recoveryWindowTokens(lastOverflow(record.messages), contextWindowFor(engine), failedRequestTokens);
+	const overflow = lastOverflow(record.messages);
+	const inForce = rejectionInForce(overflow, engine.model, stores.settingsStore.readSettings()?.learnedLimitsClearedAt);
+	const windowTokens = recoveryWindowTokens(overflow, contextWindowFor(engine), failedRequestTokens, inForce);
 	const prefixTokens = requestPrefixTokens(record.id, kind);
 	const floorRoom = windowTokens - CONTEXT_SAFETY_TOKENS - replyFloorTokens(engine.model.maxTokens);
 	const marginedFloorFit = Math.floor(RETRY_FIT_SHARE * floorRoom) - prefixTokens;
@@ -227,6 +244,7 @@ export function recoveryDeps(chatStore: ChatStore, record: ChatRecord, engine: P
 		engine,
 		modelId: modelIdOf(engine),
 		kind,
+		rejectionInForce: inForce,
 		failedRequestTokens,
 		windowTokens,
 		fitTokens: Math.floor(RETRY_FIT_SHARE * (windowTokens - outputReserveTokens(windowTokens, engine.model.maxTokens))) - prefixTokens,
@@ -342,10 +360,14 @@ export async function recoverContext(deps: RecoveryDeps, chatId: string): Promis
 			}
 		}
 		// The deterministic fallback, never a model call: shorter kept
-		// tails until the request fits; the smallest, a quarter of the
-		// budget, lands regardless.
+		// tails until the request fits; the smallest lands regardless.
+		// The last message alone is the last resort (LH-55), only for a
+		// rejection still in force when no larger tail can be cut: the
+		// estimate may say the chat fits while the provider said it does
+		// not. A budget of 0 never gets there.
 		let fallback: LhMarkerMessage | null = null;
-		for (const keep of [budget / 2, budget / 4]) {
+		for (const keep of [budget / 2, budget / 4, 1]) {
+			if (keep === 1 && (fallback || budget <= 0 || !deps.rejectionInForce)) break;
 			const at = cutFor(keep);
 			if (at === null) continue;
 			fallback = markerAt(at, droppedSpanSummary(record, previous, base.slice(floor, at), Math.max((budget / 2) * 4, 1_000)));
