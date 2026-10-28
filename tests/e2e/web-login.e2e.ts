@@ -141,6 +141,8 @@ test("(a) no password: loopback needs no login, remote requests get nothing, and
 	assert.match(JSON.parse(first.body).error, /npm run remote-access:set-password/);
 	assert.equal((await remoteAccess(viaServe(), "PUT", { password: PASSWORD })).status, 401);
 	assert(!fs.existsSync(path.join(server.dataDir, "web-login.json")));
+	const pathRead = await raw("/api/attachments/file", { method: "POST", headers: { ...local(), ...JSON_BODY }, body: JSON.stringify({ path: "/nonexistent/lh-43.png" }) });
+	assert(![401, 403].includes(pathRead.status), `without a password, host routes answer this computer as before (${pathRead.status})`);
 
 	const chrome = await launchChrome(TICKET, ["--no-proxy-server"]);
 	try {
@@ -273,6 +275,57 @@ test("(d) headless Chrome on the tailnet logs in through the login page, uses th
 		await page.evaluate(async () => { await fetch("/logout", { method: "POST" }); });
 		assert.equal(await page.evaluate(async () => (await fetch("/api/settings")).status), 401);
 		assert.equal((await raw("/api/settings", { headers: viaServe("100.70.0.4", { cookie: `lh_session=${cookie.value}` }) })).status, 401, "the server revoked it, not only the browser");
+	} finally {
+		await chrome.close();
+	}
+});
+
+const WEB_COMPUTER_ONLY = "Change this on the computer: run npm run remote-access:off, change it here, then set the password again.";
+
+test("(h) with a password, a session cannot run binaries, read paths, move endpoints or sign in on the computer", async () => {
+	const cookie = cookieOf(await login("100.70.0.12", PASSWORD));
+	const session = { ...viaServe("100.70.0.12", { cookie, origin: `https://${TS_HOST}` }), ...JSON_BODY };
+	const send = (pathname: string, method: string, body?: unknown) => raw(pathname, { method, headers: session, body: body === undefined ? undefined : JSON.stringify(body) });
+	// Every one is refused by proxy.ts before its route runs, so no real `claude` is ever started.
+	for (const [pathname, method, body] of [
+		["/api/claude-code", "GET", undefined],
+		["/api/claude-code", "PUT", { mode: "local", executable: "/bin/sh" }],
+		["/api/claude-code", "PUT", { mode: "endpoint", baseUrl: "https://evil.example", token: "stolen" }],
+		["/api/claude-code/endpoint", "DELETE", undefined],
+		["/api/claude-code/login", "POST", {}],
+		["/api/subscriptions", "GET", undefined],
+		["/api/subscriptions", "POST", { providerId: "chatgpt", op: "login" }],
+		["/api/subscriptions/browser?id=00000000-0000-0000-0000-000000000000", "GET", undefined],
+		["/api/attachments/file", "POST", { path: "/etc/hosts" }],
+		["/api/claude-cod%65", "GET", undefined],
+		["/api/attachments/fil%65", "POST", { path: "/etc/hosts" }],
+	] as const) {
+		const res = await send(pathname, method, body);
+		assert.equal(res.status, 403, `${method} ${pathname}`);
+		assert.deepEqual(JSON.parse(res.body), { error: WEB_COMPUTER_ONLY, computerOnly: true }, `${method} ${pathname}`);
+	}
+	// Plain key values stay writable: in web mode every browser is a session once a password exists.
+	assert.equal((await send("/api/keys/OPENROUTER_API_KEY", "PUT", { value: "e2e-dummy-key-not-real" })).status, 200);
+	assert.equal((await send("/api/keys/OPENROUTER_API_KEY", "DELETE")).status, 200);
+	assert.equal((await send("/api/keys", "GET")).status, 200);
+	assert.equal((await send("/api/chats", "POST", { title: "From a session" })).status, 200);
+	assert.equal((await send("/api/settings/general", "PUT", { autoUpdate: true })).status, 200);
+
+	const chrome = await launchChrome(TICKET, ["--no-proxy-server"]);
+	try {
+		const page = await chrome.browser.newPage();
+		await page.setViewport({ width: 1280, height: 800 });
+		await page.setCookie({ name: "lh_session", value: cookie.split("=")[1]!, url: server.url });
+		await page.goto(`${server.url}/`, { waitUntil: "domcontentloaded", timeout: 120_000 });
+		await until(async () => {
+			await page.click('[data-testid="settings-entry"]');
+			return page.waitForSelector('[data-testid="settings-nav-keys"]', { timeout: 2000 });
+		}, "the settings dialog to open", 120_000, 500);
+		await page.click('[data-testid="settings-nav-keys"]');
+		await page.waitForSelector('[data-testid="connections-computer-only"]', { timeout: 60_000 });
+		assert.equal(await page.$eval('[data-testid="connections-computer-only"]', (el) => el.textContent), WEB_COMPUTER_ONLY);
+		assert.equal(await page.$('[data-testid="keys-computer-only"]'), null, "keys stay editable in web mode");
+		assert.equal(await page.$('[data-testid="claude-code-connection"]'), null);
 	} finally {
 		await chrome.close();
 	}

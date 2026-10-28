@@ -343,8 +343,9 @@ export function KeysSection({
 	/** The paste editor for a freshly chosen Add-provider target. */
 	const [adding, setAdding] = useState<ProviderKeyInfo | null>(null);
 	const [addError, setAddError] = useState<string | null>(null);
-	/** A phone in the desktop app reads key status but saves nothing (proxy.ts). */
+	/** A logged-in browser in the desktop app reads key status but saves nothing (proxy.ts). */
 	const computerOnly = useComputerOnly();
+	const keysLocked = computerOnly?.keys ? computerOnly.message : null;
 
 	// Escape folds any open editor (unfolded row or the Add-provider paste)
 	// WITHOUT closing the dialog. Claimed at document CAPTURE phase — the
@@ -429,7 +430,7 @@ export function KeysSection({
 	return (
 		<>
 			<SettingsGroup label="Model API keys" testid="group-provider-keys">
-				{computerOnly && <ComputerOnlyNote testid="keys-computer-only" />}
+				{keysLocked && <ComputerOnlyNote testid="keys-computer-only" message={keysLocked} />}
 				{providerRows.map((status) => (
 					<KeyTableRow
 						key={status.id}
@@ -444,7 +445,7 @@ export function KeysSection({
 							return err;
 						}}
 						onCancel={() => setOpenRow(null)}
-						onDelete={computerOnly ? undefined : () => deleteKey(status.id)}
+						onDelete={keysLocked ? undefined : () => deleteKey(status.id)}
 						testid={`key-${status.id.toLowerCase()}`}
 					/>
 				))}
@@ -490,7 +491,7 @@ export function KeysSection({
 							return err;
 						}}
 						onCancel={() => setOpenRow(null)}
-						onDelete={computerOnly ? undefined : () => deleteKey(status.id)}
+						onDelete={keysLocked ? undefined : () => deleteKey(status.id)}
 						testid={`key-${status.id.toLowerCase()}`}
 					/>
 				))}

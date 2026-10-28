@@ -181,14 +181,15 @@ test("(desktop) a phone behind tailscale serve logs in and uses the app; the win
 	assert.equal((await raw("/api/settings", { headers: phone() })).status, 403);
 });
 
-test("(desktop) keys and the Claude Code connection change only from the window; a phone reads status and keeps using the app", async () => {
+test("(desktop) keys, Claude Code, sign-ins and path reads go only through the window; a phone reads status and keeps using the app", async () => {
 	const local = { origin: `http://127.0.0.1:${port}` };
 	const send = (pathname: string, method: string, headers: Record<string, string>, body?: unknown) =>
 		raw(pathname, { method, headers: { "content-type": "application/json", ...headers }, body: body === undefined ? undefined : JSON.stringify(body) });
-	// The window: keys and the Claude Code mode as before.
+	// The window gets through as before. (No /api/claude-code call: that would run the host's real claude.)
 	assert.equal((await send("/api/keys/OPENROUTER_API_KEY", "PUT", { ...WINDOW_API, ...local }, { value: "e2e-dummy-key-not-real" })).status, 200);
 	assert.equal((await send("/api/keys/OPENROUTER_API_KEY", "DELETE", { ...WINDOW_API, ...local })).status, 200);
-	assert.equal((await send("/api/claude-code", "PUT", { ...WINDOW_API, ...local }, { mode: "off" })).status, 200);
+	const missing = await send("/api/attachments/file", "POST", { ...WINDOW_API, ...local }, { path: "/nonexistent/lh-43.png" });
+	assert(![401, 403].includes(missing.status), `the route itself answered the window (${missing.status})`);
 
 	const login = await raw("/login", {
 		method: "POST",
@@ -201,14 +202,16 @@ test("(desktop) keys and the Claude Code connection change only from the window;
 	for (const [pathname, method, body] of [
 		["/api/keys/OPENROUTER_API_KEY", "PUT", { value: "attacker-chosen-key-value" }],
 		["/api/keys/OPENROUTER_API_KEY", "DELETE", undefined],
-		["/api/claude-code", "PUT", { mode: "endpoint" }],
+		["/api/claude-code", "GET", undefined],
+		["/api/claude-code", "PUT", { mode: "local", executable: "/bin/sh" }],
 		["/api/claude-code/endpoint", "DELETE", undefined],
 		["/api/claude-code/login", "POST", {}],
 		["/api/subscriptions", "POST", { providerId: "chatgpt", op: "login" }],
+		["/api/attachments/file", "POST", { path: "/etc/hosts" }],
 	] as const) {
 		const res = await send(pathname, method, phone, body);
 		assert.equal(res.status, 403, `${method} ${pathname}`);
-		assert.deepEqual(JSON.parse(res.body), { error: "Change this on the computer running LearnHarness.", computerOnly: true });
+		assert.deepEqual(JSON.parse(res.body), { error: "Change this in the LearnHarness desktop app on the computer.", computerOnly: true });
 	}
 	assert.equal((await send("/api/chats", "POST", phone, { title: "From the phone" })).status, 200, "chats still work");
 	assert.equal((await send("/api/settings/general", "PUT", phone, { autoUpdate: true })).status, 200, "ordinary settings still save");
@@ -224,9 +227,9 @@ test("(desktop) keys and the Claude Code connection change only from the window;
 			return page.waitForSelector('[data-testid="settings-nav-keys"]', { timeout: 2000 });
 		}, "the settings dialog to open", 120_000, 500);
 		await page.click('[data-testid="settings-nav-keys"]');
-		for (const note of ["keys-computer-only", "claude-code-computer-only"]) {
+		for (const note of ["keys-computer-only", "connections-computer-only"]) {
 			await page.waitForSelector(`[data-testid="${note}"]`, { timeout: 60_000 });
-			assert.equal(await page.$eval(`[data-testid="${note}"]`, (el) => el.textContent), "Change this on the computer running LearnHarness.");
+			assert.equal(await page.$eval(`[data-testid="${note}"]`, (el) => el.textContent), "Change this in the LearnHarness desktop app on the computer.");
 		}
 	} finally {
 		await chrome.close();

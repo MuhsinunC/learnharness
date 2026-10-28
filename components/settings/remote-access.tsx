@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { COMPUTER_ONLY_ERROR, REMOTE_PASSWORD_MIN } from "@/src/core";
+import { computerOnlyMessage, REMOTE_PASSWORD_MIN } from "@/src/core";
 import { SettingsRow } from "./controls.tsx";
 
 /** GET /api/remote-access (LH-43). */
@@ -20,23 +20,25 @@ const DOCS = `${process.env.LH_HOMEPAGE ?? ""}/blob/main/docs/remote-access.md`;
 const code = "select-all font-mono text-foreground";
 const field = "h-7 w-32 rounded-sm border border-border bg-background px-1.5 font-mono text-xs text-foreground outline-none placeholder:text-muted-foreground/60 focus:border-muted-foreground/50";
 
-/** True on a logged-in phone in the desktop app, where keys and the Claude Code
- * connection can only be changed on the computer (proxy.ts refuses them). */
-export function useComputerOnly(): boolean {
-	const [computerOnly, setComputerOnly] = useState(false);
+/** For a logged-in browser session (from the access stamp GET
+ * /api/remote-access already returns): the message proxy.ts sends for
+ * host-affecting changes, and whether key writes are among them (desktop
+ * app only). null on the desktop window, or when no password exists. */
+export function useComputerOnly(): { message: string; keys: boolean } | null {
+	const [state, setState] = useState<{ message: string; keys: boolean } | null>(null);
 	useEffect(() => {
 		let live = true;
 		void fetch("/api/remote-access")
 			.then((r) => r.json() as Promise<RemoteAccess>)
-			.then((s) => { if (live) setComputerOnly(s.desktop && s.access === "session"); })
+			.then((s) => { if (live && s.access === "session") setState({ message: computerOnlyMessage(s.desktop), keys: s.desktop }); })
 			.catch(() => {});
 		return () => { live = false; };
 	}, []);
-	return computerOnly;
+	return state;
 }
 
-export function ComputerOnlyNote({ testid }: { testid: string }) {
-	return <p className="text-xs text-muted-foreground" data-testid={testid}>{COMPUTER_ONLY_ERROR}</p>;
+export function ComputerOnlyNote({ testid, message }: { testid: string; message: string }) {
+	return <p className="text-xs text-muted-foreground" data-testid={testid}>{message}</p>;
 }
 
 /** Settings → General: the login password for phones on the learner's

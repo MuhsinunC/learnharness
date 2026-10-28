@@ -114,6 +114,15 @@ Safe:
 - The first password can only be set in the desktop app or with the terminal
   command, never by a web page. Changing it from a browser needs the current
   password.
+- A logged-in browser can use the app, but nothing that acts on the computer
+  itself: the Claude Code connection (its program path, custom endpoint and
+  token, sign-in), ChatGPT, Copilot and Grok sign-in, and attaching an image
+  by its file path. It shows "Change this in the LearnHarness desktop app on
+  the computer" instead (in web mode: turn remote access off with
+  `npm run remote-access:off`, change it, then set the password again). In
+  the desktop app, API keys too can only be changed in the app window. In
+  web mode a browser may still save or delete an API key, because once a
+  password exists every browser is logged in, the one on the computer too.
 - The password is stored only as a slow scrypt hash, in `web-login.json` in the
   data folder (readable only by your user).
 
@@ -151,3 +160,20 @@ listens on `127.0.0.1`; `LH_LISTEN_PORT` (else `PORT`, else 3000) sets the
 port. It refuses any other address (`LH_LISTEN_HOST`) and any `-H`/`-p`
 option, because a phone reaches LearnHarness through `tailscale serve`, never
 by LearnHarness listening on a network.
+
+## Starting it from your own script
+
+A script that starts LearnHarness for phone access must use a production
+server, never `next dev`. From the LearnHarness folder:
+
+```bash
+npm ci                                   # once, and after every update
+npm run build                            # after every update
+export LH_DATA_DIR=/path/to/your/data    # the same folder for every step
+npm run remote-access:set-password       # once
+LH_LISTEN_PORT=3757 npm start            # keep your other exports (keys, ...) before this
+tailscale serve --bg 3757                # once; it survives restarts
+```
+
+Then open the `https://…ts.net` address on the phone and log in. The browser
+on the computer logs in too.

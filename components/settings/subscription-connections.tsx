@@ -133,8 +133,10 @@ export function SubscriptionConnections({ setup = false }: { setup?: boolean }) 
 	// Providers uses ordinary settings-label typography. The setup surface
 	// keeps its existing compact labels; dialogs and actions are untouched.
 	const labelClassName = setup ? undefined : "font-prose text-(length:--lh-prose-size) text-foreground";
+	// Sign-ins and the Claude Code binary act on the computer: a logged-in browser only sees why.
 	const computerOnly = useComputerOnly();
-	return <div className="space-y-3" data-testid="subscription-connections"><ChatGPTConnection setup={setup} labelClassName={labelClassName} />{NATIVE_SUBSCRIPTIONS.map((p) => <NativeSubscriptionConnection key={p.providerId} providerId={p.providerId} labelClassName={labelClassName} />)}{computerOnly ? <ComputerOnlyNote testid="claude-code-computer-only" /> : <ClaudeCodeConnection labelClassName={labelClassName} />}</div>;
+	if (computerOnly) return <div className="space-y-3" data-testid="subscription-connections"><ComputerOnlyNote testid="connections-computer-only" message={computerOnly.message} /></div>;
+	return <div className="space-y-3" data-testid="subscription-connections"><ChatGPTConnection setup={setup} labelClassName={labelClassName} />{NATIVE_SUBSCRIPTIONS.map((p) => <NativeSubscriptionConnection key={p.providerId} providerId={p.providerId} labelClassName={labelClassName} />)}<ClaudeCodeConnection labelClassName={labelClassName} /></div>;
 }
 export function NativeSubscriptionBackgroundAccess({ provider }: { provider: string | undefined }) {
 	const ui = useContext(Context), descriptor = NATIVE_SUBSCRIPTIONS.find((p) => p.logicalId === provider);

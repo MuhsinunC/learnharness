@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { COMPUTER_ONLY_ERROR } from "./src/core/remote-access.ts";
+import { computerOnlyMessage } from "./src/core/remote-access.ts";
 import { computerOnlyRequest, desktopAPIAuthorized, desktopPageAuthorized, isDesktopServer } from "./src/server/desktop-access.ts";
 import { ACCESS_HEADER, decideAccess, type Access } from "./src/server/web-login.ts";
 
@@ -28,11 +28,13 @@ export function proxy(request: NextRequest) {
 				{ status: 403, headers: { "Cache-Control": "no-store" } },
 			);
 		}
-		if (access === "session" && computerOnlyRequest(request.method, pathname)) {
-			return NextResponse.json({ error: COMPUTER_ONLY_ERROR, computerOnly: true }, { status: 403, headers: { "Cache-Control": "no-store" } });
-		}
 	} else {
 		access = decideAccess(request.headers);
+	}
+	// Sessions exist only once a password is set (web-login.ts), so this never
+	// changes anything without one.
+	if (access === "session" && computerOnlyRequest(request.method, pathname, isDesktopServer())) {
+		return NextResponse.json({ error: computerOnlyMessage(isDesktopServer()), computerOnly: true }, { status: 403, headers: { "Cache-Control": "no-store" } });
 	}
 	if (access) headers.set(ACCESS_HEADER, access);
 	if (access || pathname === "/login") return NextResponse.next({ request: { headers } });

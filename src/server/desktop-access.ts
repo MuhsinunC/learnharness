@@ -47,12 +47,22 @@ export function desktopPageAuthorized(
 	return expected !== null && matches(cookie?.slice("lh_desktop=".length), expected);
 }
 
-/** Credential and host-process writes (LH-43): provider keys, the Claude Code
- * connection, endpoint and sign-in (which may spawn processes on this
- * computer), and subscription controls. In the desktop app only its own
- * window may make them, so a leaked remote-access password cannot swap a
- * key or endpoint, redirect the learner's traffic, or start a process. */
-export function computerOnlyRequest(method: string, pathname: string): boolean {
-	if (method === "GET" || method === "HEAD" || method === "OPTIONS") return false;
-	return pathname.startsWith("/api/keys/") || pathname === "/api/claude-code" || pathname.startsWith("/api/claude-code/") || pathname.startsWith("/api/subscriptions");
+/** Host-affecting routes (LH-43): once a remote-access password exists, a
+ * logged-in browser session may not use them; only the desktop window
+ * (its secret header) may. A stolen session cookie must not become a way
+ * to run a binary, read a file, send credentials to a new endpoint or sign
+ * in to an account on this computer.
+ *   - /api/claude-code, /endpoint, /login: the executable path (runs it,
+ *     GET included), the endpoint base URL and token, `claude auth login`.
+ *   - /api/subscriptions, /browser: ChatGPT, Copilot and Grok sign-in (web mode).
+ *   - POST /api/attachments/file: reads an image at a path on this computer.
+ *   - /api/keys/* writes, in the desktop app only: there the window can do
+ *     it. In web mode a password makes every browser a session, so key
+ *     writes (a value, never a URL) stay open to sessions. */
+export function computerOnlyRequest(method: string, rawPathname: string, desktop: boolean): boolean {
+	// Match what the router matches: a percent-encoded name must not slip past.
+	let pathname = rawPathname;
+	try { pathname = decodeURIComponent(rawPathname); } catch { /* malformed: as sent */ }
+	if (/^\/api\/(claude-code|subscriptions)(\/|$)/.test(pathname) || pathname === "/api/attachments/file") return true;
+	return desktop && pathname.startsWith("/api/keys/") && method !== "GET" && method !== "HEAD";
 }

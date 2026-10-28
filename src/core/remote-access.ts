@@ -7,6 +7,11 @@ export function remotePasswordProblem(password: unknown): string | null {
 	return password.length > REMOTE_PASSWORD_MAX ? `The password can have at most ${REMOTE_PASSWORD_MAX} characters.` : null;
 }
 
-/** What a logged-in phone gets for a credential or host-process change in the
- * desktop app (src/server/desktop-access.ts computerOnlyRequest). */
-export const COMPUTER_ONLY_ERROR = "Change this on the computer running LearnHarness.";
+/** What a logged-in browser gets for a host-affecting change once a password
+ * exists (src/server/desktop-access.ts computerOnlyRequest): the desktop
+ * window may make it; in web mode, the computer turns remote access off first. */
+export function computerOnlyMessage(desktop: boolean): string {
+	return desktop
+		? "Change this in the LearnHarness desktop app on the computer."
+		: "Change this on the computer: run npm run remote-access:off, change it here, then set the password again.";
+}
