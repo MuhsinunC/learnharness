@@ -1218,11 +1218,14 @@ export function Chat({
 		if (busy || pending || compacting) return;
 		const t = textRef.current.trim();
 		if (!t) return;
-		if (zeroKeys) {
+		// A Claude Code selection that is off still sends: the server's refusal
+		// keeps the draft and shows the restart instructions in the banner.
+		const claudeCodeOff = !!selectedModel?.startsWith("claude-code:") && selectedModelUnavailable(catalog, selectedModel);
+		if (zeroKeys && !claudeCodeOff) {
 			setSetupOpen(true);
 			return;
 		}
-		if (selectedModelUnavailable(catalog, selectedModel)) {
+		if (!claudeCodeOff && selectedModelUnavailable(catalog, selectedModel)) {
 			openModelPicker();
 			return; // No optimistic send and no change to the learner's draft.
 		}
