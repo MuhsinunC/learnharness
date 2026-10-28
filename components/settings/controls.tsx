@@ -54,7 +54,8 @@ export function SettingsGroup({
 }
 
 /** One label + one control. Label left (with optional muted hint), control
- *  right — the settings row shape. */
+ *  right — the settings row shape. On a phone the control wraps under the
+ *  label when both don't fit. */
 export function SettingsRow({
 	label,
 	hint,
@@ -71,7 +72,7 @@ export function SettingsRow({
 	dimmed?: boolean;
 }) {
 	return (
-		<div data-testid={testid} className={cn("flex items-center justify-between gap-4 py-1", dimmed && "opacity-40")}>
+		<div data-testid={testid} className={cn("flex items-center justify-between gap-4 py-1 max-sm:flex-wrap max-sm:gap-y-2", dimmed && "opacity-40")}>
 			<span className="min-w-0">
 				<span className="block font-prose text-(length:--lh-prose-size)">{label}</span>
 				{hint && <span className="block text-xs text-muted-foreground/70">{hint}</span>}

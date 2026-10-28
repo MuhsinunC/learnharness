@@ -128,7 +128,7 @@ export function StatsBar({
 				onClick={() => setOpen((o) => !o)}
 				aria-expanded={open}
 				data-testid="stats-summary"
-				className="flex items-center gap-1.5 tabular-nums transition-colors hover:text-foreground"
+				className="flex items-center gap-1.5 whitespace-nowrap tabular-nums transition-colors hover:text-foreground"
 			>
 				<span data-testid="stats-context">
 					{contextLabel}
@@ -139,7 +139,8 @@ export function StatsBar({
 				{open && (
 					<div
 						data-testid="stats-detail"
-						className="absolute bottom-full left-1/2 z-40 mb-1.5 w-72 -translate-x-1/2 rounded-xl border bg-card p-3 text-xs shadow-xl"
+						// Below the desktop width: left-aligned, centered it would hang off the screen's left edge.
+						className="absolute bottom-full left-1/2 z-40 mb-1.5 w-72 -translate-x-1/2 rounded-xl border bg-card p-3 text-xs shadow-xl max-lg:left-0 max-lg:translate-x-0"
 					>
 						<div className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
 							Session stats
