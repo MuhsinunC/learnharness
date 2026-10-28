@@ -198,13 +198,22 @@ function recoverFromOverflow(
 	// plain explanation (Repair stays offered unless nothing can help).
 	const explain = (text: (model: string) => string, model: string, unrecoverable = false) =>
 		explainOverflow(stores.chatStore, chatId, text(model), unrecoverable);
-	// Learn first: the summarizer's engine then runs at the stated limit.
+	// Learn first, for the model that was rejected: the summarizer's
+	// engine then runs at the stated limit.
 	learnStatedLimit(conversation, record.messages);
+	// The spec is resolved afresh, as Repair does (LH-55): a window or
+	// model changed during the turn applies to the recovery.
+	const fresh = effectiveSettings();
+	const spec = resolveConversationSpec(record.settings, fresh.models.strong);
+	if (!spec) return explain(overflowExplanation.notCondensed, conversation.id);
 	let engine: PiEngine;
-	try { engine = piEngineForSpec(withContextWindow(conversation, stores.settingsStore.readSettings()), true); }
-	catch { return explain(overflowExplanation.notCondensed, conversation.id); }
+	try { engine = piEngineForSpec(withContextWindow(spec, fresh), true); }
+	catch { return explain(overflowExplanation.notCondensed, spec.id); }
 	const modelName = engine.model.name || engine.model.id;
 	const deps = recoveryDeps(stores.chatStore, record, engine, `This chat had grown too long for ${modelName}; I condensed the older part and continued.`);
+	// The prompt and tool declarations alone leave no room (LH-55): no
+	// condensing can help, so the history stays as it is.
+	if (deps.floorFitTokens <= 0) return explain(overflowExplanation.stillTooLong, modelName, true);
 	// The retry failed too: unrecoverable only when nothing is left to
 	// condense; otherwise Repair stays offered (LH-50).
 	if (recoveryAttempted(record.messages)) {
@@ -212,7 +221,7 @@ function recoverFromOverflow(
 			? explain(overflowExplanation.retryFailed, modelName)
 			: explain(overflowExplanation.stillTooLong, modelName, true);
 	}
-	if (!connectionBackgroundAllowed(conversation.provider)) return explain(overflowExplanation.backgroundOff, modelName);
+	if (!connectionBackgroundAllowed(spec.provider)) return explain(overflowExplanation.backgroundOff, modelName);
 	const recover = () => holdCompactionGate(chatId, () => recoverContext(deps, chatId));
 	void (async () => {
 		// A compaction already holding the gate: wait for it (bounded), once.
@@ -258,8 +267,12 @@ export async function handleRepairRequest(chatId: string): Promise<Response> {
 	try { engine = piEngineForSpec(withContextWindow(spec, effectiveSettings()), false); }
 	catch { return Response.json({ error: "The selected model is unavailable." }, { status: 503 }); }
 	const modelName = engine.model.name || engine.model.id;
-	const notice = `This chat had grown too long for ${modelName}; I condensed the older part.`;
-	const run = holdCompactionGate(chatId, () => recoverContext(recoveryDeps(stores.chatStore, record, engine, notice), chatId));
+	const deps = recoveryDeps(stores.chatStore, record, engine, `This chat had grown too long for ${modelName}; I condensed the older part.`);
+	if (deps.floorFitTokens <= 0) {
+		explainOverflow(stores.chatStore, chatId, overflowExplanation.stillTooLong(modelName), true);
+		return Response.json({ error: "Condensing cannot help: the instructions and tools alone fill this model's context window." }, { status: 422 });
+	}
+	const run = holdCompactionGate(chatId, () => recoverContext(deps, chatId));
 	if (!run) return Response.json({ error: "This session is already being condensed. Try again in a moment." }, { status: 409 });
 	if ((await run) === "unchanged") {
 		explainOverflow(stores.chatStore, chatId, overflowExplanation.stillTooLong(modelName), true);
