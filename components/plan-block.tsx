@@ -14,7 +14,7 @@ import { layout as dagreLayout } from "dagre-d3-es/src/dagre/index.js";
 import { curveBasis, line } from "d3-shape";
 import { fitGraphView, fitZoomFor, zoomedGraphView, type Viewport } from "@/components/pan-zoom";
 import type { PlanBlockData, PlanNodeStatus, PlanTree } from "@/src/core";
-import { derivedNodeStatus, derivePlanStatuses } from "@/src/core";
+import { derivedNodeStatus, derivePlanStatuses, pageInert } from "@/src/core";
 import { Hint } from "@/components/ui/hint";
 
 /**
@@ -765,7 +765,7 @@ export function PlanPopup({ messages, onClose }: { messages: readonly PopupMessa
 	// cancelled the dictation).
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent) => {
-			if (e.key === "Escape") {
+			if (e.key === "Escape" && !pageInert()) {
 				e.preventDefault();
 				e.stopPropagation();
 				onClose();

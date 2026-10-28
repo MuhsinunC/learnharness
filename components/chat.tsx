@@ -42,6 +42,7 @@ import {
 	messageAnchorId,
 	textPartMessageId,
 	kbdEventForAction as kbdEventForChat,
+	pageInert,
 	type ChatInput,
 	type ChatSettings,
 	type LhMessage,
@@ -2323,7 +2324,7 @@ function DockOverlay({
 	useEffect(() => {
 		if (!pending || expanded) return;
 		const onKeyDown = (e: KeyboardEvent) => {
-			if (e.key !== "Enter" || e.altKey) return;
+			if (e.key !== "Enter" || e.altKey || pageInert()) return;
 			if (e.shiftKey && !e.metaKey && !e.ctrlKey) return;
 			const t = e.target as HTMLElement | null;
 			if (

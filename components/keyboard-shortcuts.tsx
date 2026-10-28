@@ -34,6 +34,8 @@ import {
 	isTypingSurface,
 	kbdEventForAction,
 	KEYBOARD_ACTIONS,
+	pageInert,
+	type KeyAction,
 } from "@/src/core";
 import { isDictationActive } from "@/components/dictation";
 import { useSettingsDialog } from "@/components/settings/settings-dialog.tsx";
@@ -42,6 +44,10 @@ import { useSettingsDialog } from "@/components/settings/settings-dialog.tsx";
 // the dispatcher composes event names through the ONE helper — a second
 // spelling here is how the ⌘B bug happened.
 export { kbdEventForAction };
+
+/** The commands that still run while the page is inert behind the
+ *  drawer: they open an overlay or navigate, never touch the page. */
+const INERT_SAFE = new Set<KeyAction>(["open-settings", "open-model-picker", "toggle-sidebar", "sessions-search", "jump-graph", "new-session", "cheat-sheet"]);
 
 export function KeyboardShortcuts() {
 	const router = useRouter();
@@ -65,6 +71,8 @@ export function KeyboardShortcuts() {
 			// works from any focus.
 			if (e.key === "Tab") {
 				e.preventDefault();
+				// Behind the open drawer the page's fields and thinking level are inert.
+				if (pageInert()) return;
 				if (e.shiftKey) window.dispatchEvent(new CustomEvent("lh:kbd-cycle-thinking"));
 				// Plain Tab cycles the active surface's text fields (owner,
 				// keyboard round 2026-10-06) — forward-only, wrapping; each
@@ -83,6 +91,9 @@ export function KeyboardShortcuts() {
 					e.preventDefault();
 					return;
 				}
+				// The page under the drawer has nothing to cancel or abort;
+				// the drawer's own listener takes this Esc.
+				if (pageInert()) return;
 				// THE ONE-ESC LAW (owner, keyboard round 2026-10-06): one
 				// Esc, one action, on the topmost active layer. Field-level
 				// handlers claim at their element (focus in a field: the
@@ -112,6 +123,8 @@ export function KeyboardShortcuts() {
 			// fire (they never type a character). Bare keys — "?" included —
 			// pass through so the field keeps them. Tab already returned above.
 			if (isTypingSurface(e) && !(e.metaKey || e.ctrlKey || e.altKey)) return;
+			// Behind the open drawer only the app-wide commands run; the rest act on the inert page.
+			if (pageInert() && !INERT_SAFE.has(action)) return;
 
 			// Dispatch: global commands we own run here; surface commands
 			// ride the window event for the mounted surface to catch.

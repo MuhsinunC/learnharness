@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { ChevronDownIcon, ChevronUpIcon, SearchIcon, XIcon } from "lucide-react";
-import { kbdEventForAction, stepSessionMatch } from "@/src/core";
+import { kbdEventForAction, pageInert, stepSessionMatch } from "@/src/core";
 import {
 	sameSessionRange, sessionFindRanges, sessionRangeIdentity, type SessionRangeIdentity,
 } from "@/components/session-find-dom";
@@ -100,7 +100,7 @@ export function SessionFind({ scopeRef, scrollContextRef }: {
 		inputRef.current?.focus({ preventScroll: true });
 		inputRef.current?.select();
 		const onEscape = (event: KeyboardEvent) => {
-			if (event.key !== "Escape" || sessionFindHasForegroundLayer(document)) return;
+			if (event.key !== "Escape" || pageInert() || sessionFindHasForegroundLayer(document)) return;
 			event.preventDefault();
 			event.stopPropagation();
 			close();
