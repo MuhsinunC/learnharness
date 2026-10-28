@@ -221,7 +221,7 @@ function heldBackStream(model: Model<Api>, room: number, lifecycle?: ChatGPTDisp
 	const output = new AssistantMessageEventStream();
 	const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 	markUnadmittedUsage(usage);
-	lifecycle?.noDispatch("other");
+	lifecycle?.noDispatch("heldBack");
 	const error: AssistantMessage & HeldBack = {
 		role: "assistant", api: model.api, provider: model.provider, model: model.id, content: [], usage, stopReason: "error", timestamp: Date.now(),
 		errorMessage: `Not sent: the reply would have only ${Math.max(room, 0)} tokens of room in this chat's ${model.contextWindow}-token context window.`,
