@@ -2,8 +2,10 @@
  * THE LOGIN PAGE (LH-43): plain HTML from a route handler, outside the app
  * layout, so it loads no client code and makes no API calls. The form
  * posts back here; success sets the session cookie and returns to `next`.
- * Failed attempts are rate-limited per client (and globally) BEFORE the
- * password is hashed. Every Location is relative: behind tailscale serve
+ * Cross-site posts (Origin: null included) are refused before anything is
+ * charged; failed attempts are rate-limited per client (and globally)
+ * BEFORE the password is hashed. `next` is printable ASCII, so the
+ * redirect cannot fail after the session exists. Every Location is relative: behind tailscale serve
  * an absolute one would point the phone at the laptop's loopback.
  */
 import {
@@ -13,6 +15,8 @@ import {
 	createSession,
 	loginRetryAfter,
 	passwordConfigured,
+	remoteAccessAvailable,
+	sameOriginRequest,
 	safeNext,
 	sessionCookie,
 	verifyPassword,
@@ -23,14 +27,16 @@ export const dynamic = "force-dynamic";
 const escape = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
 function page(status: number, next: string, message: string | null, extra: Record<string, string> = {}): Response {
-	const form = passwordConfigured()
+	const form = !remoteAccessAvailable()
+		? `<p>Remote access works only in the desktop app or with npm start, never with a development server.</p>`
+		: passwordConfigured()
 		? `<form method="post" action="/login">
 <input type="hidden" name="next" value="${escape(next)}">
 <label for="password">Password</label>
 <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
 <button type="submit">Log in</button>
 </form>`
-		: `<p>Remote access is off. On the computer running LearnHarness, open Settings → General → Remote access and set a password.</p>`;
+		: `<p>Remote access is off. Set a password on the computer running LearnHarness: in the desktop app under Settings → General → Remote access, or with <code>npm run remote-access:set-password</code>.</p>`;
 	const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Log in · Learning Harness</title>
@@ -63,14 +69,10 @@ export async function GET(req: Request): Promise<Response> {
 }
 
 export async function POST(req: Request): Promise<Response> {
-	const origin = req.headers.get("origin");
-	if (origin !== null && origin !== "null") {
-		const host = (() => { try { return new URL(origin).host; } catch { return null; } })();
-		if (host !== req.headers.get("host")) return page(403, "/", "This login form must be sent from its own page.");
-	}
+	if (!sameOriginRequest(req.headers)) return page(403, "/", "This login form must be sent from its own page.");
 	const form = await req.formData().catch(() => null);
 	const next = safeNext(form?.get("next"));
-	if (!passwordConfigured()) return page(403, next, null);
+	if (!remoteAccessAvailable() || !passwordConfigured()) return page(403, next, null);
 	const key = clientKey(req.headers);
 	const wait = loginRetryAfter(key);
 	if (wait > 0) return page(429, next, "Too many failed attempts. Try again later.", { "Retry-After": String(wait) });

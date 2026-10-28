@@ -1,31 +1,34 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { desktopAPIAuthorized } from "./src/server/desktop-access.ts";
-import { ACCESS_HEADER, decideAccess } from "./src/server/web-login.ts";
+import { desktopAPIAuthorized, desktopPageAuthorized, isDesktopServer } from "./src/server/desktop-access.ts";
+import { ACCESS_HEADER, decideAccess, type Access } from "./src/server/web-login.ts";
 
 /** Applies to every API method, including SSE and spending/settings routes.
  * No public callback or worker bypass: internal jobs call server functions,
  * and any legitimate self-HTTP request must carry the private capability.
  *
- * Web login (LH-43): the one place pages, API, SSE and exports are gated,
- * in web mode and in the desktop app alike.
- * Local requests and valid sessions pass, stamped with ACCESS_HEADER for
- * the routes that care; everyone else gets 401 JSON or the login page. */
+ * Web login (LH-43): the one place pages, API, SSE and attachments are
+ * gated, in web mode and in the desktop app alike (trust rule:
+ * src/server/web-login.ts). Requests that pass carry ACCESS_HEADER for the
+ * routes that care; a client's own copy is always dropped first. */
 export function proxy(request: NextRequest) {
 	const headers = new Headers(request.headers);
 	headers.delete(ACCESS_HEADER);
 	const { pathname, search } = request.nextUrl;
 	const api = pathname.startsWith("/api");
-	let access = decideAccess(request.headers);
-	if (process.env.LH_DESKTOP_SERVER === "1" || process.env.LH_DESKTOP_API_SECRET) {
-		// Desktop: only the window's per-launch secret makes an API call local.
-		// A phone behind tailscale serve gets in with its session, like web mode.
-		if (api) access = desktopAPIAuthorized(request.headers) ? "local" : access === "session" ? "session" : null;
-		if (api && !access) {
+	let access: Access | null;
+	if (isDesktopServer()) {
+		// The window's per-launch secret: a header on its API calls, a cookie on
+		// its page loads. Without it an API call needs a session, never "local".
+		if (api ? desktopAPIAuthorized(request.headers) : desktopPageAuthorized(request.headers)) access = "desktop";
+		else access = decideAccess(request.headers);
+		if (api && access !== "desktop" && access !== "session") {
 			return NextResponse.json(
 				{ error: "Desktop API access requires the trusted LearnHarness window." },
 				{ status: 403, headers: { "Cache-Control": "no-store" } },
 			);
 		}
+	} else {
+		access = decideAccess(request.headers);
 	}
 	if (access) headers.set(ACCESS_HEADER, access);
 	if (access || pathname === "/login") return NextResponse.next({ request: { headers } });

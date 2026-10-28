@@ -2,21 +2,32 @@
 
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { REMOTE_PASSWORD_MIN } from "@/src/core";
 import { SettingsRow } from "./controls.tsx";
 
 /** GET /api/remote-access (LH-43). */
-type RemoteAccess = { enabled: boolean; access: "local" | "session" | null; remotePort: number | null; restartNeeded: boolean; url: string | null };
+type RemoteAccess = {
+	available: boolean;
+	desktop: boolean;
+	enabled: boolean;
+	access: "desktop" | "local" | "session" | null;
+	remotePort: number | null;
+	restartNeeded: boolean;
+	url: string | null;
+};
 
 const DOCS = `${process.env.LH_HOMEPAGE ?? ""}/blob/main/docs/remote-access.md`;
-const MIN_LENGTH = 8;
+const code = "select-all font-mono text-foreground";
+const field = "h-7 w-32 rounded-sm border border-border bg-background px-1.5 font-mono text-xs text-foreground outline-none placeholder:text-muted-foreground/60 focus:border-muted-foreground/50";
 
 /** Settings → General: the login password for phones on the learner's
- * tailnet, plus the one `tailscale serve` command and the phone's address.
- * Only the computer itself can change it; a logged-in phone sees the
- * status and a Log out button. */
+ * tailnet, the one `tailscale serve` command and the phone's address. The
+ * desktop window changes it freely; a logged-in browser re-enters the
+ * current password; web mode sets the first one with the CLI. */
 export function RemoteAccessSettings() {
 	const [state, setState] = useState<RemoteAccess | null>(null);
 	const [password, setPassword] = useState("");
+	const [current, setCurrent] = useState("");
 	const [error, setError] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false);
 
@@ -29,7 +40,7 @@ export function RemoteAccessSettings() {
 		const res = await fetch("/api/remote-access", {
 			method,
 			headers: { "content-type": "application/json" },
-			body: method === "PUT" ? JSON.stringify({ password }) : undefined,
+			body: JSON.stringify(method === "PUT" ? { password, current } : { current }),
 		}).catch(() => null);
 		setBusy(false);
 		if (!res?.ok) {
@@ -37,72 +48,70 @@ export function RemoteAccessSettings() {
 			return;
 		}
 		setPassword("");
-		await load();
+		setCurrent("");
+		// A browser session was revoked with every other one: log in again.
+		if (state?.access === "session") window.location.assign("/login");
+		else await load();
 	};
 
 	if (!state) return null;
-	const local = state.access === "local";
-	const hint = state.enabled
-		? "On. Devices on your tailnet log in with this password. Saving a new one logs every device out."
-		: "Off. Set a password to open LearnHarness from your phone over Tailscale.";
-	// A `tailscale serve` left running keeps forwarding to the port whoever holds it.
-	const serveOff = <code className="select-all font-mono text-foreground" data-testid="remote-access-serve-off">tailscale serve --https=443 off</code>;
-	const setup = !local ? null : !state.enabled ? (
-		<span className="block">If you shared LearnHarness with tailscale serve before, stop that too: {serveOff}</span>
-	) : state.restartNeeded ? (
-		<span className="block" data-testid="remote-access-restart">
-			Quit LearnHarness and open it again to finish. If this stays, port {state.remotePort} is used by another program: don’t run tailscale serve for it, and if you already did, run {serveOff}
-		</span>
-	) : (
-		<>
-			<span className="block">
-				Once, in Terminal on this computer: <code className="select-all font-mono text-foreground" data-testid="remote-access-command">tailscale serve --bg {state.remotePort}</code>
-			</span>
-			<span className="block">
-				Then open <span className="select-all font-mono text-foreground" data-testid="remote-access-url">{state.url ?? "https://<this-computer>.<your-tailnet>.ts.net"}</span> on your phone.
-			</span>
-		</>
-	);
+	// A stale tailscale serve keeps forwarding to whoever holds the port next.
+	const serveOff = <code className={code} data-testid="remote-access-serve-off">tailscale serve --https=443 off</code>;
+	let status: React.ReactNode;
+	if (!state.available) {
+		status = "Not available here. Remote access works only in the desktop app or with npm start, never with a development server.";
+	} else if (!state.enabled) {
+		status = state.desktop
+			? <>Off. Set a password to open LearnHarness from your phone over Tailscale. If you used tailscale serve before, stop it: {serveOff}</>
+			: <>Off. To turn it on, run <code className={code} data-testid="remote-access-cli">npm run remote-access:set-password</code> in the LearnHarness folder on this computer.</>;
+	} else if (state.restartNeeded) {
+		status = <span data-testid="remote-access-restart">On, but quit LearnHarness and open it again to finish. If this stays, port {state.remotePort} is used by another program: don’t run tailscale serve for it, and if you already did, run {serveOff}</span>;
+	} else {
+		status = (
+			<>
+				<span className="block">On. Devices on your tailnet log in with the password; saving a new one logs every device out.</span>
+				<span className="block">Once, in Terminal on this computer: <code className={code} data-testid="remote-access-command">tailscale serve --bg {state.remotePort}</code></span>
+				<span className="block">Then open <span className={code} data-testid="remote-access-url">{state.url ?? "https://<this-computer>.<your-tailnet>.ts.net"}</span> on your phone.</span>
+			</>
+		);
+	}
+	const canEdit = state.available && (state.access === "desktop" || (state.access === "session" && state.enabled));
+	const needsCurrent = state.access === "session";
 	return (
 		<SettingsRow
 			label="Remote access"
 			testid="row-remote-access"
 			hint={
 				<>
-					<span className="block" data-testid="remote-access-status">{hint}</span>
-					{setup}
+					<span className="block" data-testid="remote-access-status">{status}</span>
 					{error && <span className="block text-red-500" role="alert">{error}</span>}
 					<a href={DOCS} target="_blank" rel="noopener noreferrer" className="underline-offset-2 hover:text-foreground hover:underline">How to set it up</a>
 				</>
 			}
 		>
-			{local ? (
-				<span className="flex shrink-0 items-center gap-2">
-					<input
-						type="password"
-						value={password}
-						onChange={(e) => setPassword(e.target.value)}
-						placeholder={state.enabled ? "New password" : "Password"}
-						aria-label="Remote access password"
-						autoComplete="new-password"
-						data-testid="remote-access-password"
-						disabled={busy}
-						className="h-7 w-36 rounded-sm border border-border bg-background px-1.5 font-mono text-xs text-foreground outline-none placeholder:text-muted-foreground/60 focus:border-muted-foreground/50"
-					/>
-					<Button type="button" size="xs" className="cursor-pointer" data-testid="remote-access-save" disabled={busy || password.length < MIN_LENGTH} onClick={() => void change("PUT")}>
-						Save
-					</Button>
-					{state.enabled && (
-						<Button type="button" size="xs" variant="outline" className="cursor-pointer" data-testid="remote-access-off" disabled={busy} onClick={() => void change("DELETE")}>
-							Turn off
+			<span className="flex shrink-0 items-center gap-2">
+				{canEdit && needsCurrent && (
+					<input type="password" value={current} onChange={(e) => setCurrent(e.target.value)} placeholder="Current password" aria-label="Current remote access password" autoComplete="current-password" data-testid="remote-access-current" disabled={busy} className={field} />
+				)}
+				{canEdit && (
+					<>
+						<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={state.enabled ? "New password" : "Password"} aria-label="Remote access password" autoComplete="new-password" data-testid="remote-access-password" disabled={busy} className={field} />
+						<Button type="button" size="xs" className="cursor-pointer" data-testid="remote-access-save" disabled={busy || password.length < REMOTE_PASSWORD_MIN || (needsCurrent && !current)} onClick={() => void change("PUT")}>
+							Save
 						</Button>
-					)}
-				</span>
-			) : (
-				<form method="post" action="/logout">
-					<Button type="submit" size="xs" variant="outline" className="cursor-pointer" data-testid="remote-access-logout">Log out</Button>
-				</form>
-			)}
+						{state.enabled && (
+							<Button type="button" size="xs" variant="outline" className="cursor-pointer" data-testid="remote-access-off" disabled={busy || (needsCurrent && !current)} onClick={() => void change("DELETE")}>
+								Turn off
+							</Button>
+						)}
+					</>
+				)}
+				{state.access === "session" && (
+					<form method="post" action="/logout">
+						<Button type="submit" size="xs" variant="outline" className="cursor-pointer" data-testid="remote-access-logout">Log out</Button>
+					</form>
+				)}
+			</span>
 		</SettingsRow>
 	);
 }

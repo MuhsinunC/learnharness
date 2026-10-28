@@ -15,7 +15,7 @@ Not a chat app with a graph bolted on: sessions are probe→teach lessons, the p
 ```bash
 npm install          # once
 
-npm run dev          # http://127.0.0.1:3000 (scripts/web-server.mjs binds loopback; phones: docs/remote-access.md)
+npm run dev          # http://127.0.0.1:3000 (scripts/web-server.mjs binds loopback; phones need npm start, docs/remote-access.md)
 npm run build        # production build (standalone output)
 npm start            # serve the production build
 

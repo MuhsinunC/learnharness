@@ -50,3 +50,4 @@ export { sessionCost } from "./pricing.ts";
 export { getClaudeCodeConnection, putClaudeCodeConnection, postClaudeCodeLogin, deleteClaudeCodeEndpoint } from "./claude-code-connection.ts";
 export * from "./attachments.ts";
 export * from "./web-login.ts";
+export { isDesktopServer } from "./desktop-access.ts";

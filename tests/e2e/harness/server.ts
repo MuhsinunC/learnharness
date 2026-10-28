@@ -38,6 +38,10 @@ export interface BootOptions {
 	providers: E2EProvider[];
 	/** Extra env for the server process. */
 	env?: Record<string, string>;
+	/** Listen here instead of a free port (the desktop app's fixed remote port). */
+	port?: number;
+	/** Sent with every api()/json() call and the boot probe, e.g. the desktop secret header. */
+	headers?: Record<string, string>;
 	/** Default 6 minutes (a `next dev` first compile is slow on a busy machine). */
 	bootTimeoutMs?: number;
 }
@@ -235,7 +239,7 @@ export async function bootServer(opts: BootOptions): Promise<LhServer> {
 		...opts.env,
 	});
 
-	const port = await freePort();
+	const port = opts.port ?? (await freePort());
 	const url = `http://127.0.0.1:${port}`;
 	const dev = process.env.LH_E2E_DEV === "1";
 	const [cmd, cwd] = dev
@@ -255,7 +259,7 @@ export async function bootServer(opts: BootOptions): Promise<LhServer> {
 	const api: LhServer["api"] = (pathname, init = {}) =>
 		fetch(url + pathname, {
 			method: init.method ?? (init.body === undefined ? "GET" : "POST"),
-			headers: init.body === undefined ? undefined : { "content-type": "application/json" },
+			headers: { ...opts.headers, ...(init.body === undefined ? {} : { "content-type": "application/json" }) },
 			body: init.body === undefined ? undefined : JSON.stringify(init.body),
 		});
 	const server: LhServer = {

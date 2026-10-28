@@ -1,55 +1,89 @@
 /**
  * /api/remote-access (LH-43): the Settings → General "Remote access" row.
- *   GET    → {enabled, access, remotePort, restartNeeded, url}
- *   PUT    {password} → sets or changes the password (revokes every session)
- *   DELETE → turns remote access off (password and sessions go)
- * Only a LOCAL request (proxy.ts's stamp: in the desktop app, the window's
- * secret header) may change it: a phone that logged in can use the app but
- * never take over or lock out the login.
+ *   GET    → {available, desktop, enabled, access, remotePort, restartNeeded, url}
+ *   PUT    {password, current?} → sets or changes the password (revokes every session)
+ *   DELETE {current?}           → turns remote access off (password and sessions go)
+ * Who may write (trust rule: src/server/web-login.ts):
+ *   - the desktop window (proxy.ts stamps "desktop" for its secret header);
+ *   - a logged-in session that re-enters the current password (charged to
+ *     the login rate limit).
+ * A browser that is "local" only because no password exists yet can NOT set
+ * the first one: that is the desktop window's or the CLI's job
+ * (`npm run remote-access:set-password`), never plain HTTP.
  * remotePort is the port `tailscale serve` should point at. The desktop app
  * takes its fixed port (electron/main.cjs, LH_REMOTE_PORT) only at launch,
  * so right after the first password it reports restartNeeded.
- * A raw `next dev` (no LH_LISTEN_HOST from scripts/web-server.mjs) refuses
- * a new password: there the proxy could no longer trust this computer,
- * and the password could not be changed again without editing files.
  */
-import { ACCESS_HEADER, MIN_PASSWORD_LENGTH, clearPassword, passwordConfigured, setPassword, tailnetURL } from "@/src/server";
+import { remotePasswordProblem } from "@/src/core";
+import {
+	ACCESS_HEADER,
+	chargeLoginAttempt,
+	clearPassword,
+	clientKey,
+	isDesktopServer,
+	loginRetryAfter,
+	passwordConfigured,
+	remoteAccessAvailable,
+	sameOriginRequest,
+	setPassword,
+	tailnetURL,
+	verifyPassword,
+} from "@/src/server";
 
 export const dynamic = "force-dynamic";
 
-const localOnly = () => Response.json({ error: "Change remote access on the computer running LearnHarness." }, { status: 403 });
+const refuse = (error: string, status = 403) => Response.json({ error }, { status });
 
 export async function GET(req: Request) {
 	const access = req.headers.get(ACCESS_HEADER);
 	const enabled = passwordConfigured();
 	const port = Number(process.env.PORT) || null;
-	const remotePort = process.env.LH_DESKTOP_SERVER === "1" ? Number(process.env.LH_REMOTE_PORT) || null : port;
+	const remotePort = isDesktopServer() ? Number(process.env.LH_REMOTE_PORT) || null : port;
 	return Response.json({
+		available: remoteAccessAvailable(),
+		desktop: isDesktopServer(),
 		enabled,
 		access,
 		remotePort,
 		restartNeeded: enabled && remotePort !== port,
-		// Only this computer learns the tailnet name; a phone already knows it.
-		url: access === "local" && enabled ? await tailnetURL() : null,
+		url: enabled && (access === "desktop" || access === "session") ? await tailnetURL() : null,
 	});
 }
 
+/** null when this request may change the password, else the refusal. */
+async function writeRefusal(req: Request, body: { current?: unknown } | null): Promise<Response | null> {
+	if (!remoteAccessAvailable()) return refuse("Remote access works only in the desktop app or with npm start.");
+	if (!sameOriginRequest(req.headers)) return refuse("Change remote access from LearnHarness itself.");
+	const access = req.headers.get(ACCESS_HEADER);
+	if (access === "desktop") return null;
+	if (access !== "session") {
+		return refuse(isDesktopServer()
+			? "Change remote access in the LearnHarness window."
+			: "Set the first password on this computer with: npm run remote-access:set-password");
+	}
+	const key = clientKey(req.headers);
+	const wait = loginRetryAfter(key);
+	if (wait > 0) return Response.json({ error: "Too many failed attempts. Try again later." }, { status: 429, headers: { "Retry-After": String(wait) } });
+	const release = chargeLoginAttempt(key);
+	if (typeof body?.current !== "string" || !(await verifyPassword(body.current))) return refuse("Enter the current password to change remote access.");
+	release();
+	return null;
+}
+
 export async function PUT(req: Request) {
-	if (req.headers.get(ACCESS_HEADER) !== "local") return localOnly();
-	if (!process.env.LH_LISTEN_HOST) {
-		return Response.json({ error: "Start LearnHarness with npm run dev or npm start to turn on remote access." }, { status: 409 });
-	}
-	const body = (await req.json().catch(() => null)) as { password?: unknown } | null;
-	const password = body?.password;
-	if (typeof password !== "string" || password.length < MIN_PASSWORD_LENGTH || password.length > 1024) {
-		return Response.json({ error: `The password needs at least ${MIN_PASSWORD_LENGTH} characters.` }, { status: 400 });
-	}
-	await setPassword(password);
+	const body = (await req.json().catch(() => null)) as { password?: unknown; current?: unknown } | null;
+	const refusal = await writeRefusal(req, body);
+	if (refusal) return refusal;
+	const problem = remotePasswordProblem(body?.password);
+	if (problem) return refuse(problem, 400);
+	await setPassword(body!.password as string);
 	return Response.json({ enabled: true });
 }
 
 export async function DELETE(req: Request) {
-	if (req.headers.get(ACCESS_HEADER) !== "local") return localOnly();
+	const body = (await req.json().catch(() => null)) as { current?: unknown } | null;
+	const refusal = await writeRefusal(req, body);
+	if (refusal) return refusal;
 	clearPassword();
 	return Response.json({ enabled: false });
 }

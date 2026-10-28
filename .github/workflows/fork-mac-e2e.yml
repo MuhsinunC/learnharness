@@ -208,6 +208,13 @@ jobs:
           done
           [[ $secret =~ ^[0-9a-f]{64}$ ]]
           echo "::add-mask::$secret"
+          # LH-43: with the seeded password, a header-less page load must log in, and
+          # the window's page cookie (an HMAC of the secret, set by main.cjs) opens it.
+          page_key=$(SECRET="$secret" python3 -c 'import hashlib, hmac, os; print(hmac.new(os.environ["SECRET"].encode(), b"lh-desktop-page", hashlib.sha256).hexdigest())')
+          echo "::add-mask::$page_key"
+          [[ $(curl --max-time 20 -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/") == 303 ]]
+          [[ $(curl --max-time 60 -sS -H "Cookie: lh_desktop=$page_key" -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/") == 200 ]]
+          unset page_key
           [[ $(curl --max-time 60 -sS -H "x-learnharness-desktop: $secret" \
             -o "$RUNNER_TEMP/models.json" -w '%{http_code}' "http://127.0.0.1:$port/api/models") == 200 ]]
           [[ $(curl --max-time 60 -sS -H "x-learnharness-desktop: $secret" \

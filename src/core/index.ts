@@ -87,3 +87,4 @@ export * from "./session-markdown.ts";
 // claude-code-endpoint.ts (LH-27/LH-23): the endpoint type and the pure URL
 // predicate the settings card and the server share. Browser-safe.
 export * from "./claude-code-endpoint.ts";
+export * from "./remote-access.ts";

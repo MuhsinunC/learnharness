@@ -1,24 +1,26 @@
 /**
  * WEB LOGIN (LH-43): one local user, so the learner can open the copy on
- * their own computer from a phone over their tailnet. The desktop window
- * and a browser on the same machine over loopback never log in.
+ * their own computer from a phone over their tailnet (tailscale serve).
  *
- * THE TRUST RULE (decideAccess): a request is "local" only when
- *   - the server listens on loopback (LH_LISTEN_HOST, set by
- *     scripts/web-server.mjs), and
- *   - Host is loopback, and every forwarding header is absent or loopback.
- * Next fills x-forwarded-for/-host from the socket when the client sent
- * none, so those are checked by value, not presence. `tailscale serve`
- * proxies from 127.0.0.1 but keeps the ts.net Host and sets the tailnet
- * peer in X-Forwarded-For plus Tailscale-* identity headers, so it never
- * counts as local. On a network listener every header is client-chosen,
- * so nobody is local there. A raw `next dev` (LH_LISTEN_HOST unset) keeps
- * today's loopback trust until a password exists, then requires login.
- * Everyone else needs a session cookie.
+ * THE TRUST RULE. Remote access exists only in a production server (the
+ * desktop app or `npm start`); a dev server ignores the record, because
+ * Next's dev-only endpoints never pass through proxy.ts.
+ *   - No password: as before LH-43. A request is "local" when Host is
+ *     loopback and every forwarding header is absent or loopback (Next
+ *     fills x-forwarded-for/-host from the socket, so values are checked,
+ *     not presence). Anything else, tailscale serve included, gets nothing.
+ *   - Password set: no header heuristic is trusted, since any header-less
+ *     TCP forwarder (tailscale serve --tcp, editor port forwarding,
+ *     ssh -R) would pass it. Every browser request needs a session, on
+ *     this computer too. The one exception is the desktop window's
+ *     per-launch secret (desktop-access.ts), checked in proxy.ts.
+ *   - The first password is set only by the desktop window or the CLI
+ *     (scripts/remote-access.ts): writing the data dir proves locality.
  *
  * The record (web-login.json under the data dir, mode 0600) holds the
  * scrypt hash and the SHA-256 of each live session token, never a token.
- * Reads are synchronous so the proxy can decide without awaiting.
+ * Reads are synchronous so the proxy can decide without awaiting, and
+ * cached until the file's identity, size or mtime changes.
  */
 import { execFile } from "node:child_process";
 import { createHash, randomBytes, scrypt, timingSafeEqual } from "node:crypto";
@@ -27,14 +29,16 @@ import path from "node:path";
 import { PATHS } from "../../config.ts";
 
 const SESSION_COOKIE = "lh_session";
-/** Stamped by proxy.ts on every request it lets through; client copies are stripped. */
+/** Stamped by proxy.ts on every request it lets through; client copies are always stripped. */
 export const ACCESS_HEADER = "x-lh-access";
-export const MIN_PASSWORD_LENGTH = 8;
 const SESSION_MS = 30 * 24 * 60 * 60 * 1000;
+/** Oldest sessions go first beyond this many devices. */
+const MAX_SESSIONS = 20;
 // OWASP's scrypt alternative to N=2^17,p=1: the same work for 32 MiB.
 const KDF = { N: 2 ** 15, r: 8, p: 3, keylen: 32 } as const;
 
-type Access = "local" | "session";
+/** desktop: the window's secret; local: this computer, no password set; session: logged in. */
+export type Access = "desktop" | "local" | "session";
 
 interface Session { id: string; expires: number }
 interface LoginRecord {
@@ -43,27 +47,51 @@ interface LoginRecord {
 	sessions: Session[];
 }
 
+/** Remote access is production-only: the desktop app or `npm start`. */
+export function remoteAccessAvailable(env: Record<string, string | undefined> = process.env): boolean {
+	return env.NODE_ENV === "production";
+}
+
 function loginFile(): string {
 	return path.join(PATHS.data, "web-login.json");
 }
 
+let cached: { key: string; record: LoginRecord | null } | null = null;
+
 function readRecord(): LoginRecord | null {
+	let key: string;
 	try {
-		const value = JSON.parse(fs.readFileSync(loginFile(), "utf8")) as LoginRecord;
-		return typeof value?.password?.hash === "string" && Array.isArray(value.sessions) ? value : null;
+		const st = fs.statSync(loginFile());
+		key = `${st.ino}:${st.size}:${st.mtimeMs}`;
 	} catch {
+		cached = null;
 		return null;
 	}
+	if (cached?.key === key) return cached.record;
+	let record: LoginRecord | null = null;
+	try {
+		const value = JSON.parse(fs.readFileSync(loginFile(), "utf8")) as LoginRecord;
+		if (typeof value?.password?.hash === "string" && Array.isArray(value.sessions)) record = value;
+	} catch { /* unreadable counts as no password */ }
+	cached = { key, record };
+	return record;
 }
 
 function writeRecord(record: LoginRecord): void {
 	const file = loginFile(), tmp = `${file}.tmp-${process.pid}`;
 	const now = Date.now();
-	record.sessions = record.sessions.filter((s) => s.expires > now);
+	record.sessions = record.sessions.filter((s) => s.expires > now).slice(-MAX_SESSIONS);
 	fs.mkdirSync(path.dirname(file), { recursive: true });
 	fs.writeFileSync(tmp, JSON.stringify(record), { mode: 0o600 });
 	fs.chmodSync(tmp, 0o600);
 	fs.renameSync(tmp, file);
+	cached = null;
+}
+
+/** A copy the caller may change and write back. */
+function editableRecord(): LoginRecord | null {
+	const record = readRecord();
+	return record && structuredClone(record);
 }
 
 export function passwordConfigured(): boolean {
@@ -93,6 +121,7 @@ export async function setPassword(password: string): Promise<void> {
 /** Turns remote access off: the password and every session go. */
 export function clearPassword(): void {
 	fs.rmSync(loginFile(), { force: true });
+	cached = null;
 }
 
 export async function verifyPassword(password: string): Promise<boolean> {
@@ -107,7 +136,7 @@ const digest = (token: string) => createHash("sha256").update(token).digest("hex
 
 /** A new session token; only its digest is stored. */
 export function createSession(): string {
-	const record = readRecord();
+	const record = editableRecord();
 	if (!record) throw new Error("web login: no password is set");
 	const token = randomBytes(32).toString("base64url");
 	record.sessions.push({ id: digest(token), expires: Date.now() + SESSION_MS });
@@ -116,7 +145,7 @@ export function createSession(): string {
 }
 
 export function revokeSession(token: string | null): void {
-	const record = readRecord();
+	const record = editableRecord();
 	if (!record || !token) return;
 	const id = digest(token);
 	record.sessions = record.sessions.filter((s) => s.id !== id);
@@ -174,13 +203,27 @@ function fromThisMachine(headers: Headers): boolean {
 	return !proxied;
 }
 
-/** "local", "session", or null (log in first). See the trust rule above. */
+/** "local", "session", or null (log in first). The desktop secret is
+ * proxy.ts's to check. See the trust rule above. */
 export function decideAccess(headers: Headers, env: Record<string, string | undefined> = process.env): Access | null {
-	const record = readRecord();
-	const listen = env.LH_LISTEN_HOST;
-	const loopbackListener = listen === undefined ? record === null : isLoopbackHost(listen);
-	if (loopbackListener && fromThisMachine(headers)) return "local";
-	return record && validSession(record, sessionToken(headers)) ? "session" : null;
+	const record = remoteAccessAvailable(env) ? readRecord() : null;
+	if (!record) return fromThisMachine(headers) ? "local" : null;
+	return validSession(record, sessionToken(headers)) ? "session" : null;
+}
+
+/** A state-changing request sent from this app's own pages, or by a
+ * non-browser client (no Origin, no Sec-Fetch-Site). `Origin: null`
+ * (sandboxed frames, data: URLs) counts as cross-site. */
+export function sameOriginRequest(headers: Headers): boolean {
+	const site = headers.get("sec-fetch-site");
+	if (site !== null && site !== "same-origin") return false;
+	const origin = headers.get("origin");
+	if (origin === null) return true;
+	try {
+		return new URL(origin).host === headers.get("host");
+	} catch {
+		return false;
+	}
 }
 
 /** The client a failed login is charged to: the proxy's peer (tailscale serve's
@@ -219,9 +262,10 @@ export function chargeLoginAttempt(key: string, now = Date.now()): () => void {
 	};
 }
 
-/** A same-origin path to return to after login; anything else becomes "/". */
+/** A same-origin path to return to after login, printable ASCII only (it
+ * becomes a Location header); anything else becomes "/". */
 export function safeNext(value: unknown): string {
-	return typeof value === "string" && /^\/(?![/\\])[^\s]*$/.test(value) && !value.startsWith("/login") ? value : "/";
+	return typeof value === "string" && /^\/(?![/\\])[\x21-\x7e]*$/.test(value) && !value.startsWith("/login") ? value : "/";
 }
 
 // A GUI app's PATH rarely has the CLI: try the usual installs too.

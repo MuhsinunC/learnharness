@@ -2,25 +2,29 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
-import os from "node:os";
 import path from "node:path";
 import { after, before, test } from "node:test";
+import type { Page } from "puppeteer-core";
 import { bootServer, REPO_ROOT, until, type LhServer } from "./harness/server.ts";
 import { launchChrome } from "./harness/chrome.ts";
 
-// LH-43: the web login and the bind gate. The server listens on 127.0.0.1
-// as scripts/web-server.mjs would start it (LH_LISTEN_HOST=127.0.0.1).
-// A phone behind `tailscale serve` is simulated with the headers serve
-// really sends (tailscale ipn/ipnlocal/serve.go: Host kept as the ts.net
-// name, X-Forwarded-Host/-Proto/-For, Tailscale-User-*), and headless
-// Chrome reaches the loopback server under a ts.net name through
-// --host-resolver-rules, so it sends a real non-loopback Host.
+// LH-43: the web login, in web mode (`npm start`: the harness serves the
+// production build on 127.0.0.1, as scripts/web-server.mjs would). A phone
+// behind `tailscale serve` is simulated with the headers serve really
+// sends (tailscale ipn/ipnlocal/serve.go: Host kept as the ts.net name,
+// X-Forwarded-Host/-Proto/-For, Tailscale-User-*), and headless Chrome
+// reaches the loopback server under a ts.net name through
+// --host-resolver-rules, so it sends a real non-loopback Host. A
+// header-less loopback request stands in for any TCP forwarder
+// (tailscale serve --tcp, editor port forwarding, ssh -R).
 
 const TICKET = "lh-43";
 const PASSWORD = "correct horse battery";
+const NEW_PASSWORD = "a brand new password";
 const TS_HOST = "lh-test.example.ts.net";
 /** Keeps the real `tailscale status` (this machine's tailnet name) out of the run. */
 const NO_TAILSCALE = "/nonexistent/tailscale";
+const TSX = path.join(REPO_ROOT, "node_modules", ".bin", "tsx");
 
 let server: LhServer;
 let port: number;
@@ -32,7 +36,10 @@ interface RawResponse { status: number; headers: http.IncomingHttpHeaders; body:
  * resolves on the status line and drops the socket, for SSE streams. */
 function raw(pathname: string, opts: { method?: string; headers?: Record<string, string>; body?: string; headOnly?: boolean } = {}): Promise<RawResponse> {
 	return new Promise((resolve, reject) => {
-		const req = http.request({ host: "127.0.0.1", port, path: pathname, method: opts.method ?? "GET", headers: opts.headers }, (res) => {
+		// A fresh connection each time: a kept-alive socket the server already
+		// closed resets the next request. Bodies carry a length, as browsers send.
+		const headers = opts.body === undefined ? opts.headers : { ...opts.headers, "content-length": String(Buffer.byteLength(opts.body)) };
+		const req = http.request({ host: "127.0.0.1", port, path: pathname, method: opts.method ?? "GET", headers, agent: false }, (res) => {
 			if (opts.headOnly) {
 				resolve({ status: res.statusCode!, headers: res.headers, body: "" });
 				res.destroy();
@@ -60,7 +67,7 @@ const viaServe = (ip = "100.101.102.103", extra: Record<string, string> = {}) =>
 	...extra,
 });
 
-const local = () => ({ host: `127.0.0.1:${port}` });
+const local = (extra: Record<string, string> = {}) => ({ host: `127.0.0.1:${port}`, ...extra });
 const JSON_BODY = { "content-type": "application/json" };
 
 function login(ip: string, password: string, next = "/", extra: Record<string, string> = {}): Promise<RawResponse> {
@@ -78,12 +85,34 @@ function cookieOf(res: RawResponse): string {
 	return set.split(";")[0]!;
 }
 
-async function setPassword(password: string): Promise<RawResponse> {
-	return raw("/api/remote-access", { method: "PUT", headers: { ...local(), ...JSON_BODY }, body: JSON.stringify({ password }) });
+function remoteAccess(headers: Record<string, string>, method: "PUT" | "DELETE", body: unknown): Promise<RawResponse> {
+	return raw("/api/remote-access", { method, headers: { ...headers, ...JSON_BODY }, body: JSON.stringify(body) });
+}
+
+/** scripts/remote-access.ts against this server's data dir. */
+function cli(args: string[], input?: string) {
+	return spawnSync(TSX, [path.join(REPO_ROOT, "scripts", "remote-access.ts"), ...args], {
+		cwd: REPO_ROOT,
+		input,
+		encoding: "utf8",
+		timeout: 120_000,
+		env: { ...process.env, LH_DATA_DIR: server.dataDir },
+	});
+}
+
+/** Opens Settings → General in a page that is already in the app. */
+async function openGeneralSettings(page: Page): Promise<void> {
+	// Clicks before hydration land on inert markup: retry until it opens.
+	await until(async () => {
+		await page.click('[data-testid="settings-entry"]');
+		return page.waitForSelector('[data-testid="settings-nav-general"]', { timeout: 2000 });
+	}, "the settings dialog to open", 120_000, 500);
+	await page.click('[data-testid="settings-nav-general"]');
+	await page.waitForSelector('[data-testid="remote-access-status"]', { timeout: 60_000 });
 }
 
 before(async () => {
-	server = await bootServer({ ticket: TICKET, providers: [], settings: { version: 1, graph: { enabled: false } }, env: { LH_LISTEN_HOST: "127.0.0.1", LH_TAILSCALE_BIN: NO_TAILSCALE } });
+	server = await bootServer({ ticket: TICKET, providers: [], settings: { version: 1, graph: { enabled: false } }, env: { LH_TAILSCALE_BIN: NO_TAILSCALE } });
 	port = Number(new URL(server.url).port);
 	chatId = (await server.json<{ id: string }>("/api/chats", { body: { title: "Remote" } })).id;
 });
@@ -92,77 +121,75 @@ after(async () => {
 	await server?.stop();
 });
 
-test("(a) with no password, loopback needs no login and remote requests are refused", async () => {
+test("(a) no password: loopback needs no login, remote requests get nothing, and HTTP cannot set the first password", async () => {
 	assert.equal((await raw("/api/settings", { headers: local() })).status, 200);
 	assert.equal((await raw("/chat/new", { headers: local() })).status, 200);
 	assert.equal((await raw("/api/settings", { headers: { host: `localhost:${port}` } })).status, 200);
-	assert.deepEqual(JSON.parse((await raw("/api/remote-access", { headers: local() })).body), { enabled: false, access: "local", remotePort: port, restartNeeded: false, url: null });
+	assert.deepEqual(JSON.parse((await raw("/api/remote-access", { headers: local() })).body), {
+		available: true, desktop: false, enabled: false, access: "local", remotePort: port, restartNeeded: false, url: null,
+	});
 	const remote = await raw("/api/settings", { headers: viaServe() });
 	assert.equal(remote.status, 401);
 	assert.match(remote.headers["content-type"] ?? "", /json/);
 	const page = await raw("/login", { headers: viaServe() });
-	assert.equal(page.status, 200);
 	assert.match(page.body, /Remote access is off/);
+	assert.match(page.body, /remote-access:set-password/);
 	assert.equal((await login("100.64.0.9", "anything")).status, 403);
-});
 
-test("(b) the computer sets the password in Settings → General → Remote access", async () => {
-	assert.equal((await raw("/api/remote-access", { method: "PUT", headers: { ...viaServe(), ...JSON_BODY }, body: JSON.stringify({ password: PASSWORD }) })).status, 401);
-	assert.equal((await setPassword("short")).status, 400);
+	const first = await remoteAccess(local(), "PUT", { password: PASSWORD });
+	assert.equal(first.status, 403, "a loopback browser cannot set the first password");
+	assert.match(JSON.parse(first.body).error, /npm run remote-access:set-password/);
+	assert.equal((await remoteAccess(viaServe(), "PUT", { password: PASSWORD })).status, 401);
+	assert(!fs.existsSync(path.join(server.dataDir, "web-login.json")));
+
 	const chrome = await launchChrome(TICKET, ["--no-proxy-server"]);
 	try {
-		const page = await chrome.browser.newPage();
-		await page.goto(server.url, { waitUntil: "domcontentloaded", timeout: 180_000 });
-		// Clicks before hydration land on inert markup: retry until it opens.
-		await until(async () => {
-			await page.click('[data-testid="settings-entry"]');
-			return page.waitForSelector('[data-testid="settings-nav-general"]', { timeout: 2000 });
-		}, "the settings dialog to open", 180_000, 500);
-		await page.click('[data-testid="settings-nav-general"]');
-		await page.waitForSelector('[data-testid="remote-access-password"]', { timeout: 60_000 });
-		assert.match(await page.$eval('[data-testid="remote-access-status"]', (el) => el.textContent ?? ""), /^Off/);
-		await page.type('[data-testid="remote-access-password"]', PASSWORD);
-		await page.click('[data-testid="remote-access-save"]');
-		await page.waitForFunction(() => /^On/.test(document.querySelector('[data-testid="remote-access-status"]')?.textContent ?? ""), { timeout: 60_000 });
-		await page.waitForSelector('[data-testid="remote-access-command"]', { timeout: 60_000 });
-		assert.equal(await page.$eval('[data-testid="remote-access-command"]', (el) => el.textContent), `tailscale serve --bg ${port}`);
-		assert.match(await page.$eval('[data-testid="remote-access-url"]', (el) => el.textContent ?? ""), /<this-computer>/, "no tailscale here: the placeholder");
+		const tab = await chrome.browser.newPage();
+		await tab.goto(server.url, { waitUntil: "domcontentloaded", timeout: 120_000 });
+		await openGeneralSettings(tab);
+		assert.equal(await tab.$eval('[data-testid="remote-access-cli"]', (el) => el.textContent), "npm run remote-access:set-password");
+		assert.equal(await tab.$('[data-testid="remote-access-password"]'), null, "no password field before the CLI ran");
 	} finally {
 		await chrome.close();
 	}
-	assert.equal(JSON.parse((await raw("/api/remote-access", { headers: local() })).body).enabled, true);
 });
 
-test("(b) a password makes remote-style requests log in, while loopback stays login-free", async () => {
-
+test("(b) the CLI sets the first password; from then on every request needs a login, loopback too", async () => {
+	const noTty = cli(["set-password"]);
+	assert.equal(noTty.status, 1);
+	assert.match(noTty.stderr, /Run this in a terminal/);
+	const short = cli(["set-password", "--stdin"], "short\n");
+	assert.equal(short.status, 1);
+	assert.match(short.stderr, /at least 8 characters/);
 	const file = path.join(server.dataDir, "web-login.json");
+	assert(!fs.existsSync(file));
+	const set = cli(["set-password", "--stdin"], `${PASSWORD}\n`);
+	assert.equal(set.status, 0, set.stderr);
+	assert.match(set.stdout, /Remote access is on/);
 	assert.equal(fs.statSync(file).mode & 0o777, 0o600);
 	assert(!fs.readFileSync(file, "utf8").includes(PASSWORD), "the password is stored only as a hash");
 
-	assert.equal((await raw("/api/settings", { headers: local() })).status, 200, "local access never logs in");
-	assert.equal((await raw("/chat/new", { headers: local() })).status, 200);
-
 	for (const headers of [
+		local(), // any header-less TCP forwarder looks exactly like this
+		local({ "x-lh-access": "local" }),
+		local({ "x-lh-access": "desktop" }),
+		{ host: `localhost:${port}` },
 		viaServe(),
 		viaServe("100.64.0.5", { "x-lh-access": "local" }),
-		{ host: TS_HOST }, // DNS rebinding, or serve without its extra headers
+		{ host: TS_HOST },
 		{ host: `127.0.0.1:${port}`, "x-forwarded-for": "100.64.0.5" },
-		{ host: `127.0.0.1:${port}`, "x-forwarded-host": TS_HOST },
-		{ host: `127.0.0.1:${port}`, forwarded: "for=100.64.0.5" },
-		{ host: `127.0.0.1:${port}`, "x-real-ip": "100.64.0.5" },
 		{ host: `localhost:${port}`, "tailscale-user-login": "learner@example.com" },
 	] as Array<Record<string, string>>) {
 		assert.equal((await raw("/api/settings", { headers })).status, 401, JSON.stringify(headers));
 	}
+	assert.equal((await raw("/chat/new", { headers: local() })).status, 303, "pages too: they render chats on the server");
 	for (const sneaky of ["/_next/../api/settings", "/_next/%2e%2e/api/settings", "/_next/static/../../api/settings", "/_next/static/%2e%2e/%2e%2e/api/settings"]) {
-		assert.notEqual((await raw(sneaky, { headers: viaServe() })).status, 200, `${sneaky} must not slip past the proxy`);
+		assert.notEqual((await raw(sneaky, { headers: local() })).status, 200, `${sneaky} must not slip past the proxy`);
 	}
 	const page = await raw("/chat/new?x=1", { headers: viaServe() });
 	assert.equal(page.status, 303);
 	assert.equal(page.headers.location, "/login?next=%2Fchat%2Fnew%3Fx%3D1", "relative, so the phone stays on its ts.net name");
-	const form = await raw("/login", { headers: viaServe() });
-	assert.equal(form.status, 200);
-	assert.match(form.body, /type="password"/);
+	assert.match((await raw("/login", { headers: viaServe() })).body, /type="password"/);
 });
 
 test("(c) a wrong password is refused and failed attempts are rate-limited", async () => {
@@ -176,7 +203,14 @@ test("(c) a wrong password is refused and failed attempts are rate-limited", asy
 	const blocked = await login(ip, PASSWORD);
 	assert.equal(blocked.status, 429, "even the right password waits once the client is locked out");
 	assert(Number(blocked.headers["retry-after"]) > 0);
-	assert.equal((await login("100.70.0.2", PASSWORD, "/", { origin: "https://evil.example" })).status, 403, "cross-site login posts are refused");
+});
+
+test("(c) cross-site posts are refused before they cost an attempt: Origin null, other origins, Sec-Fetch-Site", async () => {
+	const ip = "100.70.0.2";
+	for (const extra of [{ origin: "null" }, { origin: "https://evil.example" }, { "sec-fetch-site": "cross-site" }, { "sec-fetch-site": "same-site" }] as Array<Record<string, string>>) {
+		for (let i = 0; i < 3; i++) assert.equal((await login(ip, "wrong password", "/", extra)).status, 403, JSON.stringify(extra));
+	}
+	assert.equal((await login(ip, PASSWORD)).status, 303, "twelve refused posts charged nothing");
 });
 
 test("(c) parallel wrong logins cannot outrun the limit", async () => {
@@ -184,7 +218,16 @@ test("(c) parallel wrong logins cannot outrun the limit", async () => {
 	assert.deepEqual(statuses, [401, 401, 401, 401, 401, 429, 429, 429]);
 });
 
-test("(d) a correct login sets the session cookie and opens the app and /api", async () => {
+test("(c) a next that is not a plain same-origin ASCII path falls back to /", async () => {
+	for (const next of ["/€uro", "//evil.example/x", "/\\evil.example", "https://evil.example/", "/a b", "/login?next=/x"]) {
+		const res = await login("100.70.0.10", PASSWORD, next);
+		assert.equal(res.status, 303, next);
+		assert.equal(res.headers.location, "/", next);
+		cookieOf(res);
+	}
+});
+
+test("(d) a correct login sets the session cookie and opens the app; a session changes the password only with the current one", async () => {
 	const res = await login("100.70.0.3", PASSWORD, "/chat/new");
 	assert.equal(res.status, 303);
 	assert.equal(res.headers.location, "/chat/new");
@@ -193,26 +236,28 @@ test("(d) a correct login sets the session cookie and opens the app and /api", a
 	assert.match(set, /SameSite=Lax/);
 	assert.match(set, /Secure/, "serve terminates TLS, so the cookie is Secure");
 	const cookie = cookieOf(res);
-	assert.equal((await raw("/api/settings", { headers: viaServe("100.70.0.3", { cookie }) })).status, 200);
-	assert.equal((await raw("/chat/new", { headers: viaServe("100.70.0.3", { cookie }) })).status, 200);
-	assert.equal(JSON.parse((await raw("/api/remote-access", { headers: viaServe("100.70.0.3", { cookie }) })).body).access, "session");
-	const takeover = await raw("/api/remote-access", { method: "PUT", headers: { ...viaServe("100.70.0.3", { cookie, "x-lh-access": "local" }), ...JSON_BODY }, body: JSON.stringify({ password: "attacker-chosen" }) });
-	assert.equal(takeover.status, 403, "a logged-in phone cannot change the password, even claiming to be local");
-	assert.equal((await raw("/api/settings", { headers: viaServe("100.70.0.3", { cookie }) })).status, 200, "the password did not change");
+	const phone = (extra: Record<string, string> = {}) => viaServe("100.70.0.3", { cookie, origin: `https://${TS_HOST}`, ...extra });
+	assert.equal((await raw("/api/settings", { headers: phone() })).status, 200);
+	assert.equal((await raw("/chat/new", { headers: phone() })).status, 200);
+	assert.equal(JSON.parse((await raw("/api/remote-access", { headers: phone() })).body).access, "session");
+	assert.equal((await remoteAccess(phone({ "x-lh-access": "desktop" }), "PUT", { password: "attacker-chosen" })).status, 403, "no current password, even claiming the desktop");
+	assert.equal((await remoteAccess(phone(), "PUT", { password: "attacker-chosen", current: "a guess" })).status, 403);
+	assert.equal((await remoteAccess(phone({ origin: "null" }), "PUT", { password: "attacker-chosen", current: PASSWORD })).status, 403, "cross-site");
+	assert.equal((await raw("/api/settings", { headers: phone() })).status, 200, "the password did not change");
 });
 
-test("(d) headless Chrome logs in through the login page, uses the app, and logs out", async () => {
+test("(d) headless Chrome on the tailnet logs in through the login page, uses the app, and logs out", async () => {
 	const chrome = await launchChrome(TICKET, [`--host-resolver-rules=MAP ${TS_HOST} 127.0.0.1`, "--no-proxy-server"]);
 	try {
 		const page = await chrome.browser.newPage();
 		const origin = `http://${TS_HOST}:${port}`;
-		await page.goto(`${origin}/chat/new`, { waitUntil: "domcontentloaded", timeout: 180_000 });
+		await page.goto(`${origin}/chat/new`, { waitUntil: "domcontentloaded", timeout: 120_000 });
 		assert.equal(new URL(page.url()).pathname, "/login");
 		await page.type("#password", "not it");
 		await Promise.all([page.waitForNavigation({ timeout: 120_000 }), page.click("button[type=submit]")]);
 		assert.match(await page.content(), /Wrong password/);
 		await page.type("#password", PASSWORD);
-		await Promise.all([page.waitForNavigation({ timeout: 180_000 }), page.click("button[type=submit]")]);
+		await Promise.all([page.waitForNavigation({ timeout: 120_000 }), page.click("button[type=submit]")]);
 		assert.equal(page.url(), `${origin}/chat/new`);
 
 		const cookie = (await chrome.browser.cookies()).find((c) => c.name === "lh_session");
@@ -231,28 +276,63 @@ test("(d) headless Chrome logs in through the login page, uses the app, and logs
 	}
 });
 
-test("(e) logout revokes the session; a new password or turning access off revokes them all", async () => {
+test("(e) logout is same-origin only and revokes the session; a password change or turning access off revokes them all", async () => {
 	const first = cookieOf(await login("100.70.0.5", PASSWORD));
-	assert.equal((await raw("/api/settings", { headers: viaServe("100.70.0.5", { cookie: first }) })).status, 200);
-	const out = await raw("/logout", { method: "POST", headers: viaServe("100.70.0.5", { cookie: first }) });
+	const as = (cookie: string, extra: Record<string, string> = {}) => viaServe("100.70.0.5", { cookie, ...extra });
+	assert.equal((await raw("/logout", { method: "POST", headers: as(first, { origin: "null" }) })).status, 403);
+	assert.equal((await raw("/logout", { method: "POST", headers: as(first, { "sec-fetch-site": "cross-site" }) })).status, 403);
+	assert.equal((await raw("/api/settings", { headers: as(first) })).status, 200, "another site could not log it out");
+	const out = await raw("/logout", { method: "POST", headers: as(first, { origin: `https://${TS_HOST}` }) });
 	assert.equal(out.status, 303);
 	assert.equal(out.headers.location, "/login");
 	assert.match([out.headers["set-cookie"]].flat().join("\n"), /lh_session=;.*Max-Age=0/);
-	assert.equal((await raw("/api/settings", { headers: viaServe("100.70.0.5", { cookie: first }) })).status, 401);
+	assert.equal((await raw("/api/settings", { headers: as(first) })).status, 401);
 
 	const second = cookieOf(await login("100.70.0.6", PASSWORD));
-	assert.equal((await setPassword("another good password")).status, 200);
-	assert.equal((await raw("/api/settings", { headers: viaServe("100.70.0.6", { cookie: second }) })).status, 401, "a password change logs every device out");
+	const third = cookieOf(await login("100.70.0.6", PASSWORD));
+	assert.equal((await remoteAccess(as(second), "PUT", { password: NEW_PASSWORD, current: PASSWORD })).status, 200);
+	assert.equal((await raw("/api/settings", { headers: as(second) })).status, 401, "the changer logs in again too");
+	assert.equal((await raw("/api/settings", { headers: as(third) })).status, 401, "a password change logs every device out");
 
-	const third = cookieOf(await login("100.70.0.7", "another good password"));
-	assert.equal((await raw("/api/remote-access", { method: "DELETE", headers: local() })).status, 200);
-	assert.equal((await raw("/api/settings", { headers: viaServe("100.70.0.7", { cookie: third }) })).status, 401, "turning remote access off ends every session");
-	assert.equal((await setPassword(PASSWORD)).status, 200);
+	const fourth = cookieOf(await login("100.70.0.7", NEW_PASSWORD));
+	assert.equal((await remoteAccess(as(fourth), "DELETE", {})).status, 403, "turning it off needs the current password");
+	assert.equal((await remoteAccess(as(fourth), "DELETE", { current: NEW_PASSWORD })).status, 200);
+	assert.equal((await raw("/api/settings", { headers: as(fourth) })).status, 401, "turning remote access off ends every session");
+	assert.equal((await raw("/api/settings", { headers: local() })).status, 200, "and this computer is back to no login");
+	assert.equal(cli(["set-password", "--stdin"], `${PASSWORD}\n`).status, 0);
 });
 
-test("(g) SSE, the turn stream and the chat export need the session too", async () => {
-	const routes = ["/api/events", `/api/chats/${chatId}/stream`, `/api/chats/${chatId}/markdown`];
-	for (const route of routes) assert.equal((await raw(route, { headers: viaServe(), headOnly: true })).status, 401, route);
+test("(e) this computer's own browser logs in too, and changes the password in Settings with the current one", async () => {
+	const chrome = await launchChrome(TICKET, ["--no-proxy-server"]);
+	try {
+		const page = await chrome.browser.newPage();
+		await page.goto(`${server.url}/`, { waitUntil: "domcontentloaded", timeout: 120_000 });
+		assert.equal(new URL(page.url()).pathname, "/login", "loopback is no exception once a password exists");
+		await page.type("#password", PASSWORD);
+		await Promise.all([page.waitForNavigation({ timeout: 120_000 }), page.click("button[type=submit]")]);
+		await openGeneralSettings(page);
+		await page.waitForSelector('[data-testid="remote-access-command"]', { timeout: 60_000 });
+		assert.equal(await page.$eval('[data-testid="remote-access-command"]', (el) => el.textContent), `tailscale serve --bg ${port}`);
+		assert.match(await page.$eval('[data-testid="remote-access-url"]', (el) => el.textContent ?? ""), /<this-computer>/, "no tailscale here: the placeholder");
+		await page.type('[data-testid="remote-access-current"]', PASSWORD);
+		await page.type('[data-testid="remote-access-password"]', NEW_PASSWORD);
+		await Promise.all([page.waitForNavigation({ timeout: 60_000 }), page.click('[data-testid="remote-access-save"]')]);
+		assert.equal(new URL(page.url()).pathname, "/login", "saving logged this browser out with every other");
+	} finally {
+		await chrome.close();
+	}
+	assert.equal((await login("100.70.0.11", PASSWORD)).status, 401);
+	assert.equal((await login("100.70.0.11", NEW_PASSWORD)).status, 303);
+	assert.equal(cli(["set-password", "--stdin"], `${PASSWORD}\n`).status, 0);
+});
+
+test("(g) SSE, the turn stream, the chat export and attachments need the session too", async () => {
+	const routes = ["/api/events", `/api/chats/${chatId}/stream`, `/api/chats/${chatId}/markdown`, "/api/attachments/0000", `/api/attachments?check=1&chatId=${chatId}`];
+	for (const route of routes) {
+		assert.equal((await raw(route, { headers: viaServe(), headOnly: true })).status, 401, route);
+		assert.equal((await raw(route, { headers: local(), headOnly: true })).status, 401, `${route} from loopback`);
+	}
+	assert.equal((await raw("/api/attachments", { method: "POST", headers: local() })).status, 401);
 	const cookie = cookieOf(await login("100.70.0.8", PASSWORD));
 	const events = await raw("/api/events", { headers: viaServe("100.70.0.8", { cookie }), headOnly: true });
 	assert.equal(events.status, 200);
@@ -261,59 +341,32 @@ test("(g) SSE, the turn stream and the chat export need the session too", async 
 	assert.equal(md.status, 200);
 	assert.match(String(md.headers["content-disposition"]), /attachment/);
 	assert.equal((await raw(`/api/chats/${chatId}/stream`, { headers: viaServe("100.70.0.8", { cookie }), headOnly: true })).status, 200);
+	assert.notEqual((await raw("/api/attachments/0000", { headers: viaServe("100.70.0.8", { cookie }) })).status, 401);
 });
 
-test("(f) the launcher refuses a non-loopback bind without a password, and never a LAN or public one", () => {
-	const dataDir = fs.mkdtempSync(path.join(os.homedir(), ".cache", "lh-e2e", TICKET, "gate-"));
+test("(f) the launcher listens only on 127.0.0.1: no other address and no -H/-p", () => {
 	// Every case is refused before `next` is spawned, so nothing ever listens.
-	const launch = (host: string) =>
-		spawnSync(process.execPath, [path.join(REPO_ROOT, "scripts", "web-server.mjs"), "dev"], {
-			env: { PATH: process.env.PATH ?? "", NODE_ENV: "test", LH_DATA_DIR: dataDir, LH_LISTEN_HOST: host, LH_LISTEN_PORT: "1" },
+	const launch = (args: string[], env: Record<string, string> = {}) =>
+		spawnSync(process.execPath, [path.join(REPO_ROOT, "scripts", "web-server.mjs"), "start", ...args], {
+			env: { PATH: process.env.PATH ?? "", NODE_ENV: "production", LH_LISTEN_PORT: "1", ...env },
 			encoding: "utf8",
 			timeout: 30_000,
 		});
-	try {
-		for (const [host, why] of [
-			["100.100.100.100", /needs a login password first/],
-			["fd7a:115c:a1e0::1", /needs a login password first/],
-			["0.0.0.0", /LH_LISTEN_ALL=1/],
-			["192.168.1.20", /never listens on a LAN or public interface/],
-			["203.0.113.7", /never listens on a LAN or public interface/],
-			["my-laptop.local", /not an IP address/],
-		] as const) {
-			const run = launch(host);
-			assert.equal(run.status, 78, `${host}: ${run.stderr}`);
-			assert.match(run.stderr, why);
-		}
-		fs.copyFileSync(path.join(server.dataDir, "web-login.json"), path.join(dataDir, "web-login.json"));
-		const publicBind = launch("203.0.113.7");
-		assert.equal(publicBind.status, 78, "a password never opens a public interface");
-		assert.match(publicBind.stderr, /never listens on a LAN or public interface/);
-	} finally {
-		fs.rmSync(dataDir, { recursive: true, force: true });
+	for (const args of [["-H", "0.0.0.0"], ["-H0.0.0.0"], ["--hostname", "0.0.0.0"], ["--hostname=::"], ["-p", "80"], ["-p80"], ["--port", "80"], ["--port=80"]]) {
+		const run = launch(args);
+		assert.equal(run.status, 78, `${args.join(" ")}: ${run.stderr}`);
+		assert.match(run.stderr, /set by LearnHarness/);
+	}
+	for (const host of ["0.0.0.0", "::", "100.100.100.100", "fd7a:115c:a1e0::1", "192.168.1.20", "my-laptop.local"]) {
+		const run = launch([], { LH_LISTEN_HOST: host });
+		assert.equal(run.status, 78, `${host}: ${run.stderr}`);
+		assert.match(run.stderr, /only listens on 127\.0\.0\.1/);
 	}
 });
 
-test("the proxy wrote no secret to the server log", async () => {
+test("the server log holds no password and no session token", async () => {
 	await until(() => server.log().length > 0, "server output");
 	assert(!server.log().includes(PASSWORD));
+	assert(!server.log().includes(NEW_PASSWORD));
 	assert(!/lh_session=[A-Za-z0-9_-]{20,}/.test(server.log()));
-});
-
-test("a raw `next dev` (no LH_LISTEN_HOST) keeps loopback login-free and refuses to set a password", async () => {
-	// Two `next dev` in one checkout collide on its dev lock: stop the main one first.
-	const record = fs.readFileSync(path.join(server.dataDir, "web-login.json"));
-	await server.stop();
-	const rawServer = await bootServer({ ticket: TICKET, providers: [], settings: { version: 1, graph: { enabled: false } }, env: { LH_TAILSCALE_BIN: NO_TAILSCALE } });
-	try {
-		const put = await rawServer.api("/api/remote-access", { method: "PUT", body: { password: PASSWORD } });
-		assert.equal(put.status, 409);
-		assert.match((await put.json()).error, /npm run dev/);
-		assert.equal((await rawServer.api("/api/settings")).status, 200);
-		// A record left by a launcher run: the listener is unknown, so loopback logs in too.
-		fs.writeFileSync(path.join(rawServer.dataDir, "web-login.json"), record, { mode: 0o600 });
-		assert.equal((await rawServer.api("/api/settings")).status, 401);
-	} finally {
-		await rawServer.stop();
-	}
 });
