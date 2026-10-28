@@ -394,7 +394,8 @@ test("(d) recovery never loops: when even the smallest request is too big, the l
 		// Quiet window: nothing else may fire.
 		await new Promise((r) => setTimeout(r, 8_000));
 		const turnRequests = stub.requests.slice(start).filter(isTurnRequest);
-		assert.equal(turnRequests.length, 2, "the rejected turn and one retry, never more");
+		// The retry would leave no room for a reply: it is held back, never sent (LH-50).
+		assert.equal(turnRequests.length, 1, "the rejected turn only; the one retry is held back, never more");
 		assert.ok(turnRequests.every((r) => requestTokens(r) > tiny));
 		const final = await chat(id);
 		assert.equal(final.messages.length, done.messages.length, "nothing ran after the failure");
@@ -403,11 +404,11 @@ test("(d) recovery never loops: when even the smallest request is too big, the l
 		const failed = final.messages.at(-1)!;
 		assert.match(
 			failed.errorMessage!,
-			/^This chat is still too long for stub-a, even after condensing its older part\. Start a new session, or pick a model with a larger context window\. \(400: /,
+			/^This chat is still too long for stub-a, even after condensing its older part\. Start a new session, or pick a model with a larger context window\. \(Not sent: /,
 		);
 		// (7) Never nested, the provider text kept apart, and Repair no longer offered.
 		assert.equal(failed.errorMessage!.split("This chat is still too long").length, 2);
-		assert.match(failed.contextOverflow!.providerText, /^400: .*context_length_exceeded/);
+		assert.match(failed.contextOverflow!.providerText, /^Not sent: this model's maximum context length is 2500 tokens/);
 		const refused = await server.api(`/api/chats/${id}/repair`, { method: "POST" });
 		assert.equal(refused.status, 409);
 		assert.match(await refused.text(), /cannot be condensed any further/);
