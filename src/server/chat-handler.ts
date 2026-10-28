@@ -48,7 +48,7 @@ import { applyParkedDismissal } from "./dismissal-park.ts";
 import { registerTurn, rememberTurnFailure, unregisterTurn } from "./turn-runs.ts";
 import { persistTurn, triggerExtraction, TurnPersistenceError } from "./turn-service.ts";
 import { hasProbeDone, danglingQuestionOf } from "../core/native-messages.ts";
-import { awaitCompaction, ensureCompacted, kickCompaction, effectiveThresholdTokens, holdCompactionGate, keepRecentTokensFor, noteRequestPrefix, sessionKind, systemPromptTokensFor } from "./compaction.ts";
+import { awaitCompaction, ensureCompacted, kickCompaction, effectiveThresholdTokens, holdCompactionGate, keepRecentTokensFor, noteRequestPrefix, sessionKind } from "./compaction.ts";
 import { condensable, contextWindowFor, explainOverflow, learnStatedLimit, overflowExplanation, recoverContext, recoveryAttempted, recoveryDeps } from "./context-recovery.ts";
 import { contextOverflowState } from "../core/context-overflow.ts";
 import { refreshConnectionCatalog } from "./model-catalog.ts";
@@ -407,7 +407,6 @@ export async function handleChatInput(
 			kind: sessionKind(record),
 			thresholdTokens: effectiveThresholdTokens(effective.compaction?.thresholdTokens, compactionWindow, conversationEngine.model.maxTokens),
 			keepRecentTokens: keepRecentTokensFor(compactionWindow),
-			systemPromptTokens: systemPromptTokensFor(sessionKind(record)),
 		},
 		chatId,
 	);
@@ -788,7 +787,6 @@ export async function handleChatInput(
 							kind: sessionKind(freshRecord),
 							thresholdTokens: effectiveThresholdTokens(fresh.compaction?.thresholdTokens, contextWindowFor(kickEngine), kickEngine.model.maxTokens),
 							keepRecentTokens: keepRecentTokensFor(contextWindowFor(kickEngine)),
-							systemPromptTokens: systemPromptTokensFor(sessionKind(freshRecord)),
 						};
 					}, chatId);
 			},

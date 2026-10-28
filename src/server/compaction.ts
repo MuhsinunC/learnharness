@@ -28,7 +28,7 @@
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { Message, Usage } from "@earendil-works/pi-ai";
+import { toToolDeclaration, type Message, type Tool, type Usage } from "@earendil-works/pi-ai";
 import { estimateContextTokens as estimateWireTokens, estimateTextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import {
 	activeCompactionOf,
@@ -50,7 +50,7 @@ import { emit } from "../core/events.ts";
 import type { ChatStore } from "../core/ports.ts";
 import { CONTEXT_SAFETY_TOKENS, type PiEngine } from "../agent/models.ts";
 import { runSubagent } from "../agent/subagents/pi-run.ts";
-import { composeInstructions } from "../agent/teacher-agent.ts";
+import { composeInstructions, fullToolRegistry, type AgentKind } from "../agent/teacher-agent.ts";
 
 /** The summarizer's system prompt — server-owned operational framing,
  *  not model-facing doctrine (buildCompactionPrompt carries the shape). */
@@ -114,10 +114,6 @@ export interface CompactionDeps {
 	thresholdTokens: number;
 	/** The kept tail (keepRecentTokensFor the window); default pi's 20k. */
 	keepRecentTokens?: number;
-	/** The composed system prompt's token estimate (chars/4) — the
-	 *  projection's prefix until a turn notes the real one
-	 *  (requestPrefixTokens). */
-	systemPromptTokens: number;
 	/** Injectable summarizer (tests); default = the sub-agent one-shot. */
 	summarize?: Summarizer;
 }
@@ -186,27 +182,46 @@ export function sessionKind(record: { kind?: string; messages: readonly LhMessag
 	return record.kind === "practice" ? "practice" : hasProbeDone(record.messages) ? "teach" : "probe";
 }
 
+const agentKind = (kind: CompactionDeps["kind"]): AgentKind => kind === "teach" ? "teacher" : kind === "probe" ? "prober" : "practice";
+
 /** The system prompt a turn of this kind carries, in chars/4 tokens. */
 export function systemPromptTokensFor(kind: CompactionDeps["kind"]): number {
-	return Math.ceil(composeInstructions(kind === "teach" ? "teacher" : kind === "probe" ? "prober" : "practice").length / 4);
+	return Math.ceil(composeInstructions(agentKind(kind)).length / 4);
 }
 
 // ─── the estimate over the ACTIVE projection ────────────────────────────────
 
 const requestPrefixes = () => (g.__lhRequestPrefix ??= new Map());
+const defaultPrefixes = new Map<CompactionDeps["kind"], number>();
+
+/** A prompt and tool set in wire tokens, as the held-back floor measures
+ *  them (LH-55): pi-ai's chars/3.5 over the declarations it sends, not
+ *  the tool objects. */
+function prefixTokens(systemPrompt: string, tools: readonly Tool[]): number {
+	return estimateTextTokens(systemPrompt) + estimateTextTokens(JSON.stringify(tools.map(toToolDeclaration)));
+}
 
 /** Remember what every request of this chat carries before its messages:
  *  the last turn's system prompt and tool declarations, in wire tokens.
- *  In memory; a chat with no turn since boot falls back to its composed
- *  prompt alone. */
-export function noteRequestPrefix(chatId: string, systemPrompt: string, tools: readonly unknown[]): void {
-	requestPrefixes().set(chatId, estimateTextTokens(systemPrompt) + estimateTextTokens(JSON.stringify(tools)));
+ *  In memory, until the chat is deleted (forgetRequestPrefix). */
+export function noteRequestPrefix(chatId: string, systemPrompt: string, tools: readonly Tool[]): void {
+	requestPrefixes().set(chatId, prefixTokens(systemPrompt, tools));
 }
 
-/** The chat's request prefix in wire tokens (pi-ai's chars/3.5): the
- *  noted one, else the composed prompt (`systemPromptTokens`, chars/4). */
-export function requestPrefixTokens(chatId: string, systemPromptTokens: number): number {
-	return requestPrefixes().get(chatId) ?? Math.ceil((systemPromptTokens * 4) / 3.5);
+/** Drop a deleted chat's noted prefix. */
+export function forgetRequestPrefix(chatId: string): void {
+	requestPrefixes().delete(chatId);
+}
+
+/** The chat's request prefix in wire tokens: the noted one, else, with no
+ *  turn since boot, the kind's composed prompt and every tool its
+ *  registry can hold (an over-count of the gated tools, LH-55). */
+export function requestPrefixTokens(chatId: string, kind: CompactionDeps["kind"]): number {
+	const noted = requestPrefixes().get(chatId) ?? defaultPrefixes.get(kind);
+	if (noted !== undefined) return noted;
+	const fallback = prefixTokens(composeInstructions(agentKind(kind)), fullToolRegistry(agentKind(kind)));
+	defaultPrefixes.set(kind, fallback);
+	return fallback;
 }
 
 /** The projected context: what the next LLM call would carry, measured
@@ -311,7 +326,7 @@ async function compact(deps: CompactionDeps, chatId: string): Promise<void> {
 	const record = deps.chatStore.getChat(chatId);
 	if (!record) return;
 	const messages = record.messages;
-	const tokensBefore = projectedContextTokens(messages, requestPrefixTokens(chatId, deps.systemPromptTokens));
+	const tokensBefore = projectedContextTokens(messages, requestPrefixTokens(chatId, deps.kind));
 	if (tokensBefore <= deps.thresholdTokens) return; // settled beneath while we waited
 
 	const cut = compactionCutIndex(messages, deps.keepRecentTokens);
@@ -380,7 +395,7 @@ export async function ensureCompacted(deps: CompactionDeps, chatId: string): Pro
 	if (deps.canStart?.() === false) return;
 	const record = deps.chatStore.getChat(chatId);
 	if (!record) return;
-	if (projectedContextTokens(record.messages, requestPrefixTokens(chatId, deps.systemPromptTokens)) <= deps.thresholdTokens) return;
+	if (projectedContextTokens(record.messages, requestPrefixTokens(chatId, deps.kind)) <= deps.thresholdTokens) return;
 	if (state().inFlight.has(chatId)) return; // a concurrent caller started it while we awaited
 	const run = compact(deps, chatId);
 	state().inFlight.set(chatId, run);
@@ -405,7 +420,7 @@ export function kickCompaction(buildDeps: () => CompactionDeps | null, chatId: s
 	if (!deps || deps.canStart?.() === false) return;
 	const record = deps.chatStore.getChat(chatId);
 	if (!record) return;
-	if (projectedContextTokens(record.messages, requestPrefixTokens(chatId, deps.systemPromptTokens)) <= deps.thresholdTokens) return;
+	if (projectedContextTokens(record.messages, requestPrefixTokens(chatId, deps.kind)) <= deps.thresholdTokens) return;
 	const run = compact(deps, chatId);
 	state().inFlight.set(chatId, run);
 	void run.finally(() => state().inFlight.delete(chatId));

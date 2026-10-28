@@ -15,6 +15,7 @@ import {
 	type TeacherToolContext,
 } from "./tools.ts";
 import { practiceTools, type PracticeToolContext } from "./tools/practice.ts";
+import type { GraphToolContext } from "./tools/graph.ts";
 import { healToolRecord, withArgumentHeal } from "./tools/heal.ts";
 import { sendToUserTool } from "./tools/send-to-user.ts";
 import { viewImageTool } from "./tools/view-image.ts";
@@ -341,6 +342,16 @@ export function bareQuestionTools(): Record<string, AgentTool<any>> {
 export function createPracticeAgent(ctx: PracticeToolContext, opts: AgentBuildOptions = {}) {
 	const tools = opts.tools ?? practiceTools(ctx);
 	return baseAgentOptions("practice", opts, Object.values(tools));
+}
+
+/** Every tool a kind's registry can hold, gated ones included, for a chat
+ *  no turn has built since boot (LH-55): the request prefix estimate
+ *  (server/compaction) reads their declarations. The context is inert:
+ *  nothing here executes against it. */
+export function fullToolRegistry(kind: AgentKind): AgentTool<any>[] {
+	const inert = { chatId: "", chatStore: { getChat: () => null }, graphStore: {}, jobStore: {}, spawn: () => {}, deliver: () => {} } as unknown as ProberToolContext & TeacherToolContext & GraphToolContext;
+	const tools = kind === "prober" ? createProberTools(inert) : kind === "teacher" ? createTeacherTools(inert) : practiceTools({ ...inert, jobs: inert, graph: inert });
+	return [...Object.values(tools), sendToUserTool, viewImageTool({} as AttachmentStore)];
 }
 
 export type ProberAgent = ReturnType<typeof createProberAgent>;
