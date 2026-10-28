@@ -46,7 +46,7 @@ function storeLoginMarker(started: number | null) {
 	} catch { /* In-memory activation still works without storage. */ }
 }
 
-export function ClaudeCodeConnection() {
+export function ClaudeCodeConnection({ labelClassName }: { labelClassName?: string } = {}) {
 	const [status, setStatus] = useState<Status | null>(null), [error, setError] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false), [baseUrl, setBaseUrl] = useState("");
 	const [backend, setBackend] = useState<"local" | "endpoint">("local");
@@ -174,7 +174,7 @@ export function ClaudeCodeConnection() {
 	const repair = status?.discovered != null && (status.hint != null || !status.found);
 	const help = "text-xs leading-relaxed text-muted-foreground";
 	return <div data-testid="claude-code-connection" className="flex flex-col gap-2">
-		<span className="font-ui text-xs text-foreground">Claude</span>
+		<span className={labelClassName ?? "font-ui text-xs text-foreground"}>Claude</span>
 		<p className={help}>Use your Claude subscription through Claude Code on this computer.</p>
 		{error && <p role="alert" className="text-xs text-red-400">{error}</p>}
 		{status?.probeError && <p className={help}>{status.probeError}</p>}
