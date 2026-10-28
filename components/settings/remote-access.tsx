@@ -16,6 +16,16 @@ type RemoteAccess = {
 	url: string | null;
 };
 
+/** One GET per 30 s for every row that asks (KeysSection, the sign-in
+ * rows and RemoteAccessSettings open together); a change refreshes it. */
+let shared: { at: number; state: Promise<RemoteAccess | null> } | null = null;
+function remoteAccessState(fresh = false): Promise<RemoteAccess | null> {
+	if (fresh || !shared || Date.now() - shared.at >= 30_000) {
+		shared = { at: Date.now(), state: fetch("/api/remote-access").then((r) => r.json() as Promise<RemoteAccess>).catch(() => null) };
+	}
+	return shared.state;
+}
+
 const DOCS = `${process.env.LH_HOMEPAGE ?? ""}/blob/main/docs/remote-access.md`;
 const code = "select-all font-mono text-foreground";
 const field = "h-7 w-32 rounded-sm border border-border bg-background px-1.5 font-mono text-xs text-foreground outline-none placeholder:text-muted-foreground/60 focus:border-muted-foreground/50";
@@ -29,10 +39,7 @@ export function useComputerOnly(): { message: string; keys: boolean; confirmKeys
 	const [state, setState] = useState<{ message: string; keys: boolean; confirmKeys: boolean } | null>(null);
 	useEffect(() => {
 		let live = true;
-		void fetch("/api/remote-access")
-			.then((r) => r.json() as Promise<RemoteAccess>)
-			.then((s) => { if (live && s.access === "session") setState({ message: computerOnlyMessage(s.desktop), keys: s.desktop, confirmKeys: !s.desktop }); })
-			.catch(() => {});
+		void remoteAccessState().then((s) => { if (live && s?.access === "session") setState({ message: computerOnlyMessage(s.desktop), keys: s.desktop, confirmKeys: !s.desktop }); });
 		return () => { live = false; };
 	}, []);
 	return state;
@@ -53,7 +60,7 @@ export function RemoteAccessSettings() {
 	const [error, setError] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false);
 
-	const load = () => fetch("/api/remote-access").then((r) => r.json() as Promise<RemoteAccess>).then(setState).catch(() => setState(null));
+	const load = (fresh = false) => remoteAccessState(fresh).then(setState);
 	useEffect(() => { void load(); }, []);
 
 	const change = async (method: "PUT" | "DELETE") => {
@@ -73,7 +80,7 @@ export function RemoteAccessSettings() {
 		setCurrent("");
 		// A browser session was revoked with every other one: log in again.
 		if (state?.access === "session") window.location.assign("/login");
-		else await load();
+		else await load(true);
 	};
 
 	if (!state) return null;
