@@ -17,7 +17,9 @@ export type DiscoveryRoots = { pathEnv: string | undefined; home: string; fixedD
 function defaultRoots(): DiscoveryRoots {
 	return {
 		pathEnv: process.env.PATH, home: process.env.HOME ?? homedir(),
-		fixedDirs: process.env.NODE_ENV === "test" && process.env.LH_CLAUDE_CODE_TEST_NO_FIXED_DIRS === "1"
+		// Tests only narrow the search. The e2e harness boots a production
+		// build, where NODE_ENV is inlined, so it opts out via LH_E2E.
+		fixedDirs: (process.env.NODE_ENV === "test" || process.env.LH_E2E === "1") && process.env.LH_CLAUDE_CODE_TEST_NO_FIXED_DIRS === "1"
 			? [] : ["/opt/homebrew/bin", "/usr/local/bin"],
 	};
 }

@@ -47,8 +47,12 @@ with fast refresh.
 - `server.ts`: `bootServer({ ticket, providers, settings, env? })` returns
   `{ url, dataDir, api, json, log, stop }`. It writes `settings` to a fresh
   `LH_DATA_DIR` under `~/.cache/lh-e2e/<ticket>/`, strips proxy and credential
-  variables, and sets `LH_IGNORE_ENV_KEYS=1` and `LH_E2E=1`. The server runs
-  under `nice -n 10`. `stop()` collects that child's process tree
+  variables, and sets `LH_IGNORE_ENV_KEYS=1` and `LH_E2E=1`. The server (and
+  `next build`) gets a fresh `HOME` and a `PATH` of the system dirs plus a
+  dir holding only a `node` link, so it never finds the host's Claude Code
+  (`LH_CLAUDE_CODE_TEST_NO_FIXED_DIRS=1` also skips `/opt/homebrew/bin` and
+  `/usr/local/bin`). A test that needs Claude Code points the settings
+  executable at a stub. The server runs under `nice -n 10`. `stop()` collects that child's process tree
   (`pgrep -P`, recursively), sends SIGTERM to exactly those pids, sends
   SIGKILL to any still alive after 10 s, then deletes the run directory;
   set `LH_E2E_KEEP=1` to keep it. `until(probe, label, ms)` polls.
