@@ -18,10 +18,12 @@ import { maxOutputTokens, reply, startStubProvider, type StubProvider, type Stub
 // Its usage reports the input it counted (chars/4), so the threshold
 // compaction's usage anchor behaves as with a real provider.
 
-/** The real window, in tokens: the 38,000 chars of messages five turns
- *  grow into, plus the 2,048 max_tokens the requests ask for. */
-const LIMIT = 38_000 / 4 + 2_048;
-const FILLER = "Limits describe what a function approaches. ".repeat(115);
+/** The real window, in tokens: between the sixth turn's request (about
+ *  116k chars of messages, plus max_tokens 2,048) and the fifth's. Room
+ *  enough, once learned, for the prober's prompt and tool declarations
+ *  and the reply (LH-50). */
+const LIMIT = 28_500;
+const FILLER = "Limits describe what a function approaches. ".repeat(460);
 const SUMMARY = [
 	"## The learner's understanding",
 	"The learner asked for a walk through limits and followed each step.",
@@ -415,11 +417,12 @@ test("(d) recovery never loops: when even the smallest request is too big, the l
 });
 
 test("(e) a custom window above the real limit: the chat overflows, then recovers, even when the rejection states no limit", async () => {
-	// The misconfiguration is what runs: the custom 1.5M over the 4,000 default.
+	// The misconfiguration is what runs: the custom 1.5M over the 4,000
+	// default (no limit learned yet: the window that runs caps at one).
+	const id = await newChat("Series");
 	const catalog = await server.json<{ models: Array<{ provider: string; id: string; contextWindow: number; defaultContextWindow: number }> }>("/api/models");
 	const pair = catalog.models.find((m) => m.provider === STUB && m.id === "stub-a");
 	assert.deepEqual([pair?.contextWindow, pair?.defaultContextWindow], [1_500_000, 4_000]);
-	const id = await newChat("Series");
 	await grow(id, 5);
 	assert.equal((await chat(id)).messages.filter((m) => m.customType === "compaction").length, 0, "no threshold compaction under the 1.5M window");
 	stub.setResponder(limited(LIMIT, BEDROCK_400));

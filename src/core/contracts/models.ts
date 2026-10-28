@@ -27,10 +27,13 @@ export interface ModelCatalogEntry {
 	supportedLevels: ThinkingLevel[];
 	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
 	/** The window that runs: the user's custom value for this pair, else
-	 *  the catalog default (LH-38, core/context-windows.ts). */
+	 *  the catalog default (LH-38, core/context-windows.ts), never above
+	 *  the limit the provider stated (LH-50). */
 	contextWindow: number;
 	/** The user's stored value for this pair; absent = no custom value. */
 	customContextWindow?: number;
+	/** The limit the provider stated for this pair (LH-40); absent = none. */
+	learnedContextLimit?: number;
 	/** The catalog's own window (shown as "Default"). */
 	defaultContextWindow: number;
 	/** The known working maximum (shown as "Maximum"); saving above it

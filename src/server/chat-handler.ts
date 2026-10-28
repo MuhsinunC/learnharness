@@ -49,7 +49,7 @@ import { registerTurn, rememberTurnFailure, unregisterTurn } from "./turn-runs.t
 import { persistTurn, triggerExtraction, TurnPersistenceError } from "./turn-service.ts";
 import { hasProbeDone, danglingQuestionOf } from "../core/native-messages.ts";
 import { awaitCompaction, ensureCompacted, kickCompaction, effectiveThresholdTokens, holdCompactionGate, keepRecentTokensFor, sessionKind, systemPromptTokensFor } from "./compaction.ts";
-import { condensable, contextWindowFor, explainOverflow, learnStatedLimit, overflowExplanation, recoverContext, recoveryAttempted, recoveryDeps } from "./context-recovery.ts";
+import { condensable, contextWindowFor, explainOverflow, learnStatedLimit, noteRequestPrefix, overflowExplanation, recoverContext, recoveryAttempted, recoveryDeps } from "./context-recovery.ts";
 import { contextOverflowState } from "../core/context-overflow.ts";
 import { refreshConnectionCatalog } from "./model-catalog.ts";
 import { emit } from "../core/events.ts";
@@ -624,6 +624,10 @@ export async function handleChatInput(
 					},
 					agentOpts,
 				);
+
+	// What every request of this chat carries before its messages: an
+	// overflow recovery fits under the window with it (LH-50).
+	noteRequestPrefix(chatId, constructed.state.systemPrompt, constructed.state.tools);
 
 	// A test-injected agent gets no usage collector (tests assert the
 	// transcript, not the money channel); when it's ours, usage flows through

@@ -62,13 +62,14 @@ Pi's shape, with Codex's clipping and option 2 as the fallback
 - **Target.** Use the limit the error states ("maximum context length is N",
   Anthropic's "… > N maximum", and others). Otherwise use the window from
   `contextWindowFor`, but never more than half the request that failed,
-  because that window is exactly what may be wrong. A recovered request may
-  fill 60% of the target, and never more than leaves the reply its room (see
-  "The reply's room"). The rest is left for tool declarations, the reply's
-  `max_tokens`, and the error in the chars/4 estimate. Fit is chars/4 of the
-  system prompt, the new marker and the kept tail; the failed request is
-  measured once. The usage anchor is not used, because it describes the last
-  request that succeeded.
+  because that window is exactly what may be wrong. Fit is judged as the
+  wire request will be (LH-50): the system prompt and tool declarations, the
+  new marker and the kept tail, plus the reply's room (see "The reply's
+  room"), all at pi-ai's chars/3.5, must stay within the target. The prompt
+  and declarations are the chat's last turn's, noted when its agent is built
+  (in memory; with no turn since boot, the composed prompt alone). The
+  failed request is measured once. The usage anchor is not used, because it
+  describes the last request that succeeded.
 - **Compact.** First, one model summary: half the budget for the kept tail,
   half for the summary, which carries a word cap. The summarizer's input is
   clipped to the target: the prior summary always rides whole, and only the
@@ -125,7 +126,11 @@ learn the limit before they build their engine, so the summarizer runs at it
 too. For small windows the 20k kept tail scales down to a quarter of the
 window, since it can exceed a learned 8k limit. The
 threshold also estimates each kind's own system prompt (the prober's is about 40%
-of the teacher's). The settings UI does not show the learned limit.
+of the teacher's). The footer's "/ N" and the model menus show the window
+that runs (`/api/models` `contextWindow` is capped at the learned limit,
+which it also returns as `learnedContextLimit`), and the context-window
+field's caption adds "Provider limit: N" when that limit is below the
+configured window; the field itself keeps the user's value.
 
 ## The window seam (LH-38)
 
@@ -149,10 +154,10 @@ so the budgets' job is to keep room for the reply:
 `outputReserveTokens(window, maxTokens)` is the model's max output, at most a
 quarter of the window, plus pi-ai's 4096. The threshold compaction fires at
 `min(settings threshold, window − that reserve)`, so a request at the
-threshold still gets that much output, and a recovery fits at most
-`window − reserve`. The recovery fit does not see the tool declarations, so
-a retry's reply room is the reserve less the tools and the estimate's error.
-Before LH-50 a custom 1M window over a real 40,960 one (OpenRouter
-qwen/qwen3-14b, 16,384 max output) made every request ask for 16,384: the
-first recovery fit, the next turns were rejected again, and the chat ended
-unrecoverable (`tests/e2e/output-budget.e2e.ts` reproduces it).
+threshold still gets that much output, and a recovery's whole request fits
+`window − reserve` (see Target). Before LH-50 a custom 1M window over a real
+40,960 one (OpenRouter qwen/qwen3-14b, 16,384 max output) made every request
+ask for 16,384: with gradual growth the first recovery fit, the next turns
+were rejected again, and the chat ended unrecoverable; one huge paste's
+recovery retry was rejected outright (`tests/e2e/output-budget.e2e.ts`
+reproduces both).
