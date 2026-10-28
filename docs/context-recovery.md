@@ -2,7 +2,7 @@
 
 ## The problem
 
-The threshold compaction fires at `min(settings threshold, contextWindow − 16k)`
+The threshold compaction fires at `min(settings threshold, contextWindow − the reply's room)`
 (`src/server/compaction.ts`). If the window the app believes in is larger than
 the one the provider enforces, for example 1.5M left on for a 128k model, the
 chat grows past the real limit before the threshold is reached. Every turn after
@@ -63,7 +63,8 @@ Pi's shape, with Codex's clipping and option 2 as the fallback
   Anthropic's "… > N maximum", and others). Otherwise use the window from
   `contextWindowFor`, but never more than half the request that failed,
   because that window is exactly what may be wrong. A recovered request may
-  fill 60% of the target. The rest is left for tool declarations, the reply's
+  fill 60% of the target, and never more than leaves the reply its room (see
+  "The reply's room"). The rest is left for tool declarations, the reply's
   `max_tokens`, and the error in the chars/4 estimate. Fit is chars/4 of the
   system prompt, the new marker and the kept tail; the failed request is
   measured once. The usage anchor is not used, because it describes the last
@@ -82,10 +83,14 @@ Pi's shape, with Codex's clipping and option 2 as the fallback
 - **Retry once per episode.** The retry is a `continue` turn. The guard is
   read from the record: a recovery marker (`details.notice`) after the last
   successful reply means this episode already had its compact-and-retry,
-  whatever threshold markers landed since. A second overflow, or a chat with
-  nothing to drop, becomes "This chat is still too long for \<model\>…", built
-  from the provider's text every time (never nested), and marked
-  unrecoverable, so Repair is no longer offered.
+  whatever threshold markers landed since. A chat with nothing to drop
+  becomes "This chat is still too long for \<model\>…", built from the
+  provider's text every time (never nested), and marked unrecoverable, so
+  Repair is no longer offered. A second overflow is marked unrecoverable only
+  when nothing older is left to condense or the system prompt alone exceeds
+  the fit (`condensable`); otherwise it says "…after condensing its older
+  part once. Press Repair this chat…" and Repair stays offered (LH-50: the
+  failure may have come from an output budget, which a Repair can fix).
 - **Never silent.** When recovery cannot run, the rejection becomes a plain
   explanation that keeps Repair offered: background use off for the
   connection ("turn background use on, or press Repair this chat"), no
@@ -111,11 +116,14 @@ Pi's shape, with Codex's clipping and option 2 as the fallback
 
 The limit a rejection states is saved per `provider:id` in settings, under
 `learnedContextLimits`, its own key: the user's `contextWindows` value and
-the context-window modal are untouched. `contextWindowFor` returns
-min(window, learned limit), and the threshold compaction reads it there, so
-after one recovery the threshold fires before the provider rejects again.
-For small windows the threshold's 16k reserve and 20k kept tail scale down
-to a quarter of the window, since both can exceed a learned 8k limit. The
+the context-window modal are untouched. Every engine built after that runs
+at min(window, learned limit) (LH-50: the resolved spec's `contextLimit`), so
+pi-ai's max-tokens clamp uses the real limit, and `contextWindowFor` returns
+the same min, which the threshold compaction reads, so after one recovery
+the threshold fires before the provider rejects again. Recovery and Repair
+learn the limit before they build their engine, so the summarizer runs at it
+too. For small windows the 20k kept tail scales down to a quarter of the
+window, since it can exceed a learned 8k limit. The
 threshold also estimates each kind's own system prompt (the prober's is about 40%
 of the teacher's). The settings UI does not show the learned limit.
 
@@ -126,5 +134,25 @@ Recovery and the threshold compaction read the window only through
 from `engine.model.contextWindow`, which carries LH-38's per-(provider,
 model) custom window (the resolved spec's `contextWindow`, set by
 chat-handler's `withContextWindow`; the user's value when set, else the
-catalog default), and caps it at the learned limit. The repair route
+catalog default), already capped at a learned limit (the spec's
+`contextLimit`), and caps it at one learned since. The repair route
 builds its engine the same way.
+
+## The reply's room (LH-50)
+
+Providers count the input plus the request's `max_tokens` against the
+window. pi-ai asks for the model's max output, clamped to
+`window − estimated context − 4096`, where the estimate covers the system
+prompt and tool declarations (its usage anchor, or chars/3.5). Once the
+engine's window is the real limit, that clamp keeps every request inside it,
+so the budgets' job is to keep room for the reply:
+`outputReserveTokens(window, maxTokens)` is the model's max output, at most a
+quarter of the window, plus pi-ai's 4096. The threshold compaction fires at
+`min(settings threshold, window − that reserve)`, so a request at the
+threshold still gets that much output, and a recovery fits at most
+`window − reserve`. The recovery fit does not see the tool declarations, so
+a retry's reply room is the reserve less the tools and the estimate's error.
+Before LH-50 a custom 1M window over a real 40,960 one (OpenRouter
+qwen/qwen3-14b, 16,384 max output) made every request ask for 16,384: the
+first recovery fit, the next turns were rejected again, and the chat ended
+unrecoverable (`tests/e2e/output-budget.e2e.ts` reproduces it).

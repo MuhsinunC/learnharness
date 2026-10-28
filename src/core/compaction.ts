@@ -16,8 +16,10 @@
  * turn start awaits the gate. No mid-run surgery exists.
  *
  * Trigger threshold (owner ruling): effective = min(settings threshold,
- * model contextWindow − 16k reserve). Defaults: threshold 150k, kept
- * tail ~20k recent tokens (pi's defaults, owner-approved). Token
+ * model contextWindow − reserve); the reserve is the reply's room, the
+ * model's max output plus pi-ai's 4096 (LH-50, server/compaction.ts).
+ * Defaults: threshold 150k, kept tail ~20k recent tokens (pi's
+ * defaults, owner-approved). Token
  * estimation follows pi's law (2026-10-05 incident fix): anchor on the
  * provider-reported usage of the last assistant message, chars/4 only
  * for messages appended after that anchor; the heuristic alone runs

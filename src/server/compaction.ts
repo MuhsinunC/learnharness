@@ -146,14 +146,30 @@ export async function awaitCompaction(chatId: string): Promise<void> {
 
 // ─── the effective threshold (owner ruling: min(setting, window − reserve)) ─
 
+/** pi-ai's margin under the window: its max-tokens clamp leaves this
+ *  much free (api/simple-options.js CONTEXT_SAFETY_TOKENS). */
+const CONTEXT_SAFETY_TOKENS = 4096;
+
+/** The room a request keeps for its reply (LH-50): the model's max
+ *  output, at most a quarter of the window (small windows), plus pi-ai's
+ *  safety margin. Providers count input + max_tokens against the window,
+ *  and pi-ai shrinks max_tokens to what the input leaves, so an input
+ *  budget that ignores the reply starves it or gets rejected. */
+export function outputReserveTokens(contextWindowTokens: number, maxOutputTokens: number): number {
+	return Math.min(maxOutputTokens, Math.floor(contextWindowTokens / 4)) + CONTEXT_SAFETY_TOKENS;
+}
+
 /** Resolve the effective trigger. Unknown window → the setting alone
- *  (honest: no fake window — the catalog-index precedent). */
-export function effectiveThresholdTokens(settingTokens: number | undefined, contextWindowTokens: number | undefined): number {
+ *  (honest: no fake window — the catalog-index precedent). With the
+ *  engine's max output known, the reserve is the reply's room
+ *  (outputReserveTokens); without it, pi's 16k, a quarter of a small
+ *  window (LH-40: a learned 8k limit). */
+export function effectiveThresholdTokens(settingTokens: number | undefined, contextWindowTokens: number | undefined, maxOutputTokens?: number): number {
 	const setting = settingTokens ?? 150_000;
 	if (contextWindowTokens === undefined) return setting;
-	// Small windows (LH-40: a learned 8k limit) reserve a quarter instead
-	// of a 16k reserve that would exceed the whole window.
-	const reserve = Math.min(COMPACTION_RESERVE_TOKENS, Math.floor(contextWindowTokens / 4));
+	const reserve = maxOutputTokens === undefined
+		? Math.min(COMPACTION_RESERVE_TOKENS, Math.floor(contextWindowTokens / 4))
+		: outputReserveTokens(contextWindowTokens, maxOutputTokens);
 	return Math.min(setting, Math.max(contextWindowTokens - reserve, 1));
 }
 
