@@ -20,7 +20,7 @@ import { cn } from "@/lib/utils";
 import { fuzzyScore } from "@/src/core";
 import { useServerEvent, useServerResync } from "@/components/server-events";
 import type { ChatListItem } from "@/src/core";
-import { kbdEventForAction } from "@/src/core";
+import { isTypingSurface, kbdEventForAction } from "@/src/core";
 import { notifySettingsSaved } from "@/components/settings-signal";
 import { repairChatRequest } from "@/components/repair-chat";
 
@@ -465,6 +465,9 @@ export function RenameRow({ chat, onCommit, onCancel }: { chat: ChatListItem; on
 export type SessionKindFilter = "teach" | "all" | "practice";
 const KIND_FILTER_KEY = "lh:session-kind-filter";
 
+/** Keys the open drawer keeps from the inert page behind it. */
+const DRAWER_KEYS = new Set(["Escape", "Enter", " ", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"]);
+
 function SessionsSidebar() {
 	const { open, toggle, compact, closeDrawer, toggleRef } = useSidebar();
 	const [chats, setChats] = useState<ChatListItem[] | null>(null);
@@ -747,21 +750,27 @@ function SessionsSidebar() {
 			[opener, toggleRef.current, closeRef.current].find(usable)?.focus();
 		};
 	}, [drawer, toggleRef]);
-	// Escape closes it, claimed at the document level so it never reaches
-	// the window chain (abort the turn). A menu or dialog over it owns
-	// Escape while it is up, and so does a focused field (one Esc, one
-	// layer): React's root is the document, so the field's stopPropagation
-	// cannot keep this listener from running.
+	/* Keys are fenced too: inert stops focus and pointers, not the page's
+	   own document and window key listeners (the quiz dock's arrows, Space
+	   and Enter; a plan's or popover's Escape). While the drawer is open
+	   these keys stop at the window in the capture phase, before anything
+	   below sees them, and Escape closes the drawer (one Esc, one layer).
+	   A typing surface keeps its keys (its own handler runs), and the
+	   session menu and the delete dialog keep theirs. */
 	useEffect(() => {
 		if (!drawer || ctxChatId !== null || deleting) return;
 		const onKeyDown = (e: KeyboardEvent) => {
-			if (e.key !== "Escape" || (e.target instanceof Element && e.target.matches("input, textarea"))) return;
-			e.preventDefault();
-			e.stopPropagation();
-			closeDrawer();
+			if (!DRAWER_KEYS.has(e.key) || e.metaKey || e.ctrlKey || isTypingSurface(e)) return;
+			const target = e.target instanceof Node ? e.target : null;
+			if (target !== document.body && !asideRef.current?.contains(target)) return;
+			e.stopImmediatePropagation();
+			if (e.key === "Escape") {
+				e.preventDefault();
+				closeDrawer();
+			}
 		};
-		document.addEventListener("keydown", onKeyDown);
-		return () => document.removeEventListener("keydown", onKeyDown);
+		window.addEventListener("keydown", onKeyDown, true);
+		return () => window.removeEventListener("keydown", onKeyDown, true);
 	}, [drawer, ctxChatId, deleting, closeDrawer]);
 
 	useEffect(() => {
