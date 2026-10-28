@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, before, test } from "node:test";
 import type { ElementHandle, Page } from "puppeteer-core";
-import { bootServer, until, type LhServer } from "./harness/server.ts";
+import { bootServer, REPO_ROOT, until, type LhServer } from "./harness/server.ts";
 import { launchChrome, type HeadlessChrome } from "./harness/chrome.ts";
 import { calledTool, lastToolName, reply, startStubProvider, type StubProvider, type StubRequest } from "./harness/stub-provider.ts";
 import { png } from "./harness/png.ts";
@@ -37,6 +37,8 @@ interface Viewport {
 const PHONE: Viewport = { name: "phone", width: 390, height: 844, deviceScaleFactor: 3, isMobile: true, hasTouch: true, ua: IPHONE_UA };
 const TABLET: Viewport = { name: "tablet", width: 768, height: 1024, deviceScaleFactor: 2, isMobile: true, hasTouch: true, ua: IPAD_UA };
 const DESKTOP: Viewport = { name: "desktop", width: 1280, height: 800, deviceScaleFactor: 1, isMobile: false, hasTouch: false };
+// A mouse-driven window narrow enough for sm: layouts beside the 288px inline sidebar.
+const NARROW_DESKTOP: Viewport = { name: "desktop-700", width: 700, height: 900, deviceScaleFactor: 1, isMobile: false, hasTouch: false };
 
 // A teacher reply that is hard to fit: a wide table, an unbroken URL, a
 // long code line, display math and a mermaid chart.
@@ -269,7 +271,12 @@ class Walk {
 	/** Open the sessions sidebar: the drawer on touch widths, inline on the desktop. */
 	async openSidebar(): Promise<void> {
 		if ((await this.page.$eval("[data-testid=sidebar]", (el) => el.getAttribute("aria-hidden"))) === "true") await this.press('[aria-label="Open sidebar"]');
-		await until(async () => (await this.page.$eval("[data-testid=sidebar]", (el) => el.getAttribute("aria-hidden"))) === "false", `${this.vp.name}: the sidebar to open`, 10_000);
+		// Open, and slid all the way in (a loaded machine can stretch the 200ms slide).
+		await until(
+			() => this.page.$eval("[data-testid=sidebar]", (el) => el.getAttribute("aria-hidden") === "false" && el.getBoundingClientRect().left >= -0.5),
+			`${this.vp.name}: the sidebar to open`,
+			10_000,
+		);
 		await this.settle(400);
 	}
 
@@ -278,9 +285,12 @@ class Walk {
 	}
 }
 
-/** COMPACT_QUERY's rule (components/sidebar.tsx): the drawer under 640px, and under 1024px on a touch screen. */
-function isCompact(vp: Viewport): boolean {
-	return vp.width < 640 || (vp.width < 1024 && vp.hasTouch);
+/** The drawer's media query, read from its one definition in components/sidebar.tsx. */
+const COMPACT_QUERY = /const COMPACT_QUERY = "([^"]+)";/.exec(fs.readFileSync(path.join(REPO_ROOT, "components", "sidebar.tsx"), "utf8"))![1]!;
+
+/** Whether the page, as emulated, matches COMPACT_QUERY (the drawer) rather than the inline sidebar. */
+async function isCompact(page: Page): Promise<boolean> {
+	return page.evaluate((query) => matchMedia(query).matches, COMPACT_QUERY);
 }
 
 async function newWalk(vp: Viewport, context = chrome.browser.defaultBrowserContext()): Promise<Walk> {
@@ -293,7 +303,7 @@ async function newWalk(vp: Viewport, context = chrome.browser.defaultBrowserCont
 async function walk(vp: Viewport): Promise<string[]> {
 	const w = await newWalk(vp);
 	const page = w.page;
-	const compact = isCompact(vp);
+	const compact = await isCompact(page);
 	try {
 		// The viewport meta: device width, and cover so the safe-area insets are real on iOS.
 		await w.goto("/");
@@ -464,6 +474,10 @@ test("a desktop window (1280×800): every surface fits, the sidebar stays inline
 	assert.deepEqual(await walk(DESKTOP), []);
 });
 
+test("a narrow mouse-driven window (700×900): every surface fits beside the inline sidebar", async () => {
+	assert.deepEqual(await walk(NARROW_DESKTOP), []);
+});
+
 /** `until`, answering false on a timeout instead of throwing. */
 async function within(probe: () => Promise<boolean>, ms: number): Promise<boolean> {
 	return until(probe, "", ms).then(
@@ -495,6 +509,8 @@ test("a phone: every drawer navigation closes the drawer, the same-pathname ones
 		await w.press("[data-testid=session-search]");
 		await w.page.type("[data-testid=session-search]", "Limits");
 		await w.page.keyboard.press("Enter");
+		await w.settle(400);
+		assert.equal(await w.page.evaluate(() => location.pathname), `/chat/${lessonId}`, "search Enter opened the open session itself");
 		if (!(await within(() => w.drawerClosed(), 5000))) w.problems.push("search Enter on the open session left the drawer open");
 		await w.goto("/");
 		await closes("the wordmark at home", '[data-testid=sidebar] a[aria-label="Home"]', "/");
@@ -638,10 +654,13 @@ test("a compact visit never writes the saved sidebar preference, so the desktop 
 	}
 });
 
-test("an iPhone without range media queries (iOS Safari before 16.4) still gets the drawer", async () => {
+// This guards the drawer's own media-query rule only, under a shimmed
+// matchMedia: the build targets Safari 16.4 and up (Next 16's default),
+// so it says nothing about older WebKit as a whole.
+test("the drawer's media query holds where matchMedia lacks range syntax (shimmed)", async () => {
 	const w = await newWalk(PHONE);
 	try {
-		// Old WebKit reads a range query as "not all", which never matches.
+		// The shim answers a range query as "not all", which never matches.
 		await w.page.evaluateOnNewDocument(() => {
 			const native = window.matchMedia.bind(window);
 			window.matchMedia = (query: string) => native(/[<>]/.test(query) ? "not all" : query);
@@ -663,5 +682,102 @@ test("an iPhone without range media queries (iOS Safari before 16.4) still gets 
 		assert.deepEqual(ranged, []);
 	} finally {
 		await w.page.close();
+	}
+});
+
+test("a phone: keys pressed in the open drawer never reach the page behind it", async () => {
+	const w = await newWalk(PHONE);
+	const { page } = w;
+	// The quiz dock listens at the document: ←/→ move the confidence, ↑/↓ walk the rows.
+	const dock = () =>
+		page.evaluate(() => ({
+			confidence: (document.querySelector("[data-testid=confidence-slider]") as HTMLInputElement).value,
+			walked: document.querySelectorAll("[data-kbdrow].ring-1").length,
+		}));
+	try {
+		await w.goto(`/chat/${quizId}`);
+		await page.waitForSelector("[data-testid=question-dock]", { timeout: 60_000 });
+		await w.settle(1000);
+		const before = await dock();
+		// The probe sees the dock act while the drawer is closed.
+		await page.keyboard.press("ArrowRight");
+		await w.settle(300);
+		assert.notEqual((await dock()).confidence, before.confidence, "→ moves the confidence with the drawer closed");
+		await page.keyboard.press("ArrowLeft");
+		await w.settle(300);
+		await w.openSidebar();
+		for (const key of ["ArrowRight", "ArrowDown", "ArrowUp", " "] as const) await page.keyboard.press(key);
+		await w.settle(400);
+		assert.deepEqual(await dock(), before, "the quiz dock behind the open drawer did not act");
+		assert.equal(await w.drawerClosed(), false, "the drawer stays open");
+	} finally {
+		await page.close();
+	}
+});
+
+test("a phone: Escape closes the drawer and leaves a popover behind it open", async () => {
+	const w = await newWalk(PHONE);
+	const { page } = w;
+	try {
+		await w.goto(`/chat/${lessonId}`);
+		await w.press("[data-testid=stats-summary]");
+		await page.waitForSelector("[data-testid=stats-detail]", { timeout: 10_000 });
+		// ⌘B, as the shortcut dispatches it: no pointerdown, so the popover stays up.
+		await page.evaluate(() => window.dispatchEvent(new CustomEvent("lh:kbd-toggle-sidebar")));
+		await until(async () => !(await w.drawerClosed()) && (await page.$eval("[data-testid=sidebar]", (el) => el.getAttribute("aria-hidden"))) === "false", "⌘B to open the drawer", 5000);
+		await w.settle(400);
+		await page.keyboard.press("Escape");
+		await until(() => w.drawerClosed(), "Escape to close the drawer", 5000);
+		assert.ok(await page.$("[data-testid=stats-detail]"), "the stats popover behind the drawer is still open");
+	} finally {
+		await page.close();
+	}
+});
+
+test("a tablet turned to a 1280px landscape with the drawer open: focus lands on a visible control", async () => {
+	const context = await chrome.browser.createBrowserContext();
+	try {
+		const w = await newWalk(TABLET, context);
+		await w.goto(`/chat/${lessonId}`);
+		// Opened from the toggle (a keyboard user's path), which the widened window then hides.
+		await w.page.$eval('[aria-label="Open sidebar"]', (el) => (el as HTMLElement).focus());
+		await w.openSidebar();
+		// Width only: a changed isMobile or hasTouch would make puppeteer reload the page.
+		await w.page.setViewport({ ...TABLET, width: 1280, height: 800 });
+		await until(() => w.page.$eval("[data-testid=sidebar]", (el) => getComputedStyle(el).position !== "fixed"), "the sidebar to go inline", 5000);
+		await w.settle(600);
+		const focus = await w.page.evaluate(() => {
+			const el = document.activeElement as HTMLElement | null;
+			return {
+				on: el?.getAttribute("aria-label") ?? el?.tagName ?? null,
+				usable: !!el && el !== document.body && !el.closest("[aria-hidden=true], [inert]") && el.getClientRects().length > 0 && getComputedStyle(el).opacity !== "0",
+			};
+		});
+		assert.ok(focus.usable, `focus is on ${focus.on}, which is hidden or gone`);
+	} finally {
+		await context.close();
+	}
+});
+
+test("a phone: Back with the drawer open lets the page it returns to take focus", async () => {
+	const w = await newWalk(PHONE);
+	const { page } = w;
+	const composer = 'textarea[placeholder="What do you want to learn?"]';
+	try {
+		await w.goto("/");
+		await w.openSidebar();
+		await w.press(`[data-testid=session-row][data-chat-id="${lessonId}"]`);
+		await page.waitForFunction((id) => location.pathname === `/chat/${id}`, { timeout: 60_000 }, lessonId);
+		await until(() => w.drawerClosed(), "opening the session to close the drawer", 5000);
+		await w.openSidebar();
+		await page.goBack();
+		await page.waitForSelector(composer, { timeout: 60_000 });
+		await until(() => w.drawerClosed(), "Back to close the drawer", 5000);
+		assert.ok(
+			await within(() => page.$eval(composer, (el) => document.activeElement === el), 3000),
+			`the home composer has focus after Back (focus is on ${await focusLabel(page)})`,
+		);
+	} finally {
+		await page.close();
 	}
 });
