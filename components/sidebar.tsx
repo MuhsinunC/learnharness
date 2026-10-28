@@ -470,8 +470,9 @@ function SessionsSidebar() {
 	   message is sent (and that message becomes its title). Search: a
 	   client-side filter over the poll snapshot — no server round trip. */
 	const newSession = useCallback(() => {
+		closeDrawer();
 		router.push("/chat/new");
-	}, [router]);
+	}, [router, closeDrawer]);
 
 	/* FUZZY (owner round 8, 2026-10-05): subsequence match ranked by
 	 * fuzzyScore — prefix beats word-boundary beats scattered. Empty query
@@ -698,7 +699,9 @@ function SessionsSidebar() {
 		listRef.current?.children[kbdIndex]?.scrollIntoView({ block: "nearest" });
 	}, [kbdIndex]);
 
-	// The drawer closes on every navigation: opening a session, a new one, home.
+	// The drawer closes on every navigation: its own links close it in
+	// their handlers (a query-only change or the active row keeps the
+	// pathname), and this covers the rest, such as Back.
 	useEffect(() => {
 		closeDrawer();
 	}, [pathname, closeDrawer]);
@@ -757,6 +760,7 @@ function SessionsSidebar() {
 						<Link
 							href="/"
 							aria-label="Home"
+							onClick={closeDrawer}
 							className="lh-no-drag flex size-9 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50"
 						>
 							<LhMark className="size-6" />
@@ -793,7 +797,10 @@ function SessionsSidebar() {
 					<button
 						type="button"
 						data-testid="new-session-practice"
-						onClick={() => router.push("/chat/new?mode=practice")}
+						onClick={() => {
+							closeDrawer();
+							router.push("/chat/new?mode=practice");
+						}}
 						className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-xs uppercase tracking-wider text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
 					>
 						<DumbbellIcon className="size-3" />
@@ -849,6 +856,7 @@ function SessionsSidebar() {
 									const target = shown![kbdIndex !== null && kbdIndex < n ? kbdIndex : 0];
 									if (!target) return;
 									e.preventDefault();
+									closeDrawer();
 									router.push(`/chat/${target.id}`);
 									setKbdIndex(null);
 									e.currentTarget.blur();
@@ -913,6 +921,7 @@ function SessionsSidebar() {
 									kbdSelected={i === kbdIndex}
 									onOpen={() => {
 										setKbdIndex(null);
+										closeDrawer();
 										router.push(`/chat/${c.id}`);
 									}}
 									onContextMenu={(e) => openContext(e, c)}
