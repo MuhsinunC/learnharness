@@ -191,13 +191,19 @@ async function openChat(id: string, selector: string) {
 	return page;
 }
 
-/** The sidebar row for a chat title, once the session list has loaded
- *  and React has hydrated it (a right-click before that opens nothing). */
+/** The sidebar row for a chat title, once the session list has loaded,
+ *  React has hydrated it (a right-click before that opens nothing) and
+ *  the sidebar's open slide has uncovered it (a click mid-slide lands on
+ *  the page instead). */
 const sidebarRow = (page: Page, title: string) =>
 	until(async () => {
 		for (const r of await page.$$('[data-testid="session-row"], [data-testid="session-row-kbd"]')) {
-			const [text, hydrated] = await r.evaluate((el) => [el.textContent ?? "", Object.keys(el).some((k) => k.startsWith("__reactProps"))] as const);
-			if (text.includes(title) && hydrated) return r;
+			const [text, hydrated, onTop] = await r.evaluate((el) => {
+				const box = el.getBoundingClientRect();
+				const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+				return [el.textContent ?? "", Object.keys(el).some((k) => k.startsWith("__reactProps")), !!hit && el.contains(hit)] as const;
+			});
+			if (text.includes(title) && hydrated && onTop) return r;
 		}
 		return null;
 	}, `the sidebar row for ${title}`);
