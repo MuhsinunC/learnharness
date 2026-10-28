@@ -6,7 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { MenuShell } from "@/components/menu-shell";
 import { DeleteSessionDialog } from "@/components/delete-session-dialog";
 import type { ChatDeleteMode } from "@/src/core";
-import { DumbbellIcon, PanelLeftCloseIcon, PanelLeftOpenIcon, PlusIcon, SearchIcon, SettingsIcon } from "lucide-react";
+import { DumbbellIcon, EllipsisIcon, PanelLeftCloseIcon, PanelLeftOpenIcon, PlusIcon, SearchIcon, SettingsIcon } from "lucide-react";
 import { ActivitySection } from "@/components/activity-dock";
 import { CoverageMenuBlock } from "@/components/extraction-coverage";
 import { LhMark } from "@/components/lh-mark";
@@ -53,6 +53,16 @@ import type { ChatGPTControlBridge, NativeSubscriptionControlBridge } from "@/sr
 import type { UpdateState } from "@/components/settings/update-settings.tsx";
 const SIDEBAR_AUTOCLOSE = 928;
 
+/*
+ * Phones and tablets (LH-44): in the browser, below Tailwind's lg
+ * breakpoint the sidebar is an off-canvas DRAWER over the page: a
+ * backdrop, closed on load, closed again by a backdrop tap or any
+ * navigation, and never written to the persisted preference (288px
+ * inline would leave a phone ~100px of page). Electron keeps the narrow
+ * rule above; its window floor is 640px.
+ */
+const COMPACT_QUERY = "(width < 64rem)";
+
 // Module scope, guarded for SSR (the server has no navigator).
 const IS_ELECTRON = typeof navigator !== "undefined" && navigator.userAgent.includes("Electron");
 
@@ -82,9 +92,11 @@ declare global {
 	}
 }
 
-const SidebarContext = createContext<{ open: boolean; toggle: () => void }>({
+const SidebarContext = createContext<{ open: boolean; toggle: () => void; compact: boolean; closeDrawer: () => void }>({
 	open: false,
 	toggle: () => {},
+	compact: false,
+	closeDrawer: () => {},
 });
 
 export function useSidebar() {
@@ -104,6 +116,8 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
 	const [open, setOpen] = useState(false);
 	const [narrow, setNarrow] = useState(false);
 	const [mounted, setMounted] = useState(false);
+	const [compact, setCompact] = useState(false);
+	const [drawerOpen, setDrawerOpen] = useState(false);
 
 	useEffect(() => {
 		// Electron shell detection (merged chrome, 2026-09-17): keys the
@@ -145,7 +159,26 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
 		return () => window.removeEventListener("resize", onResize);
 	}, []);
 
+	// The drawer below the lg breakpoint (COMPACT_QUERY): crossing it
+	// either way starts the drawer closed.
+	useEffect(() => {
+		if (IS_ELECTRON) return;
+		const query = window.matchMedia(COMPACT_QUERY);
+		const onChange = () => {
+			setCompact(query.matches);
+			setDrawerOpen(false);
+		};
+		onChange();
+		query.addEventListener("change", onChange);
+		return () => query.removeEventListener("change", onChange);
+	}, []);
+	const closeDrawer = useCallback(() => setDrawerOpen(false), []);
+
 	const toggle = useCallback(() => {
+		if (compact) {
+			setDrawerOpen((v) => !v);
+			return;
+		}
 		// Opening while narrow (auto-closed, or the user's own closed-at-
 		// narrow): ask the shell to widen to the threshold — the resize
 		// listener flips `narrow` and the sidebar appears. The preference
@@ -161,7 +194,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
 			localStorage.setItem(STORAGE_KEY, v ? "0" : "1");
 			return !v;
 		});
-	}, [narrow, open]);
+	}, [compact, narrow, open]);
 
 	// ⌘B: the global shortcut dispatches kbdEventForAction("toggle-sidebar")
 	// and the context answers on exactly that name — the shared spelling
@@ -177,9 +210,10 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
 	}, [toggle]);
 
 	return (
-		<SidebarContext.Provider value={{ open: open && !narrow, toggle }}>
-			{/* transitions gated on mount: no slide-in flash on page load */}
-			<div className={cn("flex h-dvh", mounted && "[&_.sidebar-motion]:transition-[width,margin,opacity]")}>{children}</div>
+		<SidebarContext.Provider value={{ open: compact ? drawerOpen : open && !narrow, toggle, compact, closeDrawer }}>
+			{/* transitions gated on mount: no slide-in flash on page load.
+			    The side insets keep a landscape phone's notch off the page. */}
+			<div className={cn("flex h-dvh pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]", mounted && "[&_.sidebar-motion]:transition-[width,margin,opacity]")}>{children}</div>
 		</SidebarContext.Provider>
 	);
 }
@@ -197,12 +231,15 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
  *  The icon fades with the slot and is clipped by it as it collapses —
  *  no popping in either direction. */
 export function SidebarToggle() {
-	const { open, toggle } = useSidebar();
+	const { open: sidebarOpen, toggle, compact } = useSidebar();
+	// The drawer covers the page: its toggle keeps the slot, so nothing
+	// slides under the backdrop.
+	const open = sidebarOpen && !compact;
 	return (
 		<span
 			className={cn(
-				"sidebar-motion lh-no-drag relative flex h-9 shrink-0 overflow-hidden duration-200",
-				open ? "w-0 -mr-3" : "w-9 mr-0 lh-closed-toggle",
+				"sidebar-motion lh-no-drag relative flex h-9 shrink-0 overflow-hidden duration-200 pointer-coarse:h-10",
+				open ? "w-0 -mr-3" : "w-9 mr-0 lh-closed-toggle pointer-coarse:w-10",
 			)}
 		>
 			<Hint label="Open sidebar" action="toggle-sidebar">
@@ -213,7 +250,7 @@ export function SidebarToggle() {
 				aria-hidden={open}
 				tabIndex={open ? -1 : 0}
 				onClick={toggle}
-				className={cn("sidebar-motion duration-200", open ? "pointer-events-none opacity-0" : "opacity-100")}
+				className={cn("sidebar-motion duration-200 pointer-coarse:size-10", open ? "pointer-events-none opacity-0" : "opacity-100")}
 			>
 				{/* Owner, round 6: size-4, SAME as the close glyph — the toggle
 				    must not grow when the sidebar is closed (it did: size-5 here).
@@ -289,6 +326,7 @@ export function SessionRow({
 	onOpen,
 	kbdSelected = false,
 	onContextMenu,
+	onMenu,
 }: {
 	chat: ChatListItem;
 	active: boolean;
@@ -298,36 +336,55 @@ export function SessionRow({
 	kbdSelected?: boolean;
 	/** Right-click opens the context menu (wave 6: Rename / Delete). */
 	onContextMenu?: (e: React.MouseEvent<HTMLButtonElement>) => void;
+	/** The same menu from a visible "…" button, shown on touch screens only
+	 *  (LH-44: iOS fires no contextmenu on a long press). */
+	onMenu?: (e: React.MouseEvent<HTMLButtonElement>) => void;
 }) {
 	return (
-		<button
-			type="button"
-			onClick={onOpen}
-			onContextMenu={onContextMenu}
-			data-testid={kbdSelected ? "session-row-kbd" : "session-row"}
-			className={cn(
-				"relative mb-0.5 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left transition-colors hover:bg-accent",
-				active && "bg-accent",
-				kbdSelected && !active && "bg-accent/60 ring-1 ring-border",
+		<div className="relative mb-0.5">
+			<button
+				type="button"
+				onClick={onOpen}
+				onContextMenu={onContextMenu}
+				data-testid={kbdSelected ? "session-row-kbd" : "session-row"}
+				data-chat-id={chat.id}
+				className={cn(
+					"relative flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left transition-colors hover:bg-accent",
+					active && "bg-accent",
+					kbdSelected && !active && "bg-accent/60 ring-1 ring-border",
+					onMenu && "pointer-coarse:pr-12",
+				)}
+			>
+				<SessionStatus busy={chat.busy || chat.compacting} />
+				<span className="min-w-0 flex-1">
+					{/* Titles are the learner's/teacher's WORDS — Source Sans 3, the
+					    same voice the words were typed in (every input is lh-prose);
+					    the meta line below stays JetBrains Mono (machine data). One
+					    rule, finally applied to the picker too (owner, typography
+					    round): mono = chrome, Source Sans = human words. */}
+					<span className="block truncate font-prose text-(length:--lh-prose-size)">{chat.title}</span>
+					<span className="block text-xs text-muted-foreground">{sessionMeta(chat)}</span>
+				</span>
+				{/* The dumbbell rides the FAR RIGHT (owner round 6, 2026-10-05) —
+				    was left of the name; right-aligned keeps the titles flush with
+				    the teaching rows and reads cleaner. */}
+				{(chat.kind ?? "teach") === "practice" && (
+					<DumbbellIcon className="size-3.5 shrink-0 text-muted-foreground/70" aria-label="Practice session" />
+				)}
+			</button>
+			{onMenu && (
+				<button
+					type="button"
+					onClick={onMenu}
+					aria-label="Session actions"
+					data-testid="session-row-menu"
+					data-chat-id={chat.id}
+					className="absolute right-1 top-1/2 hidden size-10 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground pointer-coarse:flex"
+				>
+					<EllipsisIcon className="size-4" />
+				</button>
 			)}
-		>
-			<SessionStatus busy={chat.busy || chat.compacting} />
-			<span className="min-w-0 flex-1">
-				{/* Titles are the learner's/teacher's WORDS — Source Sans 3, the
-				    same voice the words were typed in (every input is lh-prose);
-				    the meta line below stays JetBrains Mono (machine data). One
-				    rule, finally applied to the picker too (owner, typography
-				    round): mono = chrome, Source Sans = human words. */}
-				<span className="block truncate font-prose text-(length:--lh-prose-size)">{chat.title}</span>
-				<span className="block text-xs text-muted-foreground">{sessionMeta(chat)}</span>
-			</span>
-			{/* The dumbbell rides the FAR RIGHT (owner round 6, 2026-10-05) —
-			    was left of the name; right-aligned keeps the titles flush with
-			    the teaching rows and reads cleaner. */}
-			{(chat.kind ?? "teach") === "practice" && (
-				<DumbbellIcon className="size-3.5 shrink-0 text-muted-foreground/70" aria-label="Practice session" />
-			)}
-		</button>
+		</div>
 	);
 }
 
@@ -388,7 +445,7 @@ export type SessionKindFilter = "teach" | "all" | "practice";
 const KIND_FILTER_KEY = "lh:session-kind-filter";
 
 function SessionsSidebar() {
-	const { open, toggle } = useSidebar();
+	const { open, toggle, compact, closeDrawer } = useSidebar();
 	const [chats, setChats] = useState<ChatListItem[] | null>(null);
 	const [query, setQuery] = useState("");
 	const [kindFilter, setKindFilter] = useState<SessionKindFilter>("all");
@@ -630,12 +687,22 @@ function SessionsSidebar() {
 		return () => window.removeEventListener("lh:kbd-sessions-search", onFocusSearch);
 	}, [open, toggle]);
 
-	// Keep the kbd-selected row in view (the rows are the container's only
-	// buttons, so the index matches).
+	// Keep the kbd-selected row in view (each row is one child of the
+	// list, so the index matches).
 	useEffect(() => {
 		if (kbdIndex === null) return;
-		listRef.current?.querySelectorAll("button")[kbdIndex]?.scrollIntoView({ block: "nearest" });
+		listRef.current?.children[kbdIndex]?.scrollIntoView({ block: "nearest" });
 	}, [kbdIndex]);
+
+	// The drawer closes on every navigation: opening a session, a new one, home.
+	useEffect(() => {
+		closeDrawer();
+	}, [pathname, closeDrawer]);
+	const [drawerOpened, setDrawerOpened] = useState(false);
+	useEffect(() => {
+		if (compact && open) setDrawerOpened(true);
+	}, [compact, open]);
+	const drawerUsed = drawerOpened || (compact && open);
 
 	useEffect(() => {
 		if (!open) return;
@@ -645,11 +712,24 @@ function SessionsSidebar() {
 	}, [open, pathname, refresh]);
 
 	return (
+		<>
+		{compact && open && (
+			<div data-testid="sidebar-backdrop" aria-hidden="true" onClick={closeDrawer} className="fixed inset-0 z-50 bg-background/80" />
+		)}
 		<aside
-			className={cn("sidebar-motion shrink-0 overflow-hidden duration-200", open ? "w-72" : "w-0")}
+			data-testid="sidebar"
+			className={cn(
+				"shrink-0 overflow-hidden",
+				// The drawer slides over the page; it animates only once
+				// opened, so loading closed never slides it out.
+				compact
+					? cn("fixed inset-y-0 left-0 z-50 w-72 max-w-[85vw] pl-[env(safe-area-inset-left)] shadow-xl", drawerUsed && "transition-[translate] duration-200", !open && "-translate-x-full")
+					: cn("sidebar-motion duration-200", open ? "w-72" : "w-0"),
+			)}
 			aria-hidden={!open}
+			inert={compact && !open}
 		>
-			<div className="flex h-full w-72 flex-col border-r bg-background">
+			<div className={cn("flex h-full flex-col border-r bg-background", compact ? "w-full" : "w-72")}>
 				{/* LH wordmark — the owner's header; close toggle sits at the edge.
 				    Merged chrome (2026-09-17): in Electron this band is the
 				    window's drag surface and starts after the traffic lights
@@ -684,7 +764,7 @@ function SessionsSidebar() {
 							size="icon"
 							aria-label="Close sidebar"
 							onClick={toggle}
-							className="lh-no-drag"
+							className="lh-no-drag pointer-coarse:size-10"
 						>
 							<PanelLeftCloseIcon className="size-4" />
 						</Button>
@@ -832,6 +912,7 @@ function SessionsSidebar() {
 										router.push(`/chat/${c.id}`);
 									}}
 									onContextMenu={(e) => openContext(e, c)}
+									onMenu={(e) => openContext(e, c)}
 								/>
 							),
 						)
@@ -852,7 +933,10 @@ function SessionsSidebar() {
 						<Hint label="Settings" action="open-settings" side="right">
 							<button
 								type="button"
-								onClick={() => openSettings()}
+								onClick={() => {
+									closeDrawer();
+									openSettings();
+								}}
 								data-testid="settings-entry"
 								className="flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs uppercase tracking-wider text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
 							>
@@ -964,6 +1048,7 @@ function SessionsSidebar() {
 					onDeleted={onDeleted}
 				/>
 			</aside>
+		</>
 	);
 }
 
