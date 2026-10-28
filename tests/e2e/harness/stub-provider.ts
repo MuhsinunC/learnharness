@@ -94,7 +94,13 @@ export function calledTool(req: StubRequest, name: string): boolean {
 	return req.messages.some((m) => m.tool_calls?.some((c) => c.function.name === name));
 }
 
-export async function startStubProvider(responder: StubResponder): Promise<StubProvider> {
+export interface StubOptions {
+	/** The ChatGPT account catalog GET /v1/models answers (LH-55): set it to
+	 *  stand in for api.openai.com behind LH_E2E_CHATGPT_BASE_URL. */
+	chatgptModels?: Array<{ slug: string; display_name: string; visibility: "list" }>;
+}
+
+export async function startStubProvider(responder: StubResponder, options: StubOptions = {}): Promise<StubProvider> {
 	let respond = responder;
 	const requests: StubRequest[] = [];
 	const open = new Set<http.ServerResponse>();
@@ -103,12 +109,17 @@ export async function startStubProvider(responder: StubResponder): Promise<StubP
 		req.on("data", (chunk) => (raw += chunk));
 		req.on("end", () => {
 			void (async () => {
-				if (!req.url?.endsWith("/chat/completions")) {
+				const responses = req.url?.endsWith("/responses") ?? false;
+				if (req.method === "GET" && req.url?.endsWith("/models") && options.chatgptModels) {
+					res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ models: options.chatgptModels }));
+					return;
+				}
+				if (!req.url?.endsWith("/chat/completions") && !responses) {
 					res.writeHead(404, { "content-type": "application/json" }).end(JSON.stringify({ error: "not found" }));
 					return;
 				}
 				const body = JSON.parse(raw || "{}") as Record<string, unknown>;
-				const parsed = parseRequest(body);
+				const parsed = responses ? parseResponsesRequest(body) : parseRequest(body);
 				requests.push(parsed);
 				let out: StubReply;
 				try {
@@ -116,7 +127,8 @@ export async function startStubProvider(responder: StubResponder): Promise<StubP
 				} catch (err) {
 					out = reply.http(500, { error: { message: `stub responder threw: ${String(err)}` } });
 				}
-				send(res, parsed.model, out, body.stream !== false, open);
+				if (responses) sendResponses(res, out, open);
+				else send(res, parsed.model, out, body.stream !== false, open);
 			})();
 		});
 	});
@@ -146,6 +158,42 @@ function parseRequest(body: Record<string, unknown>): StubRequest {
 		(t) => (t as { function?: { name?: string } }).function?.name ?? "",
 	);
 	return { model: String(body.model ?? ""), system, tools, messages, body };
+}
+
+/** A Responses API request (ChatGPT) in the chat-completions shape the
+ *  responders read: instructions and developer items are the system
+ *  prompt, input items the messages, function tools (also inside a
+ *  namespace) the tools offered. */
+function parseResponsesRequest(body: Record<string, unknown>): StubRequest {
+	type Item = { type?: string; role?: string; content?: unknown; name?: string; tools?: Item[] };
+	const text = (content: unknown) => typeof content === "string" ? content : (Array.isArray(content) ? content : []).map((c) => (c as { text?: string }).text ?? "").join("");
+	const input = (Array.isArray(body.input) ? body.input : []) as Item[];
+	const system = [typeof body.instructions === "string" ? body.instructions : "", ...input.filter((i) => i.role === "system" || i.role === "developer").map((i) => text(i.content))].filter(Boolean).join("\n");
+	const messages = input.filter((i) => i.role === "user" || i.role === "assistant").map((i) => ({ role: i.role!, content: text(i.content) }));
+	const tools = ((Array.isArray(body.tools) ? body.tools : []) as Item[]).flatMap((t) => t.type === "namespace" ? t.tools ?? [] : [t]).map((t) => t.name ?? "");
+	return { model: String(body.model ?? ""), system, tools, messages, body };
+}
+
+/** A text or HTTP reply as a Responses API event stream. */
+function sendResponses(res: http.ServerResponse, out: StubReply, open: Set<http.ServerResponse>): void {
+	if (out.kind === "tools") throw new Error("the Responses stub answers text only");
+	if (out.kind !== "text") {
+		send(res, "", out, true, open);
+		return;
+	}
+	const counts = out.usage ?? { prompt_tokens: 100, completion_tokens: 20 };
+	const usage = { input_tokens: counts.prompt_tokens, output_tokens: counts.completion_tokens, total_tokens: counts.prompt_tokens + counts.completion_tokens };
+	const item = { id: `msg_stub_${Date.now()}`, type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: out.text, annotations: [] }] };
+	const events = [
+		{ type: "response.created", response: { id: `resp_stub_${Date.now()}` } },
+		{ type: "response.output_item.added", output_index: 0, item: { ...item, content: [] } },
+		{ type: "response.content_part.added", output_index: 0, content_index: 0, part: { type: "output_text", text: "", annotations: [] } },
+		{ type: "response.output_text.delta", output_index: 0, content_index: 0, delta: out.text },
+		{ type: "response.output_item.done", output_index: 0, item },
+		{ type: "response.completed", response: { status: "completed", output: [item], usage } },
+	];
+	res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+	res.end(events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join(""));
 }
 
 function send(res: http.ServerResponse, model: string, out: StubReply, stream: boolean, open: Set<http.ServerResponse>): void {

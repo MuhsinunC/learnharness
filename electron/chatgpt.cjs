@@ -95,7 +95,7 @@ function allowedAuthEndpoint(value) {
 	} catch { return false; }
 }
 
-function createChatGPT({ store, openExternal, fetch: request = globalThis.fetch, onChange = () => {}, timeoutMs = 180000 }) {
+function createChatGPT({ store, openExternal, fetch: request = globalThis.fetch, onChange = () => {}, timeoutMs = 180000, resource = RESOURCE }) {
 	let state;
 	let init;
 	let queue = Promise.resolve();
@@ -420,7 +420,7 @@ function createChatGPT({ store, openExternal, fetch: request = globalThis.fetch,
 			if (!active()) return modelValue();
 			// Discovery is identity/scope authorization, not an invented model lease.
 			const token = await credential(false);
-			const body = await json(`${RESOURCE}/models`, { headers: { Authorization: `Bearer ${token.accessToken}` }, signal: AbortSignal.any([transportAbort.signal, AbortSignal.timeout(15000)]) });
+			const body = await json(`${resource}/models`, { headers: { Authorization: `Bearer ${token.accessToken}` }, signal: AbortSignal.any([transportAbort.signal, AbortSignal.timeout(15000)]) });
 			authorized(false, undefined, token.epoch);
 			if (sequence !== catalogSequence || active()?.id !== token.accountId || !Array.isArray(body.models)) throw fail("catalog");
 			const visible = body.models.filter((m) => m && m.visibility === "list" && nonempty(m.slug) && typeof m.display_name === "string").map((m) => ({ id: m.slug, name: m.display_name }));
