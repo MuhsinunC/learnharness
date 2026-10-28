@@ -413,7 +413,8 @@ test("a 4000×3000 screenshot is downscaled to 2000 px before it is stored", asy
 
 test("a refused send puts its images back with the text", async () => {
 	// gpt-5.5 reads images, but no OpenAI key exists: the send refuses
-	// (provider_key_missing) and the draft returns to the composer.
+	// (provider_key_missing, or 0.3.9's pre-send check) and the draft
+	// stays in the composer.
 	const { id } = await server.json<{ id: string }>("/api/chats", { body: { title: "Refused" } });
 	await server.json(`/api/chats/${id}/settings`, { method: "PUT", body: { model: { provider: "openai", id: "gpt-5.5" } } });
 	const page = await chrome.browser.newPage();
@@ -421,8 +422,9 @@ test("a refused send puts its images back with the text", async () => {
 	await fileEvent(page, "paste", IMAGES.dropped, "diagram.png");
 	await page.waitForSelector("[data-testid=attachment-chip]", { timeout: 30_000 });
 	await sendFromComposer(page, "Explain this diagram");
-	// The refusal flow ran: it opens setup, and the record kept nothing.
-	await page.waitForSelector("[data-testid=setup-backdrop]", { timeout: 60_000 });
+	// Another provider is connected, so 0.3.9 opens the ordinary model
+	// picker rather than setup; the record kept nothing.
+	await page.waitForSelector("[data-testid=model-menu]", { timeout: 60_000 });
 	const record = await server.json<{ messages: Array<{ role: string }> }>(`/api/chats/${id}`);
 	assert.equal(record.messages.filter((m) => m.role === "user").length, 0);
 	await until(async () => {
