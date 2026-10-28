@@ -210,16 +210,14 @@ export type RecoveryOutcome = "summarized" | "truncated" | "unchanged";
  *  engine (the turn handler and the repair route share it). */
 export function recoveryDeps(chatStore: ChatStore, record: ChatRecord, engine: PiEngine, notice: string): RecoveryDeps {
 	const kind = sessionKind(record);
-	const systemPromptTokens = systemPromptTokensFor(kind);
-	const failedRequestTokens = heuristicContextTokens(record.messages, systemPromptTokens);
+	const failedRequestTokens = heuristicContextTokens(record.messages, systemPromptTokensFor(kind));
 	const windowTokens = recoveryWindowTokens(lastOverflow(record.messages), contextWindowFor(engine), failedRequestTokens);
-	const prefixTokens = requestPrefixTokens(record.id, systemPromptTokens);
+	const prefixTokens = requestPrefixTokens(record.id, kind);
 	return {
 		chatStore,
 		engine,
 		modelId: modelIdOf(engine),
 		kind,
-		systemPromptTokens,
 		failedRequestTokens,
 		windowTokens,
 		fitTokens: Math.floor(RETRY_FIT_SHARE * (windowTokens - outputReserveTokens(windowTokens, engine.model.maxTokens))) - prefixTokens,
