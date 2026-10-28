@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
@@ -176,6 +176,26 @@ test("(a) no password: loopback needs no login, remote requests get nothing, and
 	assert(![401, 403].includes(pathRead.status), `without a password, host routes answer this computer as before (${pathRead.status})`);
 	await crossOriginRefused(local(), server.url);
 
+	// GET /api/claude-code runs the executable: no other page may make it, not even with a GET.
+	// A stand-in on the server's own (harness) HOME records each run; the real claude is never found.
+	const bin = path.join(path.dirname(server.dataDir), "home", ".local", "bin");
+	const runs = path.join(path.dirname(server.dataDir), "claude-runs");
+	fs.mkdirSync(bin, { recursive: true });
+	fs.writeFileSync(path.join(bin, "claude"), `#!/bin/sh\necho "$*" >> '${runs}'\necho "2.0.0 (Claude Code)"\n`, { mode: 0o755 });
+	try {
+		for (const extra of [{ "sec-fetch-site": "cross-site" }, { "sec-fetch-site": "same-site" }, { origin: `http://127.0.0.1:${port + 1}` }, { origin: "https://evil.example" }] as Array<Record<string, string>>) {
+			const res = await raw("/api/claude-code", { headers: local(extra) });
+			assert.equal(res.status, 403, JSON.stringify(extra));
+			assert.deepEqual(JSON.parse(res.body), { error: "Change LearnHarness only from its own pages." }, JSON.stringify(extra));
+		}
+		assert(!fs.existsSync(runs), "no other page made it run the executable");
+		const own = await raw("/api/claude-code", { headers: local({ "sec-fetch-site": "same-origin" }) });
+		assert.equal(own.status, 200, own.body);
+		assert(fs.existsSync(runs), "the app's own page does run it (so the refusals above were real)");
+	} finally {
+		fs.rmSync(path.join(bin, "claude"), { force: true });
+	}
+
 	const chrome = await launchChrome(TICKET, ["--no-proxy-server"]);
 	try {
 		const tab = await chrome.browser.newPage();
@@ -225,6 +245,30 @@ test("(b) the CLI sets the first password; from then on every request needs a lo
 	assert.equal(page.status, 303);
 	assert.equal(page.headers.location, "/login?next=%2Fchat%2Fnew%3Fx%3D1", "relative, so the phone stays on its ts.net name");
 	assert.match((await raw("/login", { headers: viaServe() })).body, /type="password"/);
+});
+
+test("(c) a login with the old password that races a password change gets no session", async () => {
+	// Logins hash one at a time on the server; the CLI replaces the password
+	// meanwhile, so the later ones finish against a record that moved on.
+	// First of the (c) cases: two dozen logins in flight fit under the global
+	// cap only before other tests have charged it.
+	const done: number[] = [];
+	const pending = Array.from({ length: 24 }, (_, i) => login(`100.70.4.${i}`, PASSWORD).then((res) => { done.push(Date.now()); return res; }));
+	const changed = await new Promise<number>((resolve, reject) => {
+		const child = spawn(TSX, [path.join(REPO_ROOT, "scripts", "remote-access.ts"), "set-password", "--stdin"], { cwd: REPO_ROOT, env: { ...process.env, LH_DATA_DIR: server.dataDir }, stdio: ["pipe", "ignore", "pipe"] });
+		child.stdin.end(`${NEW_PASSWORD}\n`);
+		child.on("error", reject);
+		child.on("exit", (code) => (code === 0 ? resolve(Date.now()) : reject(new Error(`set-password exited ${code}`))));
+	});
+	const results = await Promise.all(pending);
+	assert(done.some((t) => t > changed), "some logins finished after the password changed (the race ran)");
+	for (const res of results) {
+		assert([303, 401].includes(res.status), `${res.status}: ${res.body.slice(0, 300)}`);
+		if (res.status === 401) assert.match(res.body, /Wrong password/);
+		else assert.equal((await raw("/api/settings", { headers: viaServe("100.70.4.99", { cookie: cookieOf(res) }) })).status, 401, "a session from the old password does not survive the change");
+	}
+	assert.equal((await login("100.70.4.100", NEW_PASSWORD)).status, 303);
+	assert.equal(cli(["set-password", "--stdin"], `${PASSWORD}\n`).status, 0);
 });
 
 test("(c) a wrong password is refused and failed attempts are rate-limited", async () => {
@@ -526,29 +570,30 @@ test("(f) the launcher listens only on 127.0.0.1: no other address, no -H/-p, an
 	assert.match(dev.stderr, /development server must never be on your tailnet/);
 });
 
-test("(h) wrong passwords typed next to a key count against that device only, never toward the login cap", async () => {
-	const cookie = cookieOf(await login("100.70.0.30", PASSWORD));
+test("(h) a session gets five wrong passwords beside keys whatever address it claims; other devices and logins are unaffected", async () => {
 	for (let device = 0; device < 6; device++) {
-		const keyWrite = () => raw("/api/keys/OPENROUTER_API_KEY", {
+		const cookie = cookieOf(await login(`100.70.0.${40 + device}`, PASSWORD));
+		// Each try claims a new address: a forged X-Forwarded-For buys nothing.
+		const keyWrite = (i: number) => raw("/api/keys/OPENROUTER_API_KEY", {
 			method: "PUT",
-			headers: { ...viaServe(`100.70.1.${device}`, { cookie, origin: `https://${TS_HOST}` }), ...JSON_BODY, "x-lh-current-password": "not the password" },
+			headers: { ...viaServe(`198.51.${device}.${i}`, { cookie, origin: `https://${TS_HOST}` }), ...JSON_BODY, "x-lh-current-password": "not the password" },
 			body: JSON.stringify({ value: "e2e-dummy-key-not-real" }),
 		});
-		for (let i = 0; i < 5; i++) assert.equal((await keyWrite()).status, 403, `device ${device}, try ${i}`);
-		assert.equal((await keyWrite()).status, 429, `device ${device} is locked out`);
+		for (let i = 0; i < 5; i++) assert.equal((await keyWrite(i)).status, 403, `device ${device}, try ${i}`);
+		assert.equal((await keyWrite(5)).status, 429, `device ${device}'s session is locked out`);
 	}
 	assert.equal((await login("100.70.0.31", PASSWORD)).status, 303, "thirty failures beside keys did not lock new logins out");
 });
 
-test("(h) wrong current passwords when changing remote access count against that device only, never toward the login cap", async () => {
-	const cookie = cookieOf(await login("100.70.0.32", PASSWORD));
+test("(h) the same holds for wrong current passwords when changing remote access", async () => {
 	for (let device = 0; device < 6; device++) {
-		const change = (method: "PUT" | "DELETE") => remoteAccess(viaServe(`100.70.3.${device}`, { cookie, origin: `https://${TS_HOST}` }), method, method === "PUT" ? { password: "attacker-chosen", current: "not the password" } : { current: "not the password" });
-		for (let i = 0; i < 5; i++) assert.equal((await change(i % 2 ? "DELETE" : "PUT")).status, 403, `device ${device}, try ${i}`);
-		assert.equal((await change("PUT")).status, 429, `device ${device} is locked out`);
+		const cookie = cookieOf(await login(`100.70.0.${50 + device}`, PASSWORD));
+		const change = (i: number) => remoteAccess(viaServe(`198.51.${10 + device}.${i}`, { cookie, origin: `https://${TS_HOST}` }), i % 2 ? "DELETE" : "PUT", i % 2 ? { current: "not the password" } : { password: "attacker-chosen", current: "not the password" });
+		for (let i = 0; i < 5; i++) assert.equal((await change(i)).status, 403, `device ${device}, try ${i}`);
+		assert.equal((await change(6)).status, 429, `device ${device}'s session is locked out`);
 	}
-	assert.equal((await login("100.70.0.33", PASSWORD)).status, 303, "thirty failures in Settings did not lock new logins out");
-	assert.equal((await raw("/api/settings", { headers: viaServe("100.70.0.33", { cookie }) })).status, 200, "and the password never changed");
+	const cookie = cookieOf(await login("100.70.0.33", PASSWORD));
+	assert.equal((await raw("/api/settings", { headers: viaServe("100.70.0.33", { cookie }) })).status, 200, "logins still work, and the password never changed");
 });
 
 test("(i) a session works only through the Host it was issued for", async () => {
@@ -580,6 +625,12 @@ test("(i) encoded and odd spellings of /api get the API's refusal, never the rou
 		const res = await raw(spelling, { method: "POST", headers: { ...viaServe("100.70.0.17", { cookie, origin: `https://${TS_HOST}` }), ...JSON_BODY }, body: "{}" });
 		assert.equal(res.status, 403, spelling);
 		assert.deepEqual(JSON.parse(res.body), { error: WEB_COMPUTER_ONLY, computerOnly: true }, spelling);
+	}
+	// A spelling no route in API_ROUTES fits is refused to a session, never passed on.
+	for (const spelling of ["/api/claude-code-x", "/api/keys/a/b", "/api/nope", "/apix/settings", "/api"]) {
+		const res = await raw(spelling, { headers: viaServe("100.70.0.17", { cookie }) });
+		assert.equal(res.status, 404, spelling);
+		assert.deepEqual(JSON.parse(res.body), { error: "No such API route." }, spelling);
 	}
 	// Next redirects these to the plain path before the gate, which then applies.
 	for (const spelling of ["/api/claude-code/", "//api/claude-code", "/api\\claude-code"]) {
@@ -638,7 +689,7 @@ test("(c) a login that races turning remote access off gets the off page, never 
 });
 
 test("(j) the installable-app files load without a login; nothing near them does", async () => {
-	// Browsers fetch the manifest and icons without cookies (LH-46 adds the files; 404 until then).
+	// Browsers fetch the manifest and icons without cookies (LH-46's files).
 	for (const asset of ["/manifest.webmanifest", "/apple-icon.png?a1b2c3", "/pwa/icon-192.png", "/pwa/icon-512.png", "/pwa/icon-maskable-512.png"]) {
 		for (const method of ["GET", "HEAD"]) {
 			for (const headers of [viaServe("100.70.0.23"), local()]) {
@@ -653,6 +704,9 @@ test("(j) the installable-app files load without a login; nothing near them does
 		["GET", "/manifest.webmanifest.json"],
 		["GET", "/apple-icon.png/x"],
 		["GET", "/pwa"],
+		["GET", "/pwa/anything"],
+		["GET", "/pwa/icon-192.png/x"],
+		["HEAD", "/pwa/icon-1024.png"],
 		["GET", "/pwa/../chat/new"],
 		["GET", "/pwa/%2e%2e/chat/new"],
 		["GET", "/pwa/..%2Fchat/new"],
