@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { computerOnlyMessage } from "./src/core/remote-access.ts";
-import { computerOnlyRequest, desktopAPIAuthorized, desktopPageAuthorized, isDesktopServer } from "./src/server/desktop-access.ts";
-import { ACCESS_HEADER, decideAccess, type Access } from "./src/server/web-login.ts";
+import { computerOnlyRequest, desktopAPIAuthorized, desktopPageAuthorized, isDesktopServer, keyWriteRequest } from "./src/server/desktop-access.ts";
+import { ACCESS_HEADER, confirmCurrentPassword, CURRENT_PASSWORD_HEADER, decideAccess, type Access } from "./src/server/web-login.ts";
 
 /** Applies to every API method, including SSE and spending/settings routes.
  * No public callback or worker bypass: internal jobs call server functions,
@@ -14,6 +14,7 @@ import { ACCESS_HEADER, decideAccess, type Access } from "./src/server/web-login
 export function proxy(request: NextRequest) {
 	const headers = new Headers(request.headers);
 	headers.delete(ACCESS_HEADER);
+	headers.delete(CURRENT_PASSWORD_HEADER);
 	const { pathname, search } = request.nextUrl;
 	const api = pathname.startsWith("/api");
 	let access: Access | null;
@@ -37,6 +38,16 @@ export function proxy(request: NextRequest) {
 		return NextResponse.json({ error: computerOnlyMessage(isDesktopServer()), computerOnly: true }, { status: 403, headers: { "Cache-Control": "no-store" } });
 	}
 	if (access) headers.set(ACCESS_HEADER, access);
+	// Web mode, password set: a session swaps or deletes a key only with the
+	// current password re-entered, so a stolen cookie alone cannot.
+	if (access === "session" && !isDesktopServer() && keyWriteRequest(request.method, pathname)) {
+		return confirmCurrentPassword(request.headers).then((result) => result.ok
+			? NextResponse.next({ request: { headers } })
+			: NextResponse.json(
+				{ error: result.retryAfter ? "Too many failed attempts. Try again later." : "Enter the current remote-access password next to the key (Settings → Providers) to change it.", passwordRequired: true },
+				{ status: result.retryAfter ? 429 : 403, headers: { "Cache-Control": "no-store", ...(result.retryAfter ? { "Retry-After": String(result.retryAfter) } : {}) } },
+			));
+	}
 	if (access || pathname === "/login") return NextResponse.next({ request: { headers } });
 	if (api) {
 		return NextResponse.json({ error: "Log in to LearnHarness first." }, { status: 401, headers: { "Cache-Control": "no-store" } });

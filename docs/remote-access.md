@@ -121,8 +121,9 @@ Safe:
   the computer" instead (in web mode: turn remote access off with
   `npm run remote-access:off`, change it, then set the password again). In
   the desktop app, API keys too can only be changed in the app window. In
-  web mode a browser may still save or delete an API key, because once a
-  password exists every browser is logged in, the one on the computer too.
+  web mode, where every browser is logged in once a password exists, a
+  browser saves or deletes an API key only after typing the remote-access
+  password next to it, so a stolen login cookie alone can't swap a key.
 - The password is stored only as a slow scrypt hash, in `web-login.json` in the
   data folder (readable only by your user).
 
@@ -160,6 +161,24 @@ listens on `127.0.0.1`; `LH_LISTEN_PORT` (else `PORT`, else 3000) sets the
 port. It refuses any other address (`LH_LISTEN_HOST`) and any `-H`/`-p`
 option, because a phone reaches LearnHarness through `tailscale serve`, never
 by LearnHarness listening on a network.
+
+## Quick steps
+
+**Desktop app:**
+1. Install Tailscale on the computer and the phone, same account (step 1).
+2. Settings → General → Remote access: set a password, **Save**.
+3. Quit LearnHarness (⌘Q) and open it again.
+4. In Terminal: `tailscale serve --bg 3757` (Settings shows the exact command).
+5. On the phone: open the `https://…ts.net` address Settings shows, log in.
+
+**Web mode** (from the LearnHarness folder; use one data folder throughout):
+1. `npm ci`, then `npm run build`.
+2. `export LH_DATA_DIR=/path/to/your/data`
+3. `npm run remote-access:set-password`
+4. `LH_LISTEN_PORT=3757 npm start` (any port works; 3757 matches the desktop app)
+5. In another Terminal: `tailscale serve --bg 3757`
+6. On the phone: open the `https://…ts.net` address, log in. The browser on
+   the computer logs in too.
 
 ## Starting it from your own script
 

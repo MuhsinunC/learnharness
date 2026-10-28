@@ -45,7 +45,7 @@ test("desktop capability injects only trusted app mainframe exact-origin API req
 	assert.equal(desktopAPIHeaders(details, origin, null, [win])[HEADER], undefined, "externally launched desktop dev receives no packaged capability");
 });
 
-test("all methods fail closed for desktop missing/wrong secret; the matcher covers pages, SSE, settings and spending", () => {
+test("all methods fail closed for desktop missing/wrong secret; the matcher covers pages, SSE, settings and spending", async () => {
 	assert(desktopAPIAuthorized(new Headers(), {}), "browser-only API-key mode unchanged");
 	assert(!desktopAPIAuthorized(new Headers({ [HEADER]: secret }), { LH_DESKTOP_SERVER: "1" }), "missing server secret must not disable authorization");
 	for (const value of [undefined, "", "wrong", secret + ", " + secret]) {
@@ -62,8 +62,9 @@ test("all methods fail closed for desktop missing/wrong secret; the matcher cove
 		process.env.LH_DESKTOP_SERVER = "1";
 		process.env.LH_DESKTOP_API_SECRET = secret;
 		for (const method of ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]) {
-			assert.equal(proxy(new NextRequest(origin + "/api/settings", { method })).status, 403);
-			assert.equal(proxy(new NextRequest(origin + "/api/settings", { method, headers: { [HEADER]: secret } })).headers.get("x-middleware-next"), "1");
+			// proxy() is async for web-mode key writes (LH-43); await covers both shapes.
+			assert.equal((await proxy(new NextRequest(origin + "/api/settings", { method }))).status, 403);
+			assert.equal((await proxy(new NextRequest(origin + "/api/settings", { method, headers: { [HEADER]: secret } }))).headers.get("x-middleware-next"), "1");
 		}
 	} finally {
 		if (originalMarker === undefined) delete process.env.LH_DESKTOP_SERVER; else process.env.LH_DESKTOP_SERVER = originalMarker;

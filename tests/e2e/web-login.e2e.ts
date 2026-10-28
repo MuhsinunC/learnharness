@@ -304,10 +304,7 @@ test("(h) with a password, a session cannot run binaries, read paths, move endpo
 		assert.equal(res.status, 403, `${method} ${pathname}`);
 		assert.deepEqual(JSON.parse(res.body), { error: WEB_COMPUTER_ONLY, computerOnly: true }, `${method} ${pathname}`);
 	}
-	// Plain key values stay writable: in web mode every browser is a session once a password exists.
-	assert.equal((await send("/api/keys/OPENROUTER_API_KEY", "PUT", { value: "e2e-dummy-key-not-real" })).status, 200);
-	assert.equal((await send("/api/keys/OPENROUTER_API_KEY", "DELETE")).status, 200);
-	assert.equal((await send("/api/keys", "GET")).status, 200);
+	assert.equal((await send("/api/keys", "GET")).status, 200, "key status stays readable");
 	assert.equal((await send("/api/chats", "POST", { title: "From a session" })).status, 200);
 	assert.equal((await send("/api/settings/general", "PUT", { autoUpdate: true })).status, 200);
 
@@ -324,11 +321,68 @@ test("(h) with a password, a session cannot run binaries, read paths, move endpo
 		await page.click('[data-testid="settings-nav-keys"]');
 		await page.waitForSelector('[data-testid="connections-computer-only"]', { timeout: 60_000 });
 		assert.equal(await page.$eval('[data-testid="connections-computer-only"]', (el) => el.textContent), WEB_COMPUTER_ONLY);
-		assert.equal(await page.$('[data-testid="keys-computer-only"]'), null, "keys stay editable in web mode");
+		assert.equal(await page.$('[data-testid="keys-computer-only"]'), null, "keys stay editable in web mode, with the password");
 		assert.equal(await page.$('[data-testid="claude-code-connection"]'), null);
 	} finally {
 		await chrome.close();
 	}
+});
+
+test("(h) in web mode a session changes a key only with the current password, charged like a login", async () => {
+	const keyWrite = (ip: string, method: "PUT" | "DELETE", password?: string) => {
+		const cookieFor = sessions.get(ip)!;
+		return raw("/api/keys/OPENROUTER_API_KEY", {
+			method,
+			headers: { ...viaServe(ip, { cookie: cookieFor, origin: `https://${TS_HOST}` }), ...JSON_BODY, ...(password === undefined ? {} : { "x-lh-current-password": encodeURIComponent(password) }) },
+			body: method === "PUT" ? JSON.stringify({ value: "e2e-dummy-key-not-real" }) : undefined,
+		});
+	};
+	const sessions = new Map<string, string>();
+	for (const ip of ["100.70.0.13", "100.70.0.14"]) sessions.set(ip, cookieOf(await login(ip, PASSWORD)));
+
+	for (const method of ["PUT", "DELETE"] as const) {
+		const res = await keyWrite("100.70.0.13", method);
+		assert.equal(res.status, 403, `${method} with no password`);
+		assert.equal(JSON.parse(res.body).passwordRequired, true);
+	}
+	for (let i = 0; i < 5; i++) {
+		const res = await keyWrite("100.70.0.13", "PUT", "not the password");
+		assert.equal(res.status, 403);
+		assert.equal(JSON.parse(res.body).passwordRequired, true);
+	}
+	assert.equal((await keyWrite("100.70.0.13", "PUT", PASSWORD)).status, 429, "the five wrong passwords were charged to this client");
+	assert.equal((await keyWrite("100.70.0.14", "PUT", PASSWORD)).status, 200);
+	assert.equal((await keyWrite("100.70.0.14", "DELETE", PASSWORD)).status, 200);
+	assert.equal((await keyWrite("100.70.0.14", "PUT", PASSWORD)).status, 200);
+
+	// The Providers row asks for the password beside the key, then saves.
+	const chrome = await launchChrome(TICKET, ["--no-proxy-server"]);
+	try {
+		const page = await chrome.browser.newPage();
+		await page.setViewport({ width: 1280, height: 800 });
+		await page.setCookie({ name: "lh_session", value: cookieOf(await login("100.70.0.15", PASSWORD)).split("=")[1]!, url: server.url });
+		await page.goto(`${server.url}/`, { waitUntil: "domcontentloaded", timeout: 120_000 });
+		await until(async () => {
+			await page.click('[data-testid="settings-entry"]');
+			return page.waitForSelector('[data-testid="settings-nav-keys"]', { timeout: 2000 });
+		}, "the settings dialog to open", 120_000, 500);
+		await page.click('[data-testid="settings-nav-keys"]');
+		const row = "key-openrouter_api_key";
+		await page.waitForSelector(`[data-testid="${row}-row"]`, { timeout: 60_000 });
+		await page.click(`[data-testid="${row}-row"]`);
+		await page.waitForSelector(`[data-testid="${row}-password"]`, { timeout: 60_000 });
+		await page.type(`[data-testid="${row}-input"]`, "e2e-dummy-key-from-the-ui-WXYZ");
+		assert.equal(await page.$eval(`[data-testid="${row}-save"]`, (el) => (el as HTMLButtonElement).disabled), true, "Save waits for the password");
+		await page.type(`[data-testid="${row}-password"]`, PASSWORD);
+		await page.click(`[data-testid="${row}-save"]`);
+		await until(async () => {
+			const keys = JSON.parse((await raw("/api/keys", { headers: viaServe("100.70.0.15", { cookie: sessions.get("100.70.0.14")! }) })).body) as { keys: Array<{ id: string; masked: string | null }> };
+			return keys.keys.find((k) => k.id === "OPENROUTER_API_KEY")?.masked?.includes("WXYZ");
+		}, "the key saved from the UI", 30_000);
+	} finally {
+		await chrome.close();
+	}
+	assert.equal((await keyWrite("100.70.0.14", "DELETE", PASSWORD)).status, 200);
 });
 
 test("(e) logout is same-origin only and revokes the session; a password change or turning access off revokes them all", async () => {

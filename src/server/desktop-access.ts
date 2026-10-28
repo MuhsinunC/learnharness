@@ -58,11 +58,19 @@ export function desktopPageAuthorized(
  *   - POST /api/attachments/file: reads an image at a path on this computer.
  *   - /api/keys/* writes, in the desktop app only: there the window can do
  *     it. In web mode a password makes every browser a session, so key
- *     writes (a value, never a URL) stay open to sessions. */
+ *     writes (a value, never a URL) need the current password instead
+ *     (keyWriteRequest; proxy.ts checks it). */
 export function computerOnlyRequest(method: string, rawPathname: string, desktop: boolean): boolean {
-	// Match what the router matches: a percent-encoded name must not slip past.
-	let pathname = rawPathname;
-	try { pathname = decodeURIComponent(rawPathname); } catch { /* malformed: as sent */ }
+	const pathname = decoded(rawPathname);
 	if (/^\/api\/(claude-code|subscriptions)(\/|$)/.test(pathname) || pathname === "/api/attachments/file") return true;
-	return desktop && pathname.startsWith("/api/keys/") && method !== "GET" && method !== "HEAD";
+	return desktop && keyWriteRequest(method, pathname);
+}
+
+export function keyWriteRequest(method: string, rawPathname: string): boolean {
+	return decoded(rawPathname).startsWith("/api/keys/") && method !== "GET" && method !== "HEAD" && method !== "OPTIONS";
+}
+
+/** Match what the router matches: a percent-encoded name must not slip past. */
+function decoded(pathname: string): string {
+	try { return decodeURIComponent(pathname); } catch { return pathname; }
 }

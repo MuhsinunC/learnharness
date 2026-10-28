@@ -22,15 +22,16 @@ const field = "h-7 w-32 rounded-sm border border-border bg-background px-1.5 fon
 
 /** For a logged-in browser session (from the access stamp GET
  * /api/remote-access already returns): the message proxy.ts sends for
- * host-affecting changes, and whether key writes are among them (desktop
- * app only). null on the desktop window, or when no password exists. */
-export function useComputerOnly(): { message: string; keys: boolean } | null {
-	const [state, setState] = useState<{ message: string; keys: boolean } | null>(null);
+ * host-affecting changes; whether key writes are among them (desktop app),
+ * or need the current password re-entered instead (web mode). null on the
+ * desktop window, or when no password exists. */
+export function useComputerOnly(): { message: string; keys: boolean; confirmKeys: boolean } | null {
+	const [state, setState] = useState<{ message: string; keys: boolean; confirmKeys: boolean } | null>(null);
 	useEffect(() => {
 		let live = true;
 		void fetch("/api/remote-access")
 			.then((r) => r.json() as Promise<RemoteAccess>)
-			.then((s) => { if (live && s.access === "session") setState({ message: computerOnlyMessage(s.desktop), keys: s.desktop }); })
+			.then((s) => { if (live && s.access === "session") setState({ message: computerOnlyMessage(s.desktop), keys: s.desktop, confirmKeys: !s.desktop }); })
 			.catch(() => {});
 		return () => { live = false; };
 	}, []);

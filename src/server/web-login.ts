@@ -262,6 +262,27 @@ export function chargeLoginAttempt(key: string, now = Date.now()): () => void {
 	};
 }
 
+/** The header a session sends the current password in (URI-encoded), for
+ * writes that need it (web-mode key writes). proxy.ts checks it and never
+ * forwards it. */
+export const CURRENT_PASSWORD_HEADER = "x-lh-current-password";
+
+/** Checks the current password a session re-entered, charged to the login
+ * rate limit like a login. */
+export async function confirmCurrentPassword(headers: Headers): Promise<{ ok: true } | { ok: false; retryAfter?: number }> {
+	const key = clientKey(headers);
+	const wait = loginRetryAfter(key);
+	if (wait > 0) return { ok: false, retryAfter: wait };
+	// URI-encoded by the client: header values must be ASCII, passwords need not be.
+	let password: string | null = null;
+	try { password = decodeURIComponent(headers.get(CURRENT_PASSWORD_HEADER) ?? ""); } catch { /* malformed: a wrong password */ }
+	if (password === "") return { ok: false };
+	const release = chargeLoginAttempt(key);
+	if (password === null || !(await verifyPassword(password))) return { ok: false };
+	release();
+	return { ok: true };
+}
+
 /** A same-origin path to return to after login, printable ASCII only (it
  * becomes a Location header); anything else becomes "/". */
 export function safeNext(value: unknown): string {
