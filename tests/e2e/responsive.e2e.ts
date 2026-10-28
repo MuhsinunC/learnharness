@@ -11,12 +11,12 @@ import { calledTool, lastToolName, reply, startStubProvider, type StubProvider, 
 
 // LH-44: the pages the desktop app renders fit a phone (390×844, touch),
 // a tablet (768×1024, touch) and a desktop window (1280×800). On every
-// surface (home and graph, the sessions drawer, a chat with a demo and a
-// figure, the composer with an image chip, the question dock, Settings
-// tab by tab, the context-window modal, the session menu and the delete
-// dialog, the chain table, the popovers) the page never scrolls sideways,
-// no control sits outside the viewport, and the key controls are on
-// screen. On touch the drawer opens and closes by tap, every input is at
+// surface (home and graph, the sessions drawer, the new-session composer,
+// a chat with a demo and a figure, the composer with an image chip, the
+// question dock, Settings tab by tab, the context-window modal, the
+// session menu and the delete dialog, the chain table, the popovers) the
+// page never scrolls sideways, no control sits outside the viewport, and
+// the key controls are on screen and on top. On touch the drawer opens and closes by tap, every input is at
 // least 16px (iOS zooms the page on focus below that), and the key tap
 // targets are at least 40px. Screenshots land outside the repo for review.
 
@@ -241,12 +241,20 @@ class Walk {
 		for (const selector of controls) {
 			const el = await this.page.$(selector);
 			const box = el && (await el.isVisible()) ? await el.boundingBox() : null;
-			if (!box) {
+			if (!el || !box) {
 				this.problems.push(`${at}: ${selector} is not visible`);
 				continue;
 			}
 			const inside = box.x >= -0.5 && box.y >= -0.5 && box.x + box.width <= this.vp.width + 0.5 && box.y + box.height <= this.vp.height + 0.5;
 			if (!inside) this.problems.push(`${at}: ${selector} is outside the viewport (${Math.round(box.x)},${Math.round(box.y)} ${Math.round(box.width)}×${Math.round(box.height)})`);
+			// Reachable: a tap at its center lands on it, not on something drawn over it.
+			const onTop = await el.evaluate((node) => {
+				if (getComputedStyle(node).pointerEvents === "none") return true;
+				const r = node.getBoundingClientRect();
+				const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+				return !!hit && node.contains(hit);
+			});
+			if (!onTop) this.problems.push(`${at}: ${selector} is covered by another element`);
 		}
 		if (this.touch) {
 			// iOS Safari zooms the page when a focused field's text is under 16px.
@@ -311,7 +319,8 @@ async function walk(vp: Viewport): Promise<string[]> {
 		if (compact) {
 			assert.ok(await w.drawerClosed(), `${vp.name}: the drawer starts closed`);
 			await w.openSidebar();
-			await w.check("drawer", ["[data-testid=sidebar-backdrop]", "[data-testid=new-session]", "[data-testid=session-search]", "[data-testid=settings-entry]", '[aria-label="Close sidebar"]', "[data-testid=session-row-menu]"], {
+			assert.ok(await page.$("[data-testid=sidebar-backdrop]"), `${vp.name}: the open drawer has a backdrop`);
+			await w.check("drawer", ["[data-testid=new-session]", "[data-testid=session-search]", "[data-testid=settings-entry]", '[aria-label="Close sidebar"]', "[data-testid=session-row-menu]"], {
 				minTap: ['[aria-label="Close sidebar"]', "[data-testid=session-row-menu]", "[data-testid=session-row]"],
 			});
 			// A tap on the backdrop, right of the drawer, closes it.
@@ -323,6 +332,11 @@ async function walk(vp: Viewport): Promise<string[]> {
 			await w.press(`[data-testid=session-row][data-chat-id="${lessonId}"]`);
 			await page.waitForFunction((id) => location.pathname === `/chat/${id}`, { timeout: 60_000 }, lessonId);
 			await until(() => w.drawerClosed(), `${vp.name}: navigation to close the drawer`, 5000);
+			// "+ Teaching" leads to the new-session composer, and closes the drawer too.
+			await w.openSidebar();
+			await w.press("[data-testid=new-session]");
+			await page.waitForFunction(() => location.pathname === "/chat/new", { timeout: 60_000 });
+			await until(() => w.drawerClosed(), `${vp.name}: New session to close the drawer`, 5000);
 		} else {
 			// The desktop keeps the inline sidebar, open by default.
 			const box = (await (await w.el("[data-testid=sidebar]")).boundingBox())!;
@@ -330,7 +344,12 @@ async function walk(vp: Viewport): Promise<string[]> {
 			assert.equal(Math.round(box.width), 288);
 			assert.equal(await page.$("[data-testid=sidebar-backdrop]"), null, "no backdrop beside the inline sidebar");
 			await w.check("sidebar", ["[data-testid=new-session]", "[data-testid=session-search]", "[data-testid=settings-entry]"]);
+			await w.press("[data-testid=new-session]");
+			await page.waitForFunction(() => location.pathname === "/chat/new", { timeout: 60_000 });
 		}
+		await page.waitForSelector("[data-testid=composer] textarea", { timeout: 60_000 });
+		await w.settle(1000);
+		await w.check("new-session", ["[data-testid=composer] textarea", "[data-testid=composer] button[type=submit]", "[data-testid=stats-model]"]);
 
 		// The lesson: rich replies, the demo card, the figure card, the composer.
 		await w.goto(`/chat/${lessonId}`);

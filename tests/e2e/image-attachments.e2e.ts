@@ -140,6 +140,8 @@ after(async () => {
 });
 
 async function openChat(page: Page, id: string): Promise<void> {
+	// A desktop window: below 1024px the sessions sidebar (and its Settings entry) is a closed drawer (LH-44).
+	await page.setViewport({ width: 1280, height: 800 });
 	await page.goto(`${server.url}/chat/${id}`, { waitUntil: "domcontentloaded", timeout: 180_000 });
 	await page.waitForSelector("[data-testid=composer] textarea", { timeout: 180_000 });
 	// Hydrated: React's handlers are on the textarea (a paste before this
