@@ -1,5 +1,6 @@
 import { createProvider, type Model, type Provider } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
+import { webSubscriptionsEnabled } from "./subscription-runtime.ts";
 
 /**
  * The end-to-end test seam (tests/e2e/harness): extra OpenAI-compatible
@@ -48,9 +49,12 @@ export function e2eProviders(): Provider[] {
 
 /** The ChatGPT resource server an e2e run talks to instead of
  *  api.openai.com (LH-55): LH_E2E_CHATGPT_BASE_URL, read ONLY when
- *  LH_E2E=1 and only as a loopback http URL ending in /v1, so no
- *  production install can send a ChatGPT token anywhere else. */
+ *  LH_E2E=1, only while the web-mode owner holds the ChatGPT account
+ *  (never the desktop app, whose server runs with LH_DESKTOP_SERVER=1),
+ *  and only as a loopback http URL ending in /v1. The catalog read and
+ *  the turns share this one test, so no install can send a ChatGPT
+ *  token anywhere else. */
 export function e2eChatGPTBaseUrl(): string | undefined {
-	const url = process.env.LH_E2E === "1" ? process.env.LH_E2E_CHATGPT_BASE_URL : undefined;
+	const url = process.env.LH_E2E === "1" && webSubscriptionsEnabled() ? process.env.LH_E2E_CHATGPT_BASE_URL : undefined;
 	return url && /^http:\/\/127\.0\.0\.1:\d+\/v1$/.test(url) ? url : undefined;
 }
