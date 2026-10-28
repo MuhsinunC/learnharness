@@ -65,6 +65,7 @@ import {
 	type AgentSettings,
 	type CompactionSettings,
 	type GraphSettings,
+	type ModelCatalogEntry,
 	type ModelSlotName,
 	type ModelsSettings,
 } from "@/src/core";

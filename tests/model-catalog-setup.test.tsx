@@ -31,7 +31,7 @@ let writes: ModelsSettings[] = [];
 let snapshot: ReturnType<typeof useModelCatalog>;
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>((done) => { resolve = done; }); return { resolve, promise }; }
 const provider = { id: "fixture", envVar: "FIXTURE_KEY", label: "Fixture" };
-const a: ModelCatalogEntry = { id: "vendor/model:free", name: "Model free", provider: provider.id, input: ["text", "image"], reasoning: true, supportedLevels: ["off", "low", "high"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 8192, maxTokens: 1024 };
+const a: ModelCatalogEntry = { id: "vendor/model:free", name: "Model free", provider: provider.id, input: ["text", "image"], reasoning: true, supportedLevels: ["off", "low", "high"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 8192, defaultContextWindow: 8192, maxContextWindow: 8192, maxTokens: 1024 };
 const b: ModelCatalogEntry = { ...a, id: "claude-opus-5-5", name: "Claude Opus 5.5", supportedLevels: ["off", "medium"] };
 function catalog(connected = true): ModelCatalogResponse {
 	return {
