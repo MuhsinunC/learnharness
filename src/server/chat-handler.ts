@@ -230,7 +230,9 @@ function recoverFromOverflow(
 			run = recover();
 		}
 		if (!run) return explain(overflowExplanation.notCondensed, modelName);
-		if ((await run) === "unchanged") return explain(overflowExplanation.stillTooLong, modelName, true);
+		// Nothing to drop for a rejection no longer in force (the chat moved
+		// to another model meanwhile): the retry may simply fit (LH-55).
+		if ((await run) === "unchanged" && deps.rejectionInForce) return explain(overflowExplanation.stillTooLong, modelName, true);
 		const res = await handleChatInput(chatId, { type: "continue" }, buildAgent);
 		await res.arrayBuffer().catch(() => undefined);
 	})().catch((err) => {
@@ -274,6 +276,9 @@ export async function handleRepairRequest(chatId: string): Promise<Response> {
 	const run = holdCompactionGate(chatId, () => recoverContext(deps, chatId));
 	if (!run) return Response.json({ error: "This session is already being condensed. Try again in a moment." }, { status: 409 });
 	if ((await run) === "unchanged") {
+		// The chat's rejection no longer speaks for this model or window
+		// (LH-55) and nothing needs dropping: it already fits, send again.
+		if (!deps.rejectionInForce) return Response.json({ ok: true });
 		explainOverflow(stores.chatStore, chatId, overflowExplanation.stillTooLong(modelName), true);
 		return Response.json({ error: "Nothing older in this chat can be condensed." }, { status: 422 });
 	}
