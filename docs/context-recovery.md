@@ -161,3 +161,37 @@ ask for 16,384: with gradual growth the first recovery fit, the next turns
 were rejected again, and the chat ended unrecoverable; one huge paste's
 recovery retry was rejected outright (`tests/e2e/output-budget.e2e.ts`
 reproduces both).
+
+A request whose reply room under pi-ai's own rule (window − its estimate −
+4096) would fall below min(1024, the model's max output) is never sent:
+`piEngineForSpec`'s stream function holds it back as a length rejection
+that states the window ("Not sent: this model's maximum context length is
+N tokens…"). Overflow recovery then condenses the chat and retries once; if
+the system prompt and tool declarations alone leave no room, the chat says
+plainly that it is too long for the model. A request with max_tokens near 1
+would otherwise end the reply silently (the old LH-40 e2e regime: an 11,548
+window, a 3.6k-token prompt and 3k of tool declarations).
+
+## Transports
+
+- **API-key providers (pi-ai APIs, OpenRouter, the e2e stub):** pi-ai's
+  clamp sets max_tokens against the engine model's window, which carries the
+  learned limit; length rejections pass through unchanged.
+- **Native subscriptions** (`src/agent/subscription-stream.ts`): the
+  transport model takes the engine model's window, so pi-ai's clamp uses the
+  learned limit. A length rejection used to be replaced by the generic
+  "request failed" line, so recovery never ran; it now keeps the provider's
+  text.
+- **ChatGPT** (`src/agent/chatgpt-stream.ts`): the payload carries no
+  max_output_tokens (`chatGPTPayload` keeps a fixed key list), so no output
+  clamp reaches the wire; the threshold reserve and the held-back floor still
+  apply. A length rejection (for example `context_length_exceeded`) used to
+  be masked the same way; it now keeps its text and recovery runs. Such a
+  rejection states no limit, so recovery aims at half the failed request.
+- **Claude Code** (`src/agent/claude-code/`): options.maxTokens has no SDK
+  surface; the CLI picks its own output budget and runs its model id at the
+  catalog window. The engine window (catalog, custom, or learned) still
+  drives the threshold and the held-back floor. A CLI error result passes
+  through as its own text: "prompt is too long" is recognised as a length
+  rejection (and "N tokens > M maximum", when present, is learned); any
+  other wording is a plain failure.
