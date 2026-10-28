@@ -8,7 +8,10 @@
  * modal's confirmation is the only way past it. `tokens: null`, or a value
  * equal to the Default, clears the pair back to its catalog default; a
  * clear needs no catalog entry, so a pair whose model left the catalog
- * can still be cleared.
+ * can still be cleared. Either save also forgets the limit a provider
+ * stated for the pair (learnedContextLimits, LH-55): the user's word on
+ * the window replaces it, and a real limit is learned again from the
+ * next rejection.
  *
  * A static sibling of [section], so it wins the route match; the generic
  * section route has no contextWindows parser and cannot write the map.
@@ -46,7 +49,8 @@ export async function PUT(request: Request) {
 		const windows = { ...record.contextWindows };
 		if (pin === null) delete windows[key];
 		else windows[key] = pin;
-		return { ...record, contextWindows: windows };
+		const { [key]: _learned, ...learnedContextLimits } = record.learnedContextLimits ?? {};
+		return { ...record, contextWindows: windows, learnedContextLimits };
 	});
 	return Response.json({ settings: next });
 }
