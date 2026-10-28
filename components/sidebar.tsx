@@ -710,6 +710,38 @@ function SessionsSidebar() {
 	const drawerUsedRef = useRef(false);
 	if (drawer) drawerUsedRef.current = true;
 
+	/* The drawer is modal (LH-56): focus moves in on open (to the drawer
+	   itself: the search would raise the iOS keyboard, the close button its
+	   hint) and back on close, once the page behind is no longer inert: to
+	   where it was, else the toggle. A page that took focus itself keeps it. */
+	const asideRef = useRef<HTMLElement>(null);
+	useEffect(() => {
+		if (!drawer) return;
+		const aside = asideRef.current;
+		const opener = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null;
+		if (!aside?.contains(document.activeElement)) aside?.focus();
+		return () => {
+			const now = document.activeElement;
+			if (now && now !== document.body && !aside?.contains(now)) return;
+			const back = opener?.isConnected && !aside?.contains(opener) ? opener : null;
+			(back ?? document.querySelector<HTMLElement>('button[aria-label="Open sidebar"]'))?.focus();
+		};
+	}, [drawer]);
+	// Escape closes it, claimed at the document level so it never reaches
+	// the window chain (abort the turn). A menu or dialog over it owns
+	// Escape while it is up (one Esc, one layer).
+	useEffect(() => {
+		if (!drawer || ctxChatId !== null || deleting) return;
+		const onKeyDown = (e: KeyboardEvent) => {
+			if (e.key !== "Escape") return;
+			e.preventDefault();
+			e.stopPropagation();
+			closeDrawer();
+		};
+		document.addEventListener("keydown", onKeyDown);
+		return () => document.removeEventListener("keydown", onKeyDown);
+	}, [drawer, ctxChatId, deleting, closeDrawer]);
+
 	useEffect(() => {
 		if (!open) return;
 		void refresh();
@@ -723,9 +755,14 @@ function SessionsSidebar() {
 			<div data-testid="sidebar-backdrop" aria-hidden="true" onClick={closeDrawer} className="fixed inset-0 z-50 bg-background/80" />
 		)}
 		<aside
+			ref={asideRef}
 			data-testid="sidebar"
+			role={drawer ? "dialog" : undefined}
+			aria-modal={drawer || undefined}
+			aria-label={drawer ? "Sessions" : undefined}
+			tabIndex={drawer ? -1 : undefined}
 			className={cn(
-				"shrink-0 overflow-hidden",
+				"shrink-0 overflow-hidden outline-none",
 				// The drawer slides over the page.
 				compact
 					? cn("fixed inset-y-0 left-0 z-50 w-72 max-w-[85vw] pl-[env(safe-area-inset-left)] shadow-xl", drawerUsedRef.current && "transition-[translate] duration-200", !open && "-translate-x-full")
@@ -1065,10 +1102,14 @@ function SessionsSidebar() {
 
 /** The app frame: sidebar inline + content. Rendered once in the root layout. */
 export function AppShell({ children }: { children: React.ReactNode }) {
+	const { open, compact } = useSidebar();
 	return (
 		<SettingsDialogProvider>
 			<SessionsSidebar />
-			<main className="min-w-0 flex-1">{children}</main>
+			{/* The page behind the open drawer is inert. */}
+			<main className="min-w-0 flex-1" inert={compact && open}>
+				{children}
+			</main>
 			{/* The single document-level keydown listener (keyboard wave A) —
 			    after the content in the tree, but it's window-level so order only
 			    matters for the events it dispatches, never for DOM priority. */}
