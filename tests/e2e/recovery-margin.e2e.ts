@@ -21,7 +21,7 @@ const MAX_OUTPUT = 16_384;
 /** A limit that leaves the prober's prompt and tool declarations (~7.5k
  *  wire tokens) no room for a reply. Its replies report the default usage,
  *  so the settle kick's threshold compaction stays out of the way. */
-const TINY_LIMIT = 12_000;
+const TINY_LIMIT = 11_000;
 const STUB = "openrouter";
 const SUMMARIZER = "You are the session-compaction summarizer";
 const NOTES = "The derivative of x squared is two x, by the limit of the difference quotient. ";

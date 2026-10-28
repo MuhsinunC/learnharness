@@ -192,9 +192,12 @@ export interface RecoveryDeps extends Omit<CompactionDeps, "thresholdTokens" | "
 	fitTokens: number;
 	/** What they may fill before the request is held back: the same
 	 *  share of the window less pi-ai's margin and the least reply room
-	 *  (replyFloorTokens), less the prompt and declarations. At most 0
-	 *  when nothing can be sent: the chat is explained, never condensed. */
+	 *  (replyFloorTokens), less the prompt and declarations. */
 	floorFitTokens: number;
+	/** Do the prompt and declarations alone leave a request that is not
+	 *  held back (no margin: the held-back floor's own test)? When not,
+	 *  nothing can be sent: the chat is explained, never condensed. */
+	prefixFits: boolean;
 	/** The rejected request's estimate (chars/4), measured once. */
 	failedRequestTokens: number;
 	/** The learner-facing line the moment divider shows. */
@@ -222,6 +225,7 @@ export function recoveryDeps(chatStore: ChatStore, record: ChatRecord, engine: P
 		windowTokens,
 		fitTokens: Math.floor(RETRY_FIT_SHARE * (windowTokens - outputReserveTokens(windowTokens, engine.model.maxTokens))) - prefixTokens,
 		floorFitTokens: Math.floor(RETRY_FIT_SHARE * (windowTokens - CONTEXT_SAFETY_TOKENS - replyFloorTokens(engine.model.maxTokens))) - prefixTokens,
+		prefixFits: windowTokens - CONTEXT_SAFETY_TOKENS - replyFloorTokens(engine.model.maxTokens) - prefixTokens > 0,
 		notice,
 	};
 }
@@ -274,7 +278,7 @@ function cutWithin(messages: readonly LhMessage[]) {
  *  hopeless — it may have overrun an output budget — so only a chat
  *  where this is false is marked unrecoverable. */
 export function condensable(deps: RecoveryDeps, messages: readonly LhMessage[]): boolean {
-	return deps.floorFitTokens > 0 && cutWithin(messages).cutFor(1) !== null;
+	return deps.prefixFits && cutWithin(messages).cutFor(1) !== null;
 }
 
 /** One recovery compaction. The caller holds the compaction gate

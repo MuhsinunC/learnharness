@@ -237,7 +237,10 @@ test("a window too small for the prompt, the tool declarations and a reply: noth
 	for (const r of sent) assert.ok(maxOutputTokens(r) >= REPLY_FLOOR, `no request leaves its reply under ${REPLY_FLOOR} tokens (max_tokens ${maxOutputTokens(r)})`);
 	const failed = c.messages.at(-1)!;
 	assert.match(failed.errorMessage!, /^This chat is still too long for stub-t, even after condensing its older part\./, "the learner sees the explanation");
-	assert.equal(failed.contextOverflow!.providerText, undefined, "the last request was held back: no provider text");
+	// The stated limit leaves the prompt and tool declarations no room, so
+	// the rejection is explained at once: nothing condensed, no retry (LH-55).
+	assert.match(failed.contextOverflow!.providerText!, /maximum context length is 11548 tokens/, "the provider's rejection is the one explained");
+	assert.equal(c.messages.filter((m) => m.customType === "compaction" && m.details?.notice).length, 0, "nothing was condensed");
 });
 
 test("a large window with a small max output: the growing chat compacts at the threshold, and no request is held back", async () => {
