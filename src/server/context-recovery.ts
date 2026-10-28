@@ -74,11 +74,16 @@ function learnedContextLimit(modelId: string): number | undefined {
 
 /** Remember the limit the chat's newest rejection states for its model —
  *  its own settings key, never the user's window. A held-back request
- *  has no provider text, so it never teaches a limit. */
+ *  has no provider text, so it never teaches a limit, and a rejection
+ *  older than the user's last window save for the pair no longer does
+ *  (LH-55: that save cleared what it stated). */
 export function learnStatedLimit(model: { provider: string; id: string }, messages: readonly LhMessage[]): void {
-	const stated = reportedContextLimit(overflowProviderText(lastOverflow(messages)));
+	const overflow = lastOverflow(messages);
+	const stated = reportedContextLimit(overflowProviderText(overflow));
 	const modelId = `${model.provider}:${model.id}`;
 	if (!stated || learnedContextLimit(modelId) === stated) return;
+	const cleared = stores.settingsStore.readSettings()?.learnedLimitsClearedAt?.[modelId];
+	if (cleared !== undefined && overflow!.timestamp <= cleared) return;
 	updateSettings((record) => ({ ...record, learnedContextLimits: { ...record.learnedContextLimits, [modelId]: stated } }));
 }
 
@@ -130,14 +135,15 @@ function lastOverflow(messages: readonly LhMessage[]): LhMessage | undefined {
 	return undefined;
 }
 
-/** The window to fit: the limit the rejection states; for a held-back
- *  request, the known window it was measured against (no provider
- *  contradicted it); otherwise the known window, but never more than
- *  half the request that just failed (the known window is exactly what
- *  may be wrong). */
+/** The window to fit: the limit the rejection states, never above the
+ *  known window (LH-55: the chat may have moved to a smaller model
+ *  since); for a held-back request, the known window it was measured
+ *  against (no provider contradicted it); otherwise the known window,
+ *  but never more than half the request that just failed (the known
+ *  window is exactly what may be wrong). */
 export function recoveryWindowTokens(overflow: LhMessage | undefined, knownWindowTokens: number | undefined, failedRequestTokens: number): number {
 	const stated = reportedContextLimit(overflowProviderText(overflow));
-	if (stated) return stated;
+	if (stated) return Math.min(stated, knownWindowTokens ?? Infinity);
 	if (knownWindowTokens !== undefined && heldBackRequest(overflow)) return knownWindowTokens;
 	return Math.max(1, Math.min(knownWindowTokens ?? Infinity, Math.floor(failedRequestTokens / 2)));
 }
@@ -192,12 +198,10 @@ export interface RecoveryDeps extends Omit<CompactionDeps, "thresholdTokens" | "
 	fitTokens: number;
 	/** What they may fill before the request is held back: the same
 	 *  share of the window less pi-ai's margin and the least reply room
-	 *  (replyFloorTokens), less the prompt and declarations. */
+	 *  (replyFloorTokens), less the prompt and declarations; the whole of
+	 *  that room when the share leaves none. At most 0 when nothing can
+	 *  be sent: the chat is explained, never condensed. */
 	floorFitTokens: number;
-	/** Do the prompt and declarations alone leave a request that is not
-	 *  held back (no margin: the held-back floor's own test)? When not,
-	 *  nothing can be sent: the chat is explained, never condensed. */
-	prefixFits: boolean;
 	/** The rejected request's estimate (chars/4), measured once. */
 	failedRequestTokens: number;
 	/** The learner-facing line the moment divider shows. */
@@ -216,6 +220,8 @@ export function recoveryDeps(chatStore: ChatStore, record: ChatRecord, engine: P
 	const failedRequestTokens = heuristicContextTokens(record.messages, systemPromptTokensFor(kind));
 	const windowTokens = recoveryWindowTokens(lastOverflow(record.messages), contextWindowFor(engine), failedRequestTokens);
 	const prefixTokens = requestPrefixTokens(record.id, kind);
+	const floorRoom = windowTokens - CONTEXT_SAFETY_TOKENS - replyFloorTokens(engine.model.maxTokens);
+	const marginedFloorFit = Math.floor(RETRY_FIT_SHARE * floorRoom) - prefixTokens;
 	return {
 		chatStore,
 		engine,
@@ -224,8 +230,9 @@ export function recoveryDeps(chatStore: ChatStore, record: ChatRecord, engine: P
 		failedRequestTokens,
 		windowTokens,
 		fitTokens: Math.floor(RETRY_FIT_SHARE * (windowTokens - outputReserveTokens(windowTokens, engine.model.maxTokens))) - prefixTokens,
-		floorFitTokens: Math.floor(RETRY_FIT_SHARE * (windowTokens - CONTEXT_SAFETY_TOKENS - replyFloorTokens(engine.model.maxTokens))) - prefixTokens,
-		prefixFits: windowTokens - CONTEXT_SAFETY_TOKENS - replyFloorTokens(engine.model.maxTokens) - prefixTokens > 0,
+		// A prefix that fits only without the margin still gets its room
+		// (LH-55): a budget of 0 would drop the whole history.
+		floorFitTokens: marginedFloorFit > 0 ? marginedFloorFit : floorRoom - prefixTokens,
 		notice,
 	};
 }
@@ -278,7 +285,7 @@ function cutWithin(messages: readonly LhMessage[]) {
  *  hopeless — it may have overrun an output budget — so only a chat
  *  where this is false is marked unrecoverable. */
 export function condensable(deps: RecoveryDeps, messages: readonly LhMessage[]): boolean {
-	return deps.prefixFits && cutWithin(messages).cutFor(1) !== null;
+	return deps.floorFitTokens > 0 && cutWithin(messages).cutFor(1) !== null;
 }
 
 /** One recovery compaction. The caller holds the compaction gate
@@ -335,9 +342,10 @@ export async function recoverContext(deps: RecoveryDeps, chatId: string): Promis
 			}
 		}
 		// The deterministic fallback, never a model call: shorter kept
-		// tails until the request fits; the smallest lands regardless.
+		// tails until the request fits; the smallest, a quarter of the
+		// budget, lands regardless.
 		let fallback: LhMarkerMessage | null = null;
-		for (const keep of [budget / 2, budget / 4, 1]) {
+		for (const keep of [budget / 2, budget / 4]) {
 			const at = cutFor(keep);
 			if (at === null) continue;
 			fallback = markerAt(at, droppedSpanSummary(record, previous, base.slice(floor, at), Math.max((budget / 2) * 4, 1_000)));
