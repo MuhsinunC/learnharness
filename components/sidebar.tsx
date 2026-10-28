@@ -162,7 +162,8 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
 	// The drawer below the lg breakpoint (COMPACT_QUERY): crossing it
 	// either way starts the drawer closed.
 	useEffect(() => {
-		if (IS_ELECTRON) return;
+		// (The unit tests' DOM shim has no matchMedia: no drawer there.)
+		if (IS_ELECTRON || typeof window.matchMedia !== "function") return;
 		const query = window.matchMedia(COMPACT_QUERY);
 		const onChange = () => {
 			setCompact(query.matches);
