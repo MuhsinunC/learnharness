@@ -176,7 +176,7 @@ function parseResponsesRequest(body: Record<string, unknown>): StubRequest {
 
 /** A text or HTTP reply as a Responses API event stream. */
 function sendResponses(res: http.ServerResponse, out: StubReply, open: Set<http.ServerResponse>): void {
-	if (out.kind === "tools") throw new Error("the Responses stub answers text only");
+	if (out.kind === "tools") out = reply.http(500, { error: { message: "the Responses stub answers text only, not tool calls" } });
 	if (out.kind !== "text") {
 		send(res, "", out, true, open);
 		return;
