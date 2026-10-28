@@ -1,4 +1,5 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -6,12 +7,18 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
- * Boot the real LearnHarness server in web mode (`next dev`) on a free
- * 127.0.0.1 port, with a fresh data dir and a pre-written settings.json.
- * The child runs under `nice -n 10`, without proxy or credential env vars,
- * with LH_IGNORE_ENV_KEYS=1 (no real key leaks in) and LH_E2E=1 (the stub
- * provider seam in src/agent/e2e-providers.ts and the Chrome-only demo
- * browser in headless.ts).
+ * Boot the real LearnHarness server on a free 127.0.0.1 port, with a fresh
+ * data dir and a pre-written settings.json. By default it serves ONE
+ * production build per source state: `next build` runs once (cached under
+ * ~/.cache/lh-e2e/build-<hash of the sources + lockfile>), and every test
+ * starts that build's standalone server.js, the server the desktop app
+ * ships. No route compiles on first hit. LH_E2E_DEV=1 serves `next dev`
+ * instead, for debugging. The child runs under `nice -n 10`, without
+ * proxy or credential env vars, with LH_IGNORE_ENV_KEYS=1 (no real key
+ * leaks in) and LH_E2E=1 (the stub provider seam in
+ * src/agent/e2e-providers.ts and the Chrome-only demo browser in
+ * headless.ts). Every seam is read from process.env at request time, so
+ * one build serves every test's env.
  */
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
@@ -31,7 +38,7 @@ export interface BootOptions {
 	providers: E2EProvider[];
 	/** Extra env for the server process. */
 	env?: Record<string, string>;
-	/** Default 6 minutes: the first `next dev` compile is slow on a busy machine. */
+	/** Default 6 minutes (a `next dev` first compile is slow on a busy machine). */
 	bootTimeoutMs?: number;
 }
 
@@ -100,8 +107,82 @@ function signal(pids: number[], sig: NodeJS.Signals): void {
 	}
 }
 
+const CACHE = path.join(os.homedir(), ".cache", "lh-e2e");
+
+/** The env every child starts from: ours minus proxies, credentials and LH_*. */
+function cleanEnv(): Record<string, string> {
+	const env: Record<string, string> = {};
+	for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !STRIPPED_ENV.test(k)) env[k] = v;
+	return env;
+}
+
+/** sha256 of every tracked or unignored file outside tests/ and docs/
+ *  (the lockfile and next.config.ts included), so any source edit rebuilds. */
+function sourceHash(): string {
+	const listed = spawnSync("git", ["ls-files", "-co", "--exclude-standard"], { cwd: REPO_ROOT, encoding: "utf8" });
+	if (listed.status !== 0) throw new Error(`git ls-files failed: ${listed.stderr}`);
+	const hash = crypto.createHash("sha256");
+	for (const file of listed.stdout.split("\n").filter((f) => f && !/^(tests|docs)\//.test(f)).sort()) {
+		const full = path.join(REPO_ROOT, file);
+		if (!fs.existsSync(full) || !fs.statSync(full).isFile()) continue;
+		hash.update(file).update("\0").update(fs.readFileSync(full)).update("\0");
+	}
+	return hash.digest("hex").slice(0, 16);
+}
+
+/** Hold an exclusive cross-process lock (a mkdir) around `work`. */
+function withLock<T>(lock: string, work: () => T): T {
+	for (;;) {
+		try {
+			fs.mkdirSync(lock);
+			break;
+		} catch {
+			// A lock older than the build timeout belongs to a dead run.
+			const held = fs.statSync(lock, { throwIfNoEntry: false });
+			if (held && Date.now() - held.mtimeMs > BUILD_TIMEOUT_MS) fs.rmSync(lock, { recursive: true, force: true });
+			else spawnSync("sleep", ["2"]);
+		}
+	}
+	try {
+		return work();
+	} finally {
+		fs.rmSync(lock, { recursive: true, force: true });
+	}
+}
+
+const BUILD_TIMEOUT_MS = 30 * 60_000;
+
+/** The standalone server directory for the current sources: reused when
+ *  this source state was built before, else `next build` + the desktop's
+ *  payload step (scripts/build-server.mjs copies static/ and public/ and
+ *  guards against leaked data and keys), copied out of .next so a later
+ *  build cannot change it under a running test. Older builds are pruned. */
+export function productionBuild(): string {
+	const dir = path.join(CACHE, `build-${sourceHash()}`);
+	const server = path.join(dir, "server.js");
+	if (fs.existsSync(server)) return dir;
+	fs.mkdirSync(CACHE, { recursive: true });
+	return withLock(path.join(CACHE, "build.lock"), () => {
+		if (fs.existsSync(server)) return dir; // another run built it while we waited
+		const env = { ...cleanEnv(), NODE_ENV: "production", NEXT_TELEMETRY_DISABLED: "1" } as NodeJS.ProcessEnv;
+		const run = (cmd: string, args: string[]) => {
+			const res = spawnSync("nice", ["-n", "19", cmd, ...args], { cwd: REPO_ROOT, env, encoding: "utf8", timeout: BUILD_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024 });
+			if (res.status !== 0) throw new Error(`${path.basename(cmd)} ${args.join(" ")} failed (${res.status ?? res.signal}):\n${(res.stdout + res.stderr).slice(-4000)}`);
+		};
+		run(path.join(REPO_ROOT, "node_modules", ".bin", "next"), ["build"]);
+		run(process.execPath, [path.join(REPO_ROOT, "scripts", "build-server.mjs")]);
+		const staging = `${dir}.tmp-${process.pid}`;
+		fs.cpSync(path.join(REPO_ROOT, ".next", "standalone"), staging, { recursive: true, verbatimSymlinks: true });
+		fs.renameSync(staging, dir);
+		for (const old of fs.readdirSync(CACHE)) {
+			if (old.startsWith("build-") && path.join(CACHE, old) !== dir) fs.rmSync(path.join(CACHE, old), { recursive: true, force: true });
+		}
+		return dir;
+	});
+}
+
 export async function bootServer(opts: BootOptions): Promise<LhServer> {
-	const base = path.join(os.homedir(), ".cache", "lh-e2e", opts.ticket);
+	const base = path.join(CACHE, opts.ticket);
 	fs.mkdirSync(base, { recursive: true });
 	const root = fs.mkdtempSync(path.join(base, "run-"));
 	const dataDir = path.join(root, "data");
@@ -112,8 +193,7 @@ export async function bootServer(opts: BootOptions): Promise<LhServer> {
 	const authFile = path.join(root, "auth.json");
 	fs.writeFileSync(authFile, "{}", { mode: 0o600 });
 
-	const env: Record<string, string> = {};
-	for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !STRIPPED_ENV.test(k)) env[k] = v;
+	const env = cleanEnv();
 	Object.assign(env, {
 		LH_E2E: "1",
 		LH_E2E_PROVIDERS: JSON.stringify(opts.providers),
@@ -128,9 +208,13 @@ export async function bootServer(opts: BootOptions): Promise<LhServer> {
 
 	const port = await freePort();
 	const url = `http://127.0.0.1:${port}`;
-	const next = path.join(REPO_ROOT, "node_modules", ".bin", "next");
-	const child: ChildProcess = spawn("nice", ["-n", "10", next, "dev", "-H", "127.0.0.1", "-p", String(port)], {
-		cwd: REPO_ROOT,
+	const dev = process.env.LH_E2E_DEV === "1";
+	const [cmd, cwd] = dev
+		? [[path.join(REPO_ROOT, "node_modules", ".bin", "next"), "dev", "-H", "127.0.0.1", "-p", String(port)], REPO_ROOT]
+		: [[process.execPath, "server.js"], productionBuild()];
+	if (!dev) Object.assign(env, { NODE_ENV: "production", HOSTNAME: "127.0.0.1", PORT: String(port) });
+	const child: ChildProcess = spawn("nice", ["-n", "10", ...cmd], {
+		cwd,
 		env: env as NodeJS.ProcessEnv,
 		stdio: ["ignore", "pipe", "pipe"],
 	});
@@ -158,7 +242,7 @@ export async function bootServer(opts: BootOptions): Promise<LhServer> {
 		log: () => output,
 		stop: async () => {
 			if (child.exitCode === null && child.pid) {
-				// `next dev` forks next-server workers. Collect the tree before
+				// The server may fork workers (`next dev` always does). Collect the tree before
 				// signalling (an orphan is reparented and pgrep -P loses it),
 				// then signal exactly those pids.
 				const pids = [child.pid, ...descendants(child.pid)];
@@ -175,10 +259,10 @@ export async function bootServer(opts: BootOptions): Promise<LhServer> {
 	try {
 		await until(
 			async () => {
-				if (child.exitCode !== null) throw new Error(`next dev exited (${child.exitCode})`);
+				if (child.exitCode !== null) throw new Error(`the server exited (${child.exitCode})`);
 				return (await api("/api/settings")).ok;
 			},
-			"next dev to answer /api/settings",
+			"the server to answer /api/settings",
 			opts.bootTimeoutMs ?? 360_000,
 			1000,
 		);
