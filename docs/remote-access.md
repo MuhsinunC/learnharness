@@ -41,7 +41,9 @@ The app window itself never asks for the password.
 npm run remote-access:set-password
 ```
 
-It asks for the password twice and doesn't show what you type. Then start
+It asks for the password twice and doesn't show what you type. It writes to
+the same data folder `npm start` uses (`LH_DATA_DIR` if you set one, so set
+it the same way for both). Then start
 LearnHarness with `npm start` (after `npm run build`). From now on **every
 browser logs in, the one on this computer too**: once a password exists,
 LearnHarness can no longer tell a browser on this computer from a forwarded
@@ -119,7 +121,8 @@ Not safe, don't do it:
 - **`npm run dev` with remote access.** A development server has built-in
   tools (restart, debugger, opening files in your editor) that skip the login.
   LearnHarness ignores the password there, and you must never point
-  `tailscale serve` at a development server.
+  `tailscale serve` at a development server; `npm run dev` refuses to start
+  on a port that tailscale serve forwards.
 - **Leaving `tailscale serve` on when you stop using remote access.** Serve
   keeps forwarding your tailnet to the port, whatever program holds it. If you
   turn remote access off, uninstall LearnHarness, or start another program on

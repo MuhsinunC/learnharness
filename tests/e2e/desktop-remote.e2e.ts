@@ -180,6 +180,28 @@ test("(desktop) a phone behind tailscale serve logs in and uses the app; the win
 	assert.equal((await raw("/api/settings", { headers: phone() })).status, 403);
 });
 
+test("(desktop) the window changes and removes the password without the current one, and that ends phone sessions", async () => {
+	const loginAs = async (password: string) => {
+		const res = await raw("/login", {
+			method: "POST",
+			headers: viaServe({ "content-type": "application/x-www-form-urlencoded", origin: `https://${TS_HOST}` }),
+			body: new URLSearchParams({ password, next: "/" }).toString(),
+		});
+		return [res.headers["set-cookie"]].flat().join("\n").split(";")[0]!;
+	};
+	const before = await loginAs(PASSWORD);
+	assert.equal((await raw("/api/settings", { headers: viaServe({ cookie: before }) })).status, 200);
+	assert.equal((await put(WINDOW_API, { password: "the next password" })).status, 200);
+	assert.equal((await raw("/api/settings", { headers: viaServe({ cookie: before }) })).status, 403, "the change logged the phone out");
+	const after = await loginAs("the next password");
+	assert.equal((await raw("/api/settings", { headers: viaServe({ cookie: after }) })).status, 200);
+	assert.equal((await raw("/api/remote-access", { method: "DELETE", headers: { ...WINDOW_API, "content-type": "application/json" }, body: "{}" })).status, 200);
+	assert.equal((await remoteAccess()).enabled, false);
+	assert.equal((await raw("/api/settings", { headers: viaServe({ cookie: after }) })).status, 403, "off ends every session");
+	assert.equal((await raw("/")).status, 200, "and the window is back to needing nothing");
+	assert.equal((await put(WINDOW_API, { password: PASSWORD })).status, 200);
+});
+
 test("(desktop) a server that did not get the fixed port asks for a restart and still gates the phone", async () => {
 	const dataDir = server.dataDir;
 	process.env.LH_E2E_KEEP = "1";

@@ -344,7 +344,7 @@ test("(g) SSE, the turn stream, the chat export and attachments need the session
 	assert.notEqual((await raw("/api/attachments/0000", { headers: viaServe("100.70.0.8", { cookie }) })).status, 401);
 });
 
-test("(f) the launcher listens only on 127.0.0.1: no other address and no -H/-p", () => {
+test("(f) the launcher listens only on 127.0.0.1: no other address, no -H/-p, and no dev server behind tailscale serve", () => {
 	// Every case is refused before `next` is spawned, so nothing ever listens.
 	const launch = (args: string[], env: Record<string, string> = {}) =>
 		spawnSync(process.execPath, [path.join(REPO_ROOT, "scripts", "web-server.mjs"), "start", ...args], {
@@ -362,6 +362,17 @@ test("(f) the launcher listens only on 127.0.0.1: no other address and no -H/-p"
 		assert.equal(run.status, 78, `${host}: ${run.stderr}`);
 		assert.match(run.stderr, /only listens on 127\.0\.0\.1/);
 	}
+	// `dev` never starts on a port tailscale serve forwards (its /__nextjs_* tools skip the login).
+	const dir = fs.mkdtempSync(path.join(path.dirname(server.dataDir), "ts-"));
+	const fake = path.join(dir, "tailscale");
+	fs.writeFileSync(fake, `#!/bin/sh\necho '{"Web":{"${TS_HOST}:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3911"}}}}}'\n`, { mode: 0o755 });
+	const dev = spawnSync(process.execPath, [path.join(REPO_ROOT, "scripts", "web-server.mjs"), "dev"], {
+		env: { PATH: process.env.PATH ?? "", NODE_ENV: "production", LH_LISTEN_PORT: "3911", LH_TAILSCALE_BIN: fake },
+		encoding: "utf8",
+		timeout: 30_000,
+	});
+	assert.equal(dev.status, 78, dev.stderr);
+	assert.match(dev.stderr, /development server must never be on your tailnet/);
 });
 
 test("the server log holds no password and no session token", async () => {
