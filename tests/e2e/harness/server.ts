@@ -117,12 +117,13 @@ function cleanEnv(): Record<string, string> {
 }
 
 /** sha256 of every tracked or unignored file outside tests/ and docs/
- *  (the lockfile and next.config.ts included), so any source edit rebuilds. */
+ *  (the lockfile and next.config.ts included), so any source edit rebuilds.
+ *  next-env.d.ts is left out: Next rewrites it on every build and dev boot. */
 function sourceHash(): string {
 	const listed = spawnSync("git", ["ls-files", "-co", "--exclude-standard"], { cwd: REPO_ROOT, encoding: "utf8" });
 	if (listed.status !== 0) throw new Error(`git ls-files failed: ${listed.stderr}`);
 	const hash = crypto.createHash("sha256");
-	for (const file of listed.stdout.split("\n").filter((f) => f && !/^(tests|docs)\//.test(f)).sort()) {
+	for (const file of listed.stdout.split("\n").filter((f) => f && !/^(tests|docs)\//.test(f) && f !== "next-env.d.ts").sort()) {
 		const full = path.join(REPO_ROOT, file);
 		if (!fs.existsSync(full) || !fs.statSync(full).isFile()) continue;
 		hash.update(file).update("\0").update(fs.readFileSync(full)).update("\0");
@@ -169,7 +170,15 @@ export function productionBuild(): string {
 			const res = spawnSync("nice", ["-n", "19", cmd, ...args], { cwd: REPO_ROOT, env, encoding: "utf8", timeout: BUILD_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024 });
 			if (res.status !== 0) throw new Error(`${path.basename(cmd)} ${args.join(" ")} failed (${res.status ?? res.signal}):\n${(res.stdout + res.stderr).slice(-4000)}`);
 		};
-		run(path.join(REPO_ROOT, "node_modules", ".bin", "next"), ["build"]);
+		// `next build` rewrites the tracked next-env.d.ts (dev and build
+		// reference different type dirs); put it back so the tree stays clean.
+		const nextEnv = path.join(REPO_ROOT, "next-env.d.ts");
+		const nextEnvBefore = fs.readFileSync(nextEnv);
+		try {
+			run(path.join(REPO_ROOT, "node_modules", ".bin", "next"), ["build"]);
+		} finally {
+			fs.writeFileSync(nextEnv, nextEnvBefore);
+		}
 		run(process.execPath, [path.join(REPO_ROOT, "scripts", "build-server.mjs")]);
 		const staging = `${dir}.tmp-${process.pid}`;
 		fs.cpSync(path.join(REPO_ROOT, ".next", "standalone"), staging, { recursive: true, verbatimSymlinks: true });
