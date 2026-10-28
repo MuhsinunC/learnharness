@@ -636,8 +636,10 @@ test("an attached image survives an over-context recovery, and view_image still 
 	// The stub enforces a real limit far under the catalog window and
 	// states it (LH-40's recovery); its summarizer is down, so the
 	// deterministic fallback marker lands.
-	const limit = 38_000;
-	const filler = "A sketch shows the shape of a curve. ".repeat(130);
+	// Room enough, once learned, for the prompt, the tool declarations and
+	// a reply: a smaller window holds the retry back unsent (LH-50).
+	const limit = 120_000;
+	const filler = "A sketch shows the shape of a curve. ".repeat(520);
 	const again = "Look at my sketch again.";
 	const sketch = png(200, 60, 160);
 	stub.setResponder((req) => {
