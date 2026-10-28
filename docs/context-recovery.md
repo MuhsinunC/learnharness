@@ -109,10 +109,11 @@ Pi's shape, with Codex's clipping and option 2 as the fallback
   explanation that keeps Repair offered: background use off for the
   connection ("turn background use on, or press Repair this chat"), no
   engine, or a compaction still holding the gate after a 30-second wait.
-  When the system prompt and tool declarations alone leave no room
-  (`floorFitTokens <= 0`), recovery and Repair explain at once that the
-  chat is still too long, mark it unrecoverable and leave its history as
-  it is (LH-55): no marker, no retry. Recovery resolves its spec afresh,
+  When the system prompt and tool declarations alone would be held back
+  under the target (`prefixFits`, the held-back floor without the 0.8
+  margin, which only sizes the retry), recovery and Repair explain at once
+  that the chat is still too long, mark it unrecoverable and leave its
+  history as it is (LH-55): no marker, no retry. Recovery resolves its spec afresh,
   as Repair does, so a window or model changed during the turn applies.
 - **Notice.** `details.notice` is shown in the transcript in place of
   "Context compacted": "This chat had grown too long for \<model\>; I condensed

@@ -213,7 +213,7 @@ function recoverFromOverflow(
 	const deps = recoveryDeps(stores.chatStore, record, engine, `This chat had grown too long for ${modelName}; I condensed the older part and continued.`);
 	// The prompt and tool declarations alone leave no room (LH-55): no
 	// condensing can help, so the history stays as it is.
-	if (deps.floorFitTokens <= 0) return explain(overflowExplanation.stillTooLong, modelName, true);
+	if (!deps.prefixFits) return explain(overflowExplanation.stillTooLong, modelName, true);
 	// The retry failed too: unrecoverable only when nothing is left to
 	// condense; otherwise Repair stays offered (LH-50).
 	if (recoveryAttempted(record.messages)) {
@@ -268,7 +268,7 @@ export async function handleRepairRequest(chatId: string): Promise<Response> {
 	catch { return Response.json({ error: "The selected model is unavailable." }, { status: 503 }); }
 	const modelName = engine.model.name || engine.model.id;
 	const deps = recoveryDeps(stores.chatStore, record, engine, `This chat had grown too long for ${modelName}; I condensed the older part.`);
-	if (deps.floorFitTokens <= 0) {
+	if (!deps.prefixFits) {
 		explainOverflow(stores.chatStore, chatId, overflowExplanation.stillTooLong(modelName), true);
 		return Response.json({ error: "Condensing cannot help: the instructions and tools alone fill this model's context window." }, { status: 422 });
 	}
