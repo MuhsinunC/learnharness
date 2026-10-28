@@ -5,7 +5,8 @@
  * (its pure utils/overflow module, browser-safe) plus the two phrasings
  * the brief names that pi only matches with extra qualifiers. A message
  * the server already explained carries a ContextOverflowMark, which then
- * rules. See docs/context-recovery.md.
+ * rules; a request the app held back (LH-50) carries HeldBack. See
+ * docs/context-recovery.md.
  */
 
 import { isContextOverflow } from "@earendil-works/pi-ai/utils/overflow";
@@ -14,13 +15,22 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 const EXTRA_OVERFLOW_TEXT = [/maximum context length/i, /input is too long/i];
 
 /** Set by the server when it rewrites a rejection into a plain
- *  explanation: the provider's own text, and whether Repair can still help. */
+ *  explanation: the provider's own text (absent for a held-back request),
+ *  and whether Repair can still help. */
 export interface ContextOverflowMark {
-	providerText: string;
+	providerText?: string;
 	unrecoverable?: boolean;
 }
 
-type MaybeMarked = { role?: string; stopReason?: string; errorMessage?: string; contextOverflow?: ContextOverflowMark };
+/** Set by the engine on a request it never sent because the reply would
+ *  have had no room (LH-50, agent/models.ts heldBackStream): a length
+ *  rejection for recovery, but no provider's words: it has no provider
+ *  text and states no limit to learn. */
+export interface HeldBack {
+	heldBack: true;
+}
+
+type MaybeMarked = { role?: string; stopReason?: string; errorMessage?: string; contextOverflow?: ContextOverflowMark; heldBack?: boolean };
 
 /** repairable: a length rejection Repair can act on. unrecoverable: the
  *  server already condensed what it could. null: not a length rejection. */
@@ -28,6 +38,7 @@ export function contextOverflowState(message: unknown): "repairable" | "unrecove
 	const m = message as MaybeMarked | undefined;
 	if (m?.role !== "assistant" || m.stopReason !== "error") return null;
 	if (m.contextOverflow) return m.contextOverflow.unrecoverable ? "unrecoverable" : "repairable";
+	if (m.heldBack) return "repairable";
 	const text = m.errorMessage ?? "";
 	return isContextOverflow(m as AssistantMessage) || EXTRA_OVERFLOW_TEXT.some((p) => p.test(text)) ? "repairable" : null;
 }
@@ -39,10 +50,16 @@ export function isContextOverflowText(text: string): boolean {
 	return contextOverflowState({ role: "assistant", stopReason: "error", errorMessage: text }) === "repairable";
 }
 
-/** The provider's own rejection text (never a server explanation). */
+/** The provider's own rejection text (never a server explanation, and
+ *  none for a held-back request). */
 export function overflowProviderText(message: unknown): string | undefined {
-	const m = message as MaybeMarked;
-	return m.contextOverflow?.providerText ?? m.errorMessage;
+	const m = message as MaybeMarked | undefined;
+	return m?.contextOverflow?.providerText ?? (m?.heldBack ? undefined : m?.errorMessage);
+}
+
+/** Was this request held back by the app rather than rejected by a provider? */
+export function heldBackRequest(message: unknown): boolean {
+	return (message as MaybeMarked | undefined)?.heldBack === true;
 }
 
 // The LIMIT, never the request size: Anthropic puts it second

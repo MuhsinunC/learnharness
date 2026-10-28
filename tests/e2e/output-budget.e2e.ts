@@ -24,6 +24,11 @@ const MAX_OUTPUT = 16_384;
  *  output, under the same custom 1M window. */
 const TINY = 11_548;
 const REPLY_FLOOR = 1_024;
+/** stub-s: a window large for its 1,024 max output, run at the catalog
+ *  window. It reports no usage, so the threshold measures with no anchor,
+ *  where the old trigger's estimate (chars/4, no tool declarations) and
+ *  the held-back floor's (pi-ai's chars/3.5 with them) parted most. */
+const SMALL_OUT = 32_000;
 const STUB = "openrouter";
 const SUMMARIZER = "You are the session-compaction summarizer";
 const SUMMARY = [
@@ -41,7 +46,7 @@ type Msg = {
 	role: string;
 	stopReason?: string;
 	errorMessage?: string;
-	contextOverflow?: { providerText: string; unrecoverable?: boolean };
+	contextOverflow?: { providerText?: string; unrecoverable?: boolean };
 	customType?: string;
 	details?: { notice?: string };
 };
@@ -57,13 +62,14 @@ let rejections = 0;
 /** Turn requests to reject regardless of size (the Repair case). */
 let forcedRejections = 0;
 const responder: StubResponder = (req) => {
-	const limit = req.model === "stub-t" ? TINY : LIMIT;
+	const limit = req.model === "stub-t" ? TINY : req.model === "stub-s" ? SMALL_OUT : LIMIT;
 	if (requestTokens(req) > limit || (isTurnRequest(req) && forcedRejections > 0 && forcedRejections--)) {
 		rejections++;
 		return reply.contextLength(limit);
 	}
 	if (!isTurnRequest(req)) return reply.text(SUMMARY);
 	const text = `Answering part ${lastPart(req)}. ${REPLY}`;
+	if (req.model === "stub-s") return reply.text(text, { prompt_tokens: 0, completion_tokens: 0 });
 	return reply.text(text, { prompt_tokens: inputTokens(req), completion_tokens: Math.ceil(text.length / 4) });
 };
 
@@ -79,7 +85,7 @@ before(async () => {
 		providers: [{
 			id: STUB,
 			baseUrl: stub.baseUrl,
-			models: [{ id: "stub-q", contextWindow: LIMIT, maxTokens: MAX_OUTPUT }, { id: "stub-t", contextWindow: TINY, maxTokens: 2_048 }],
+			models: [{ id: "stub-q", contextWindow: LIMIT, maxTokens: MAX_OUTPUT }, { id: "stub-t", contextWindow: TINY, maxTokens: 2_048 }, { id: "stub-s", contextWindow: SMALL_OUT, maxTokens: 1_024 }],
 		}],
 		settings: {
 			version: 1,
@@ -104,8 +110,12 @@ const isReply = (m: Msg | undefined) => m?.role === "assistant" && m.stopReason 
 const replies = (c: Chat) => c.messages.filter(isReply).length;
 const recoveryMarkers = (c: Chat) => c.messages.filter((m) => m.customType === "compaction" && m.details?.notice);
 const settingsFile = () => path.join(server.dataDir, "settings.json");
-const learned = () =>
-	(JSON.parse(fs.readFileSync(settingsFile(), "utf-8")) as { learnedContextLimits?: Record<string, number> }).learnedContextLimits?.[`${STUB}:stub-q`];
+const readSettings = () => JSON.parse(fs.readFileSync(settingsFile(), "utf-8")) as { contextWindows?: Record<string, number>; learnedContextLimits?: Record<string, number> };
+const learned = () => readSettings().learnedContextLimits?.[`${STUB}:stub-q`];
+const writeSettings = (patch: Record<string, unknown>) => fs.writeFileSync(settingsFile(), JSON.stringify({ ...readSettings(), ...patch }, null, "\t"));
+type ModelRow = { id: string; contextWindow: number; customContextWindow?: number; learnedContextLimit?: number };
+const modelRow = async (id: string) => (await server.json<{ models: ModelRow[] }>("/api/models")).models.find((m) => m.id === id);
+const errored = (c: Chat) => c.messages.filter((m) => m.role === "assistant" && m.stopReason === "error");
 
 /** A new chat, with no limit learned from an earlier case. */
 async function newChat(title: string): Promise<string> {
@@ -227,5 +237,52 @@ test("a window too small for the prompt, the tool declarations and a reply: noth
 	for (const r of sent) assert.ok(maxOutputTokens(r) >= REPLY_FLOOR, `no request leaves its reply under ${REPLY_FLOOR} tokens (max_tokens ${maxOutputTokens(r)})`);
 	const failed = c.messages.at(-1)!;
 	assert.match(failed.errorMessage!, /^This chat is still too long for stub-t, even after condensing its older part\./, "the learner sees the explanation");
-	assert.match(failed.contextOverflow!.providerText, /^Not sent: this model's maximum context length is 11548 tokens/, "the last request was held back, not sent");
+	assert.equal(failed.contextOverflow!.providerText, undefined, "the last request was held back: no provider text");
+});
+
+test("a large window with a small max output: the growing chat compacts at the threshold, and no request is held back", async () => {
+	const id = await newChat("Short replies");
+	await server.json(`/api/chats/${id}/settings`, { method: "PUT", body: { model: { provider: STUB, id: "stub-s" } } });
+	const start = stub.requests.length;
+	const turns = 14;
+	let c = await chat(id);
+	for (let part = 1; part <= turns; part++) c = await turn(id, `Part ${part}: my next worked attempt. ${PASTE.slice(0, 4_000)}`);
+	assert.equal(rejections, 0, "the provider never rejects");
+	assert.deepEqual(errored(c).map((m) => m.errorMessage), [], "no request is held back or fails");
+	assert.equal(recoveryMarkers(c).length, 0, "no overflow recovery ran");
+	assert.ok(c.messages.some((m) => m.customType === "compaction" && !m.details?.notice), "the threshold compaction ran");
+	const sent = stub.requests.slice(start).filter((r) => r.model === "stub-s" && isTurnRequest(r));
+	assert.equal(sent.length, turns, "every turn went out once");
+	for (const r of sent) assert.equal(maxOutputTokens(r), 1_024, "every reply keeps the model's whole max output");
+});
+
+test("a held-back request is never learned as the provider's limit: the custom 1M window, nothing learned yet", async () => {
+	// One paste too big even for 1M is held back (the 150k threshold
+	// compacts gradual growth long before).
+	const id = await newChat("Everything at once");
+	await turn(id, paste(1));
+	const c = await turn(id, `Part 2: all my notes. ${"A derivative measures how fast a quantity changes at an instant. ".repeat(53_500)}`);
+	assert.equal(rejections, 0, "no provider rejected anything");
+	assert.ok(errored(c).length > 0 && c.messages.at(-1)?.contextOverflow, "the paste was held back and the chat explains");
+	assert.equal(learned(), undefined, "nothing learned");
+	const row = await modelRow("stub-q");
+	assert.deepEqual([row?.contextWindow, row?.learnedContextLimit], [1_000_000, undefined], "no provider limit shown");
+	assert.equal(c.messages.at(-1)!.contextOverflow!.providerText, undefined, "no provider text");
+});
+
+test("a held-back request is never learned as the provider's limit: a custom window below a real learned limit", async () => {
+	const custom = readSettings().contextWindows;
+	const id = await newChat("A smaller window");
+	writeSettings({ contextWindows: { ...custom, [`${STUB}:stub-q`]: 20_000 }, learnedContextLimits: { [`${STUB}:stub-q`]: LIMIT } });
+	try {
+		await turn(id, paste(1));
+		const c = await turn(id, `Part 2: all my notes. ${"A derivative measures how fast a quantity changes at an instant. ".repeat(800)}`);
+		assert.equal(rejections, 0, "no provider rejected anything");
+		assert.ok(errored(c).length > 0, "the paste was held back at the custom window");
+		assert.equal(learned(), LIMIT, "the real limit survives");
+		const row = await modelRow("stub-q");
+		assert.deepEqual([row?.contextWindow, row?.customContextWindow, row?.learnedContextLimit], [20_000, 20_000, LIMIT]);
+	} finally {
+		writeSettings({ contextWindows: custom });
+	}
 });

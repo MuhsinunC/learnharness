@@ -21,7 +21,8 @@
  * judged as the wire request will be (LH-50): the system prompt and tool
  * declarations, the marker and kept tail, and the reply's room, all at
  * pi-ai's own chars/3.5 — never the usage anchor, which describes the
- * last request that SUCCEEDED.
+ * last request that SUCCEEDED. A request the app held back (LH-50) is an
+ * overflow too, but no provider's statement: nothing is learned from it.
  */
 
 import {
@@ -35,6 +36,7 @@ import {
 	derivedNodeStatus,
 	estimateMessageTokens,
 	estimateTokens,
+	heldBackRequest,
 	keptIndexFor,
 	newCompactionMarker,
 	overflowProviderText,
@@ -46,12 +48,12 @@ import {
 	type LhMessage,
 	type LhUserMessage,
 } from "../core/index.ts";
-import { estimateTextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { emit } from "../core/events.ts";
 import type { ChatStore } from "../core/ports.ts";
 import {
 	heuristicContextTokens,
 	outputReserveTokens,
+	requestPrefixTokens,
 	saveCompactionMarker,
 	sessionKind,
 	subagentSummarizer,
@@ -59,7 +61,7 @@ import {
 	summarySpan,
 	type CompactionDeps,
 } from "./compaction.ts";
-import type { PiEngine } from "../agent/models.ts";
+import { CONTEXT_SAFETY_TOKENS, replyFloorTokens, type PiEngine } from "../agent/models.ts";
 import { stores } from "./stores.ts";
 import { updateSettings } from "../store/settings.ts";
 
@@ -71,9 +73,10 @@ function learnedContextLimit(modelId: string): number | undefined {
 }
 
 /** Remember the limit the chat's newest rejection states for its model —
- *  its own settings key, never the user's window. */
+ *  its own settings key, never the user's window. A held-back request
+ *  has no provider text, so it never teaches a limit. */
 export function learnStatedLimit(model: { provider: string; id: string }, messages: readonly LhMessage[]): void {
-	const stated = reportedContextLimit(lastOverflowText(messages));
+	const stated = reportedContextLimit(overflowProviderText(lastOverflow(messages)));
 	const modelId = `${model.provider}:${model.id}`;
 	if (!stated || learnedContextLimit(modelId) === stated) return;
 	updateSettings((record) => ({ ...record, learnedContextLimits: { ...record.learnedContextLimits, [modelId]: stated } }));
@@ -96,17 +99,6 @@ export function contextWindowFor(engine: PiEngine): number | undefined {
  *  where this module's estimates count chars/4. */
 const WIRE_CHARS_PER_TOKEN = 3.5;
 
-const g = globalThis as typeof globalThis & { __lhRequestPrefix?: Map<string, number> };
-const requestPrefixes = () => (g.__lhRequestPrefix ??= new Map());
-
-/** Remember what every request of this chat carries before its messages:
- *  the last turn's system prompt and tool declarations, in wire tokens.
- *  In memory; a chat with no turn since boot falls back to its composed
- *  prompt alone. */
-export function noteRequestPrefix(chatId: string, systemPrompt: string, tools: readonly unknown[]): void {
-	requestPrefixes().set(chatId, estimateTextTokens(systemPrompt) + estimateTextTokens(JSON.stringify(tools)));
-}
-
 /** Per-line cap for the learner's dropped lines in the fallback marker. */
 const FALLBACK_LINE_CHARS = 300;
 
@@ -123,20 +115,23 @@ export function recoveryAttempted(messages: readonly LhMessage[]): boolean {
 		.some((m) => m.role === "custom" && m.customType === "compaction" && !!(m.details as Partial<CompactionDetails>).notice);
 }
 
-/** The provider's text of the newest length rejection (it may state the real limit). */
-function lastOverflowText(messages: readonly LhMessage[]): string | undefined {
+/** The newest length rejection (its provider text may state the real limit). */
+function lastOverflow(messages: readonly LhMessage[]): LhMessage | undefined {
 	for (let i = messages.length - 1; i >= 0; i--) {
-		if (contextOverflowState(messages[i]) !== null) return overflowProviderText(messages[i]);
+		if (contextOverflowState(messages[i]) !== null) return messages[i];
 	}
 	return undefined;
 }
 
-/** The window to fit: the limit the rejection states; otherwise the
- *  known window, but never more than half the request that just failed
- *  (the known window is exactly what may be wrong). */
-export function recoveryWindowTokens(errorText: string | undefined, knownWindowTokens: number | undefined, failedRequestTokens: number): number {
-	const stated = reportedContextLimit(errorText);
+/** The window to fit: the limit the rejection states; for a held-back
+ *  request, the known window it was measured against (no provider
+ *  contradicted it); otherwise the known window, but never more than
+ *  half the request that just failed (the known window is exactly what
+ *  may be wrong). */
+export function recoveryWindowTokens(overflow: LhMessage | undefined, knownWindowTokens: number | undefined, failedRequestTokens: number): number {
+	const stated = reportedContextLimit(overflowProviderText(overflow));
 	if (stated) return stated;
+	if (knownWindowTokens !== undefined && heldBackRequest(overflow)) return knownWindowTokens;
 	return Math.max(1, Math.min(knownWindowTokens ?? Infinity, Math.floor(failedRequestTokens / 2)));
 }
 
@@ -187,6 +182,10 @@ export interface RecoveryDeps extends Omit<CompactionDeps, "thresholdTokens" | "
 	 *  window less the reply's room (outputReserveTokens) and the system
 	 *  prompt and tool declarations. At most 0 when those leave no room. */
 	fitTokens: number;
+	/** What they may fill before the request is held back: the window
+	 *  less pi-ai's margin, the least reply room (replyFloorTokens) and
+	 *  the prompt and declarations. At most 0 when nothing can be sent. */
+	floorFitTokens: number;
 	/** The rejected request's estimate (chars/4), measured once. */
 	failedRequestTokens: number;
 	/** The learner-facing line the moment divider shows. */
@@ -204,8 +203,8 @@ export function recoveryDeps(chatStore: ChatStore, record: ChatRecord, engine: P
 	const kind = sessionKind(record);
 	const systemPromptTokens = systemPromptTokensFor(kind);
 	const failedRequestTokens = heuristicContextTokens(record.messages, systemPromptTokens);
-	const windowTokens = recoveryWindowTokens(lastOverflowText(record.messages), contextWindowFor(engine), failedRequestTokens);
-	const prefixTokens = requestPrefixes().get(record.id) ?? Math.ceil((systemPromptTokens * 4) / WIRE_CHARS_PER_TOKEN);
+	const windowTokens = recoveryWindowTokens(lastOverflow(record.messages), contextWindowFor(engine), failedRequestTokens);
+	const prefixTokens = requestPrefixTokens(record.id, systemPromptTokens);
 	return {
 		chatStore,
 		engine,
@@ -215,6 +214,7 @@ export function recoveryDeps(chatStore: ChatStore, record: ChatRecord, engine: P
 		failedRequestTokens,
 		windowTokens,
 		fitTokens: windowTokens - outputReserveTokens(windowTokens, engine.model.maxTokens) - prefixTokens,
+		floorFitTokens: windowTokens - CONTEXT_SAFETY_TOKENS - replyFloorTokens(engine.model.maxTokens) - prefixTokens,
 		notice,
 	};
 }
@@ -228,16 +228,17 @@ export const overflowExplanation = {
 };
 
 /** Rewrite the chat's trailing rejection into a plain explanation, built
- *  from the provider's own text every time (never nested). Unrecoverable
- *  marks it so Repair is no longer offered. */
+ *  from the provider's own text every time (never nested; a held-back
+ *  request has none). Unrecoverable marks it so Repair is no longer
+ *  offered. */
 export function explainOverflow(chatStore: ChatStore, chatId: string, explanation: string, unrecoverable: boolean): void {
 	const record = chatStore.getChat(chatId);
 	const failed = record?.messages.at(-1);
 	if (!record || failed?.role !== "assistant" || contextOverflowState(failed) === null) return;
-	const providerText = overflowProviderText(failed) ?? "";
+	const providerText = overflowProviderText(failed);
 	Object.assign(failed, {
-		errorMessage: `${explanation} (${providerText})`,
-		contextOverflow: unrecoverable ? { providerText, unrecoverable: true } : { providerText },
+		errorMessage: providerText === undefined ? explanation : `${explanation} (${providerText})`,
+		contextOverflow: { ...(providerText !== undefined ? { providerText } : {}), ...(unrecoverable ? { unrecoverable: true } : {}) },
 	});
 	chatStore.saveMessages(chatId, record.messages);
 	emit("record-changed", { chatId });
@@ -262,11 +263,11 @@ function cutWithin(messages: readonly LhMessage[]) {
 
 /** Can a recovery still shrink this chat's request (LH-50)? Something
  *  older is left to condense, and the system prompt and tool declarations
- *  leave room under the window. A failed retry alone is not hopeless — it
- *  may have overrun an output budget — so only a chat where this is false
- *  is marked unrecoverable. */
+ *  leave a request that is not held back. A failed retry alone is not
+ *  hopeless — it may have overrun an output budget — so only a chat
+ *  where this is false is marked unrecoverable. */
 export function condensable(deps: RecoveryDeps, messages: readonly LhMessage[]): boolean {
-	return deps.fitTokens > 0 && cutWithin(messages).cutFor(1) !== null;
+	return deps.floorFitTokens > 0 && cutWithin(messages).cutFor(1) !== null;
 }
 
 /** One recovery compaction. The caller holds the compaction gate
@@ -277,8 +278,10 @@ export async function recoverContext(deps: RecoveryDeps, chatId: string): Promis
 	const messages = record.messages;
 	const { base, previous, floor, cutFor } = cutWithin(messages);
 
-	// The marker and kept tail's share, in this module's chars/4 tokens.
-	const budget = Math.max(Math.floor((deps.fitTokens * WIRE_CHARS_PER_TOKEN) / 4), 0);
+	// The marker and kept tail's share, in this module's chars/4 tokens:
+	// the full reply's room when it exists, else what is not held back.
+	const fit = deps.fitTokens > 0 ? deps.fitTokens : deps.floorFitTokens;
+	const budget = Math.max(Math.floor((fit * WIRE_CHARS_PER_TOKEN) / 4), 0);
 	const topic = lessonTopic(record);
 	const markerAt = (cut: number, body: string) => {
 		const details: CompactionDetails = {
