@@ -6,7 +6,7 @@ import {
 	type AgentBuildOptions,
 	type TeachingAgent,
 } from "../agent/teacher-agent.ts";
-import { piEngineForSpec, type PiEngine } from "../agent/models.ts";
+import { piEngineForSpec, type PiEngine, type ResolvedModelSpec } from "../agent/models.ts";
 import { connectionBackgroundAllowed, connectionScopeCurrent, isSubscriptionProvider } from "../agent/subscription-connections.ts";
 import { nativeSubscriptionError } from "../agent/subscription-stream.ts";
 import { chatGPTStreamError } from "../agent/chatgpt-stream.ts";
@@ -40,6 +40,7 @@ import {
 	resolveConversationSpec,
 	resolveRoleSpec,
 } from "../core/settings-resolution.ts";
+import { contextWindowKey } from "../core/context-windows.ts";
 import { ProviderKeyMissingError, ROLE_SLOT, modelsNotConfigured, providerKeyMissing as providerKeyMissingEnvelope, type ProviderKeyMissing } from "../core/settings.ts";
 import { beginTurn, endTurn } from "./turn-liveness.ts";
 import { applyParkedDismissal } from "./dismissal-park.ts";
@@ -48,7 +49,7 @@ import { persistTurn, triggerExtraction, TurnPersistenceError } from "./turn-ser
 import { hasProbeDone, danglingQuestionOf } from "../core/native-messages.ts";
 import { composeInstructions } from "../agent/teacher-agent.ts";
 import { ensureCompacted, kickCompaction, effectiveThresholdTokens } from "./compaction.ts";
-import { catalogContextLimits, refreshConnectionCatalog } from "./model-catalog.ts";
+import { refreshConnectionCatalog } from "./model-catalog.ts";
 import { emit } from "../core/events.ts";
 import { settledTurnResponse } from "./turn-runs.ts";
 import { asAgentMessages } from "../core/native-messages.ts";
@@ -148,11 +149,21 @@ setTurnRunner(async (chatId, input) => {
  *  flows through to the per-need refusal gates (runner/extraction), read
  *  FRESH so a settings PUT between dispatch and spawn lands. */
 function resolveEngine(role: ModelRole): PiEngine | undefined {
-	const spec = resolveRoleSpec(role, stores.settingsStore.readSettings());
+	const record = stores.settingsStore.readSettings();
+	const spec = resolveRoleSpec(role, record);
 	if (spec && !providerKeyPresent(spec.provider)) {
 		throw new ProviderKeyMissingError(spec.provider, [ROLE_SLOT[role]]);
 	}
-	return spec ? piEngineForSpec(spec) : undefined;
+	return spec ? piEngineForSpec(withContextWindow(spec, record?.contextWindows)) : undefined;
+}
+
+/** The spec with its pair's custom context window (LH-38), from the same
+ *  settings read that resolved it — every engine built here carries the
+ *  window, so the engine model, pi-ai's max-tokens clamp and the
+ *  compaction trigger agree. */
+function withContextWindow(spec: ResolvedModelSpec, windows: Record<string, number> | undefined): ResolvedModelSpec {
+	const contextWindow = windows?.[contextWindowKey(spec.provider, spec.id)];
+	return contextWindow === undefined ? spec : { ...spec, contextWindow };
 }
 
 setJobRespawn((jobId) => void jobRunner.runJob(jobId));
@@ -217,12 +228,13 @@ export async function handleChatInput(
 	// write-ahead persist (nothing durable changes), and every downstream
 	// resolution (jobs/extraction gate per-need on their own tiers).
 	const effective = effectiveSettings();
-	const conversation = resolveConversationSpec(record.settings, effective.models.strong);
-	if (!conversation) {
+	const resolved = resolveConversationSpec(record.settings, effective.models.strong);
+	if (!resolved) {
 		const envelope = modelsNotConfigured(["strong"]);
 		console.info(`[chat ${chatId}] turn refused — ${JSON.stringify(envelope)}`);
 		return Response.json(envelope, { status: 503 });
 	}
+	const conversation = withContextWindow(resolved, effective.contextWindows);
 
 	// THE KEY-PRESENCE GATE (provider-key interlude, owner, 2026-09-25): a
 	// pinned model is not enough — its PROVIDER's key must be present, or
@@ -274,7 +286,7 @@ export async function handleChatInput(
 			kind: record.kind === "practice" ? "practice" : hasProbeDone(record.messages) ? "teach" : "probe",
 			thresholdTokens: effectiveThresholdTokens(
 				effective.compaction?.thresholdTokens,
-				catalogContextLimits().get(modelIdForCompaction),
+				conversationEngine.model.contextWindow,
 			),
 			systemPromptTokens: Math.ceil(composeInstructions(record.kind === "practice" ? "practice" : "teacher").length / 4),
 		},
@@ -637,7 +649,7 @@ export async function handleChatInput(
 						const spec = resolveConversationSpec(stores.chatStore.getChat(chatId)?.settings, fresh.models.strong);
 						if (!spec || !connectionBackgroundAllowed(spec.provider)) return null;
 						let kickEngine: PiEngine;
-						try { kickEngine = piEngineForSpec(spec, true); } catch { return null; }
+						try { kickEngine = piEngineForSpec(withContextWindow(spec, fresh.contextWindows), true); } catch { return null; }
 						const kickModelId = `${kickEngine.model.provider}:${kickEngine.model.id}`;
 						const freshRecord = stores.chatStore.getChat(chatId);
 						if (!freshRecord) return null;
@@ -649,7 +661,7 @@ export async function handleChatInput(
 							kind: freshRecord.kind === "practice" ? "practice" : hasProbeDone(freshRecord.messages) ? "teach" : "probe",
 							thresholdTokens: effectiveThresholdTokens(
 								fresh.compaction?.thresholdTokens,
-								catalogContextLimits().get(kickModelId),
+								kickEngine.model.contextWindow,
 							),
 							systemPromptTokens: Math.ceil(composeInstructions(freshRecord.kind === "practice" ? "practice" : "teacher").length / 4),
 						};

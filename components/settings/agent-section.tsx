@@ -65,6 +65,7 @@ import {
 	type AgentSettings,
 	type CompactionSettings,
 	type GraphSettings,
+	type ModelCatalogEntry,
 	type ModelSlotName,
 	type ModelsSettings,
 } from "@/src/core";
@@ -75,6 +76,7 @@ import { SettingsGroup, SettingsRow, SettingsMenuTrigger, Toggle, CommitInput } 
 import { ModelMenuList, ThinkingMenuList } from "./model-menu";
 import { ChatGPTBackgroundAccess } from "./chatgpt-connection";
 import { NativeSubscriptionBackgroundAccess } from "./subscription-connections";
+import { ContextWindowField, contextWindowCaption } from "./context-window-field";
 
 /** One slot's display identity — the tier's roster as the row hint rides
  *  with the resolved default (owner: the hint ALWAYS names the default). */
@@ -578,6 +580,13 @@ export function AgentSection({
 		compaction === undefined ? null : { version: 1, compaction },
 	).compaction;
 
+	const contextWindowEntries: ModelCatalogEntry[] = [];
+	for (const slot of MODEL_SLOTS) {
+		const coord = models?.[slot]?.model ?? slots?.[slot]?.model;
+		const entry = coord && catalog?.find((m) => m.id === coord.id && m.provider === coord.provider);
+		if (entry && !contextWindowEntries.includes(entry)) contextWindowEntries.push(entry);
+	}
+
 	return (
 		<>
 			<SettingsGroup label="Models" testid="group-models">
@@ -848,6 +857,19 @@ export function AgentSection({
 						}}
 					/>
 				</SettingsRow>
+				{/* One row per distinct slot model (LH-38): each (provider,
+				    model) pair keeps its own window, so switching a slot's
+				    model shows that model's value. */}
+				{contextWindowEntries.map((entry) => (
+					<SettingsRow
+						key={`${entry.provider}:${entry.id}`}
+						label={`Context window · ${prettyModel(entry.id)}`}
+						hint={contextWindowCaption(entry)}
+						testid={`context-window-row-${entry.provider}:${entry.id}`}
+					>
+						<ContextWindowField key={`${entry.provider}:${entry.id}:${entry.contextWindow}`} entry={entry} />
+					</SettingsRow>
+				))}
 			</SettingsGroup>
 
 			<SettingsGroup label="System prompts" testid="group-prompts">

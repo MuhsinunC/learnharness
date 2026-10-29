@@ -19,6 +19,7 @@ export { readRenderSettings, writeRenderSettings } from "../store/render-setting
 export {
 	readSettings as readSettingsRecord,
 	writeSettings as writeSettingsRecord,
+	updateSettings as updateSettingsRecord,
 	settingsStore,
 } from "../store/settings.ts";
 export { promptOverrides } from "../store/prompt-overrides.ts";

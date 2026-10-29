@@ -250,7 +250,7 @@ for (const source of ["none", "file", "env"] as const) test(`Language is below t
 test("the shared model menu preserves ranking, provider identity, keyboard clamping, and row content", async () => {
 	const f = await fixture();
 	const model = (id: string, provider: string): ModelCatalogEntry => ({
-		id, provider, name: `Model ${id}`, contextWindow: 32000, maxTokens: 4096,
+		id, provider, name: `Model ${id}`, contextWindow: 32000, defaultContextWindow: 32000, maxContextWindow: 32000, maxTokens: 4096,
 		cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
 		input: ["text"], reasoning: false, supportedLevels: [],
 	});

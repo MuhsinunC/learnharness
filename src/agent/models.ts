@@ -124,6 +124,10 @@ export interface ResolvedModelSpec {
 	provider: string;
 	id: string;
 	thinkingLevel?: ThinkingLevel;
+	/** The user's custom context window for this pair (LH-38), resolved by
+	 *  the server with the spec; unset = the catalog window. pi-ai clamps
+	 *  maxTokens to model.contextWindow, so the engine's model carries it. */
+	contextWindow?: number;
 }
 
 /** The first entry of the baked default order the model supports (owner,
@@ -197,11 +201,12 @@ export function piEngineForSpec(spec: ResolvedModelSpec, background: boolean | (
 	const routing = spec.provider === "openrouter" ? openRouterRouting(spec.id) : undefined;
 	const cap = maxOutputTokens();
 	const clamp = cap !== undefined && catalogModel.maxTokens > cap;
-	const model = routing || clamp
+	const model = routing || clamp || spec.contextWindow
 		? {
 			...catalogModel,
 			...(routing ? { compat: { ...catalogModel.compat, openRouterRouting: routing } } : {}),
 			...(clamp ? { maxTokens: cap } : {}),
+			...(spec.contextWindow ? { contextWindow: spec.contextWindow } : {}),
 		}
 		: catalogModel;
 	// UNSET level → the baked default order (first entry the model

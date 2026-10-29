@@ -49,7 +49,8 @@ export function nativeSubscriptionStream(provider: Provider, background: () => b
 				if (Object.keys(options?.headers ?? {}).some((key) => authKeys.has(key.toLowerCase()))) throw new Error("Authorization override forbidden");
 				const nativeModel = provider.getModels().find((model) => model.id === logicalModel.id && model.api === logicalModel.api);
 				if (!nativeModel) throw new Error("Native model unavailable");
-				const transport = { ...nativeModel, ...(auth.baseUrl ? { baseUrl: auth.baseUrl } : {}) };
+				// The logical model carries the user's context window (LH-38) — pi-ai's maxTokens clamp reads it.
+				const transport = { ...nativeModel, contextWindow: logicalModel.contextWindow, ...(auth.baseUrl ? { baseUrl: auth.baseUrl } : {}) };
 				const fetch = options?.fetch ?? globalThis.fetch;
 				const source = provider.streamSimple(transport, subscriptionHistory(normalizeContext(context), logicalModel, nativeId), {
 					...options, apiKey: auth.apiKey, headers: { ...options?.headers, ...auth.headers }, signal, maxRetries: 0,
