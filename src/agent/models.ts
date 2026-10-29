@@ -205,12 +205,30 @@ export const CONTEXT_SAFETY_TOKENS = 4096;
  *  or the model's whole max output when that is smaller. */
 export const replyFloorTokens = (maxTokens: number) => Math.min(1024, maxTokens);
 
-/** The reply room pi-ai's max-tokens clamp leaves this request:
- *  window − its estimate of the context (system prompt, tool
- *  declarations, messages) − its safety margin. */
-function replyRoomTokens(model: Model<Api>, context: Context): number {
-	if (!(model.contextWindow > 0)) return Infinity;
-	return model.contextWindow - estimateContextTokens(normalizeContext(context)).tokens - CONTEXT_SAFETY_TOKENS;
+/** How much more than pi-ai's estimate a provider counts against the
+ *  window before it accepts a request (LH-54). OpenRouter's pre-flight
+ *  count ran about 1.18x the tokens it billed, and billed matched pi's
+ *  estimate (OB-0646 live check, qwen3-14b), so its margin must grow
+ *  with the input; 1.2 leaves a little headroom. A provider not listed
+ *  has shown no overcount and keeps pi-ai's flat margin. */
+const PREFLIGHT_OVERCOUNT: Partial<Record<string, number>> = { openrouter: 1.2 };
+
+/** The margin a request leaves under the window: pi-ai's flat 4,096, or
+ *  the provider's overcount of the estimate when that is larger. */
+function contextMarginTokens(provider: string, estimate: number): number {
+	const overcount = PREFLIGHT_OVERCOUNT[provider];
+	return overcount ? Math.max(CONTEXT_SAFETY_TOKENS, Math.ceil(estimate * (overcount - 1))) : CONTEXT_SAFETY_TOKENS;
+}
+
+/** The reply room this request goes out with: window − pi-ai's estimate
+ *  of the context (system prompt, tool declarations, messages) − the
+ *  margin (contextMarginTokens). `extraMargin` is what that margin adds
+ *  to pi-ai's own, which the stream passes on as a smaller window. */
+function replyRoom(model: Model<Api>, context: Context): { room: number; extraMargin: number } {
+	if (!(model.contextWindow > 0)) return { room: Infinity, extraMargin: 0 };
+	const estimate = estimateContextTokens(normalizeContext(context)).tokens;
+	const margin = contextMarginTokens(model.provider, estimate);
+	return { room: model.contextWindow - estimate - margin, extraMargin: margin - CONTEXT_SAFETY_TOKENS };
 }
 
 /** A request whose reply would be cut off silently is held back as a
@@ -277,10 +295,14 @@ export function piEngineForSpec(spec: ResolvedModelSpec, background: boolean | (
 			const streamModel = model !== catalogModel && matches ? model
 				: cap !== undefined && !matches && requestModel.maxTokens > cap
 					? { ...requestModel, maxTokens: cap } : requestModel;
-			const room = replyRoomTokens(streamModel, context);
+			const { room, extraMargin } = replyRoom(streamModel, context);
 			if (room < replyFloorTokens(streamModel.maxTokens)) return heldBackStream(streamModel, room, lifecycle);
 			const outputCeiling = cap === undefined ? undefined : Math.min(streamModel.maxTokens, cap);
-			return stream(streamModel, context, {
+			// pi-ai's margin is fixed: every API's max-tokens clamp (thinking
+			// budgets included) reads the window, so a larger margin goes
+			// through a window that much smaller.
+			const sentModel = extraMargin > 0 ? { ...streamModel, contextWindow: streamModel.contextWindow - extraMargin } : streamModel;
+			return stream(sentModel, context, {
 				...options,
 				...(outputCeiling !== undefined && options?.maxTokens !== undefined && options.maxTokens > outputCeiling ? { maxTokens: outputCeiling } : {}),
 				reasoning: level === "off" ? undefined : level,

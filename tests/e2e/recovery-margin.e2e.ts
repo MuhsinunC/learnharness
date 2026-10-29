@@ -21,6 +21,11 @@ import { maxOutputTokens, reply, startStubProvider, type StubProvider, type Stub
 // its retry is still held back, and the learner gets the explanation.
 // (e) A rejected chat smaller than a quarter of the budget: its last
 // message alone is the last-resort tail, and the retry is answered.
+// (f) LH-54: once the limit is learned, every request goes out with a
+// margin that grows with its input, so none is rejected on the way to
+// the threshold compaction. pi-ai's flat 4,096 covers the 1.18x count
+// only below ~22.8k tokens: the live re-check's part 15 (23.9k) was
+// rejected 257 over and condensed.
 
 const LIMIT = 40_960;
 const MAX_OUTPUT = 16_384;
@@ -252,4 +257,25 @@ test("(e) a rejected chat whose history is smaller than a quarter of the budget 
 	assert.equal(rejections, 1);
 	assert.equal(markers(c).filter((m) => m.details?.notice).length, 1, "the last-resort cut landed");
 	assert.ok(isReply(c.messages.at(-1)), "the retry is answered, not marked unrecoverable");
+});
+
+/** Above this estimate pi-ai's flat 4,096-token margin no longer covers
+ *  the stub's 1.18x count: 0.18 × estimate > 4,096. */
+const FLAT_MARGIN_COVERS = Math.floor(4_096 / 0.18);
+
+test("(f) a learned limit and a provider that counts 1.18x: every request up to the threshold compaction is answered first time", async () => {
+	const id = await newChat("Derivatives, limit already learned");
+	writeSettings({ learnedContextLimits: { [`${STUB}:stub-q`]: LIMIT } });
+	const start = stub.requests.length;
+	let c = await chat(id);
+	for (let part = 1; markers(c).length === 0; part++) {
+		assert.ok(part <= 40, "the threshold compaction lands within 40 turns");
+		c = await turn(id, paste(part));
+		assert.ok(isReply(c.messages.at(-1)), `part ${part} was answered`);
+	}
+	const sent = stub.requests.slice(start).filter((r) => r.model === "stub-q" && isTurn(r));
+	const band = sent.filter((r) => wireTokens(r) > FLAT_MARGIN_COVERS);
+	assert.ok(band.length > 0, `some request went out above ${FLAT_MARGIN_COVERS} tokens (largest ${Math.max(...sent.map(wireTokens))})`);
+	assert.equal(rejections, 0, `no request was rejected (counted ${band.map(counted).join(", ")} against ${LIMIT})`);
+	assert.deepEqual(markers(c).map((m) => m.details?.notice), [undefined], "the threshold compaction, never a recovery");
 });
