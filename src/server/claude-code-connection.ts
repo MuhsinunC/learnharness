@@ -194,7 +194,7 @@ async function resolveExecutable(validation?: Validation) {
 	const settings = readClaudeCodeSettings();
 	if (override.rejected || process.platform === "win32") {
 		return { executable: override.path ?? settings.executable, candidates: [], version: null,
-			error: "Claude Code executable was rejected" };
+			error: `Claude Code executable was rejected${override.reason ? ` (${override.reason})` : ""}` };
 	}
 	const candidates = discoverClaudeExecutables();
 	const preferred = override.path ?? settings.executable;
