@@ -9,6 +9,7 @@ Not a chat app with a graph bolted on: sessions are probe→teach lessons, the p
 - [`docs/architecture.md`](architecture.md) is the **canonical architecture spec** — layers, the import law, the five systems, the invariants, the seam directory. (The pre-audit spec is archived under `docs/archive/` — history only.)
 - Living design doc (all decisions): [`docs/vision.md`](vision.md)
 - Build plan + wave/gate results: [`docs/plan.md`](plan.md)
+- Phone access and a later native app: [`docs/remote-access.md`](remote-access.md), [`docs/native-app-lessons.md`](native-app-lessons.md)
 
 ## Commands
 
