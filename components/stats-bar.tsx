@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { subscriptionLabels, subscriptionLabel, type SessionPricing, type TurnUsage } from "@/src/core";
+import { pageInert, subscriptionLabels, subscriptionLabel, type SessionPricing, type TurnUsage } from "@/src/core";
 import { formatTokens, formatUsd, planCostLabel, prettyModel } from "@/components/usage-format";
 import { ModelControl, catalogLimits, useModelCatalog } from "@/components/model-picker";
 
@@ -71,7 +71,7 @@ export function StatsBar({
 			if (barRef.current && !barRef.current.contains(e.target as Node)) setOpen(false);
 		};
 		const onKeyDown = (e: KeyboardEvent) => {
-			if (e.key === "Escape") {
+			if (e.key === "Escape" && !pageInert()) {
 				// THE ONE-ESC LAW (keyboard round 2026-10-06): claim — the
 				// window chain must not also act under this popover.
 				e.preventDefault();

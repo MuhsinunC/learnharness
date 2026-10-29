@@ -185,6 +185,14 @@ export function isTypingSurface(e: KeyboardEvent): boolean {
 	return target.isContentEditable;
 }
 
+/** True while the page is inert under a modal layer (the compact sessions
+ *  drawer makes <main> inert, LH-56). Focus cannot be in the page then, so
+ *  no key is the page's: its own document and window listeners return
+ *  early. Overlays above the drawer keep their keys. Guarded for SSR. */
+export function pageInert(): boolean {
+	return typeof document !== "undefined" && document.querySelector("main[inert]") !== null;
+}
+
 /** macOS styling for binding display ("⌘D", "⇧⇥", "⌥↑"). */
 export const IS_MAC =
 	typeof navigator !== "undefined" && /mac/i.test(navigator.platform || navigator.userAgent);

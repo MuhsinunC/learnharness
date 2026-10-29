@@ -21,6 +21,7 @@ import { fuzzyScore } from "@/src/core";
 import { useServerEvent, useServerResync } from "@/components/server-events";
 import type { ChatListItem } from "@/src/core";
 import { kbdEventForAction } from "@/src/core";
+import { COMPACT_QUERY } from "@/components/compact-query";
 import { notifySettingsSaved } from "@/components/settings-signal";
 import { repairChatRequest } from "@/components/repair-chat";
 
@@ -54,14 +55,15 @@ import type { UpdateState } from "@/components/settings/update-settings.tsx";
 const SIDEBAR_AUTOCLOSE = 928;
 
 /*
- * Phones and tablets (LH-44): in the browser, below Tailwind's lg
- * breakpoint the sidebar is an off-canvas DRAWER over the page: a
- * backdrop, closed on load, closed again by a backdrop tap or any
- * navigation, and never written to the persisted preference (288px
- * inline would leave a phone ~100px of page). Electron keeps the narrow
- * rule above; its window floor is 640px.
+ * Phones and tablets (LH-44): in the browser, where COMPACT_QUERY matches
+ * (components/compact-query.ts: under 640px, and under 1024px on a touch
+ * screen), the sidebar is an off-canvas DRAWER over the page: a modal with
+ * a backdrop, closed on load, closed again by Escape, a backdrop tap or any
+ * navigation, and never written to the persisted preference (288px inline
+ * would leave a phone ~100px of page). A mouse-driven window from 640px up
+ * keeps the inline sidebar and its preference (LH-56). Electron keeps the
+ * narrow rule above; its window floor is 640px.
  */
-const COMPACT_QUERY = "(width < 64rem)";
 
 // Module scope, guarded for SSR (the server has no navigator).
 const IS_ELECTRON = typeof navigator !== "undefined" && navigator.userAgent.includes("Electron");
@@ -92,11 +94,19 @@ declare global {
 	}
 }
 
-const SidebarContext = createContext<{ open: boolean; toggle: () => void; compact: boolean; closeDrawer: () => void }>({
+const SidebarContext = createContext<{
+	open: boolean;
+	toggle: () => void;
+	compact: boolean;
+	closeDrawer: () => void;
+	/** The page header's open toggle, where focus returns when the drawer closes. */
+	toggleRef: React.RefObject<HTMLButtonElement | null>;
+}>({
 	open: false,
 	toggle: () => {},
 	compact: false,
 	closeDrawer: () => {},
+	toggleRef: { current: null },
 });
 
 export function useSidebar() {
@@ -174,6 +184,13 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
 		return () => query.removeEventListener("change", onChange);
 	}, []);
 	const closeDrawer = useCallback(() => setDrawerOpen(false), []);
+	// Back and swipe-back close the drawer before the page they return to
+	// commits, so its mount-time focus does not land on an inert page.
+	useEffect(() => {
+		window.addEventListener("popstate", closeDrawer);
+		return () => window.removeEventListener("popstate", closeDrawer);
+	}, [closeDrawer]);
+	const toggleRef = useRef<HTMLButtonElement>(null);
 
 	const toggle = useCallback(() => {
 		if (compact) {
@@ -211,7 +228,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
 	}, [toggle]);
 
 	return (
-		<SidebarContext.Provider value={{ open: compact ? drawerOpen : open && !narrow, toggle, compact, closeDrawer }}>
+		<SidebarContext.Provider value={{ open: compact ? drawerOpen : open && !narrow, toggle, compact, closeDrawer, toggleRef }}>
 			{/* transitions gated on mount: no slide-in flash on page load.
 			    The side insets keep a landscape phone's notch off the page. */}
 			<div className={cn("flex h-dvh pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]", mounted && "[&_.sidebar-motion]:transition-[width,margin,opacity]")}>{children}</div>
@@ -232,7 +249,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
  *  The icon fades with the slot and is clipped by it as it collapses —
  *  no popping in either direction. */
 export function SidebarToggle() {
-	const { open: sidebarOpen, toggle, compact } = useSidebar();
+	const { open: sidebarOpen, toggle, compact, toggleRef } = useSidebar();
 	// The drawer covers the page: its toggle keeps the slot, so nothing
 	// slides under the backdrop.
 	const open = sidebarOpen && !compact;
@@ -245,6 +262,7 @@ export function SidebarToggle() {
 		>
 			<Hint label="Open sidebar" action="toggle-sidebar">
 			<Button
+				ref={toggleRef}
 				variant="ghost"
 				size="icon"
 				aria-label="Open sidebar"
@@ -446,7 +464,7 @@ export type SessionKindFilter = "teach" | "all" | "practice";
 const KIND_FILTER_KEY = "lh:session-kind-filter";
 
 function SessionsSidebar() {
-	const { open, toggle, compact, closeDrawer } = useSidebar();
+	const { open, toggle, compact, closeDrawer, toggleRef } = useSidebar();
 	const [chats, setChats] = useState<ChatListItem[] | null>(null);
 	const [query, setQuery] = useState("");
 	const [kindFilter, setKindFilter] = useState<SessionKindFilter>("all");
@@ -467,8 +485,9 @@ function SessionsSidebar() {
 	   message is sent (and that message becomes its title). Search: a
 	   client-side filter over the poll snapshot — no server round trip. */
 	const newSession = useCallback(() => {
+		closeDrawer();
 		router.push("/chat/new");
-	}, [router]);
+	}, [router, closeDrawer]);
 
 	/* FUZZY (owner round 8, 2026-10-05): subsequence match ranked by
 	 * fuzzyScore — prefix beats word-boundary beats scattered. Empty query
@@ -695,15 +714,52 @@ function SessionsSidebar() {
 		listRef.current?.children[kbdIndex]?.scrollIntoView({ block: "nearest" });
 	}, [kbdIndex]);
 
-	// The drawer closes on every navigation: opening a session, a new one, home.
+	// The drawer closes on every navigation: its own links close it in
+	// their handlers (a query-only change or the active row keeps the
+	// pathname), popstate covers Back, and this is the backstop.
 	useEffect(() => {
 		closeDrawer();
 	}, [pathname, closeDrawer]);
-	const [drawerOpened, setDrawerOpened] = useState(false);
+	const drawer = compact && open;
+	// The drawer animates only once opened, so loading closed never slides it out.
+	const [drawerUsed, setDrawerUsed] = useState(false);
+	if (drawer && !drawerUsed) setDrawerUsed(true);
+
+	/* The drawer is modal (LH-56): focus moves in on open (to the drawer
+	   itself: the search would raise the iOS keyboard, the close button its
+	   hint) and back on close, once the page behind is no longer inert: to
+	   where it was, else the toggle, else (the window widened past the
+	   drawer) the inline sidebar's close button; never to a hidden control.
+	   A page that took focus itself keeps it. */
+	const asideRef = useRef<HTMLElement>(null);
+	const closeRef = useRef<HTMLButtonElement>(null);
 	useEffect(() => {
-		if (compact && open) setDrawerOpened(true);
-	}, [compact, open]);
-	const drawerUsed = drawerOpened || (compact && open);
+		if (!drawer) return;
+		const aside = asideRef.current;
+		const opener = document.activeElement instanceof HTMLElement && !aside?.contains(document.activeElement) ? document.activeElement : null;
+		if (!aside?.contains(document.activeElement)) aside?.focus();
+		return () => {
+			const now = document.activeElement;
+			if (now && now !== document.body && !aside?.contains(now)) return;
+			const usable = (el: HTMLElement | null) => !!el?.isConnected && el !== document.body && !el.closest("[inert], [aria-hidden=true]") && el.getClientRects().length > 0;
+			[opener, toggleRef.current, closeRef.current].find(usable)?.focus();
+		};
+	}, [drawer, toggleRef]);
+	/* Escape closes the drawer, last in line (one Esc, one layer): on the
+	   window, in the bubble phase, and only when nothing claimed it. A field,
+	   the session menu, the delete dialog and the settings dialog stop its
+	   propagation; the cheat sheet and a Radix hint preventDefault, so that
+	   is read once the dispatch is over (the cheat sheet's window listener
+	   registers after this one). The page behind is inert, and its own
+	   listeners stand down (pageInert in src/core/keyboard.ts). */
+	useEffect(() => {
+		if (!drawer) return;
+		const onKeyDown = (e: KeyboardEvent) => {
+			if (e.key === "Escape") setTimeout(() => !e.defaultPrevented && closeDrawer());
+		};
+		window.addEventListener("keydown", onKeyDown);
+		return () => window.removeEventListener("keydown", onKeyDown);
+	}, [drawer, closeDrawer]);
 
 	useEffect(() => {
 		if (!open) return;
@@ -714,15 +770,19 @@ function SessionsSidebar() {
 
 	return (
 		<>
-		{compact && open && (
+		{drawer && (
 			<div data-testid="sidebar-backdrop" aria-hidden="true" onClick={closeDrawer} className="fixed inset-0 z-50 bg-background/80" />
 		)}
 		<aside
+			ref={asideRef}
 			data-testid="sidebar"
+			role={drawer ? "dialog" : undefined}
+			aria-modal={drawer || undefined}
+			aria-label={drawer ? "Sessions" : undefined}
+			tabIndex={drawer ? -1 : undefined}
 			className={cn(
-				"shrink-0 overflow-hidden",
-				// The drawer slides over the page; it animates only once
-				// opened, so loading closed never slides it out.
+				"shrink-0 overflow-hidden outline-none",
+				// The drawer slides over the page.
 				compact
 					? cn("fixed inset-y-0 left-0 z-50 w-72 max-w-[85vw] pl-[env(safe-area-inset-left)] shadow-xl", drawerUsed && "transition-[translate] duration-200", !open && "-translate-x-full")
 					: cn("sidebar-motion duration-200", open ? "w-72" : "w-0"),
@@ -754,6 +814,7 @@ function SessionsSidebar() {
 						<Link
 							href="/"
 							aria-label="Home"
+							onClick={closeDrawer}
 							className="lh-no-drag flex size-9 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50"
 						>
 							<LhMark className="size-6" />
@@ -761,6 +822,7 @@ function SessionsSidebar() {
 					</Hint>
 					<Hint label="Close sidebar" action="toggle-sidebar">
 						<Button
+							ref={closeRef}
 							variant="ghost"
 							size="icon"
 							aria-label="Close sidebar"
@@ -790,7 +852,10 @@ function SessionsSidebar() {
 					<button
 						type="button"
 						data-testid="new-session-practice"
-						onClick={() => router.push("/chat/new?mode=practice")}
+						onClick={() => {
+							closeDrawer();
+							router.push("/chat/new?mode=practice");
+						}}
 						className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-xs uppercase tracking-wider text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
 					>
 						<DumbbellIcon className="size-3" />
@@ -846,6 +911,7 @@ function SessionsSidebar() {
 									const target = shown![kbdIndex !== null && kbdIndex < n ? kbdIndex : 0];
 									if (!target) return;
 									e.preventDefault();
+									closeDrawer();
 									router.push(`/chat/${target.id}`);
 									setKbdIndex(null);
 									e.currentTarget.blur();
@@ -853,7 +919,7 @@ function SessionsSidebar() {
 							}}
 							placeholder="Search…"
 							aria-label="Search sessions"
-							className="h-6 rounded-sm border-border bg-background pl-6 text-xs placeholder:text-muted-foreground/60"
+							className="h-6 rounded-sm border-border bg-background pl-6 text-xs placeholder:text-muted-foreground/60 pointer-coarse:h-9"
 						/>
 						<SearchIcon className="pointer-events-none absolute left-1.5 top-1/2 size-3 -translate-y-1/2 text-muted-foreground/70" />
 					</span>
@@ -910,10 +976,11 @@ function SessionsSidebar() {
 									kbdSelected={i === kbdIndex}
 									onOpen={() => {
 										setKbdIndex(null);
+										closeDrawer();
 										router.push(`/chat/${c.id}`);
 									}}
 									onContextMenu={(e) => openContext(e, c)}
-									onMenu={(e) => openContext(e, c)}
+									onMenu={(e) => (ctxChatId === c.id ? setCtxChatId(null) : openContext(e, c))}
 								/>
 							),
 						)
@@ -1055,10 +1122,14 @@ function SessionsSidebar() {
 
 /** The app frame: sidebar inline + content. Rendered once in the root layout. */
 export function AppShell({ children }: { children: React.ReactNode }) {
+	const { open, compact } = useSidebar();
 	return (
 		<SettingsDialogProvider>
 			<SessionsSidebar />
-			<main className="min-w-0 flex-1">{children}</main>
+			{/* The page behind the open drawer is inert. */}
+			<main className="min-w-0 flex-1" inert={compact && open}>
+				{children}
+			</main>
 			{/* The single document-level keydown listener (keyboard wave A) —
 			    after the content in the tree, but it's window-level so order only
 			    matters for the events it dispatches, never for DOM priority. */}

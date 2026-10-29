@@ -3,13 +3,13 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import zlib from "node:zlib";
 import { after, before, test } from "node:test";
 import type { Page } from "puppeteer-core";
 import { imageDimensions, MAX_ATTACHMENT_BYTES } from "../../src/core/attachments.ts";
 import { bootServer, until, type BootOptions, type LhServer } from "./harness/server.ts";
 import { launchChrome, type HeadlessChrome } from "./harness/chrome.ts";
 import { calledTool, reply, startStubProvider, type StubProvider, type StubRequest, type StubResponder } from "./harness/stub-provider.ts";
+import { png } from "./harness/png.ts";
 
 // LH-39: images attach by paste, drop and path; every one is copied into
 // <data>/attachments; the copies outlive the originals and a restart; the
@@ -22,30 +22,6 @@ const TICKET = "lh-39";
 const LONG = "Here is a long passage of notes about the topic. ".repeat(1_700);
 const VIEW_AGAIN = "Please look at the first image again.";
 const READ_ASK = "Please read the screenshot file.";
-
-/** A valid PNG of one solid color (4×4 unless sized) — distinct bytes per color. */
-function png(r: number, g: number, b: number, width = 4, height = 4): Buffer {
-	const chunk = (type: string, data: Buffer) => {
-		const body = Buffer.concat([Buffer.from(type), data]);
-		const out = Buffer.alloc(12 + data.length);
-		out.writeUInt32BE(data.length, 0);
-		body.copy(out, 4);
-		out.writeUInt32BE(zlib.crc32(body), 8 + data.length);
-		return out;
-	};
-	const ihdr = Buffer.alloc(13);
-	ihdr.writeUInt32BE(width, 0);
-	ihdr.writeUInt32BE(height, 4);
-	ihdr.set([8, 2, 0, 0, 0], 8);
-	const row = Buffer.alloc(1 + width * 3);
-	for (let x = 0; x < width; x++) row.set([r, g, b], 1 + x * 3);
-	return Buffer.concat([
-		Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-		chunk("IHDR", ihdr),
-		chunk("IDAT", zlib.deflateSync(Buffer.concat(Array.from({ length: height }, () => row)))),
-		chunk("IEND", Buffer.alloc(0)),
-	]);
-}
 
 /** A valid 24-bit BMP of one solid color: Chrome decodes it, the store refuses it. */
 function bmp(r: number, g: number, b: number, width = 8, height = 8): Buffer {
