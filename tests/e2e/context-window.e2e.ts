@@ -457,11 +457,14 @@ test("(f) the runtime uses the pair's value: footer denominator and engine budge
 	// cleared back to the 128k default, the full 64k returns.
 	const custom = await turnBudget(id);
 	assert.ok(custom <= 60_000 - 4096, `max tokens ${custom} fits the custom 60k window`);
+	await page.evaluate(() => { (window as { lh54?: boolean }).lh54 = true; });
+	// Saved from elsewhere (another window, here the API): this page's
+	// footer follows without a reload (LH-54).
 	await server.json("/api/settings/context-windows", { method: "PUT", body: { provider: STUB, id: "stub-b", tokens: null } });
 	assert.equal(diskWindows()?.[B], undefined);
 	assert.equal(await turnBudget(id), 64_000);
-	await page.reload({ waitUntil: "domcontentloaded" });
 	await footerReads("128k");
+	assert.equal(await page.evaluate(() => (window as { lh54?: boolean }).lh54), true, "the same page, never reloaded");
 });
 
 test("(g) the composer's model picker edits a model that is in no slot", async () => {

@@ -85,6 +85,7 @@ describe("eventsResponse (the SSE seam)", () => {
 		assert.equal(res.headers.get("Cache-Control"), "no-cache, no-transform");
 		assert.equal(res.headers.get("X-Accel-Buffering"), "no");
 		const reader = res.body!.getReader();
+		assert.equal(decode((await reader.read()).value!), ": open\n\n", "the stream opens at once, before any event");
 		// The listener attached synchronously in start() — emit NOW lands
 		// as a queued chunk (no race, single-threaded).
 		emit("turn-started", { chatId: "chat_x" });
@@ -104,6 +105,7 @@ describe("eventsResponse (the SSE seam)", () => {
 		const r1 = first.body!.getReader();
 		const r2 = second.body!.getReader();
 		await r1.cancel(); // window one goes away
+		await r2.read(); // window two's opening comment
 		emit("turn-settled", { chatId: "chat_y" });
 		// window two still receives…
 		const { value } = await r2.read();
@@ -120,6 +122,7 @@ describe("eventsResponse (the SSE seam)", () => {
 		// stream — it stays live for the next event.
 		const res = eventsResponse();
 		const reader = res.body!.getReader();
+		await reader.read(); // the opening comment
 		emit("turn-settled", { chatId: "chat_z" });
 		await reader.read();
 		emit("chats-changed", {});

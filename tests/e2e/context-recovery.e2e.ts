@@ -19,6 +19,8 @@ import { maxOutputTokens, reply, startStubProvider, type StubProvider, type Stub
 // compaction's usage anchor behaves as with a real provider.
 // (j) LH-54: a limit learned in one chat reaches the footer of another
 // chat's open page on the same model, with no reload.
+// (k) LH-54: one learned while that page's event channel is down reaches
+// its footer when the channel reopens.
 
 /** The real window, in tokens: between the sixth turn's request (about
  *  116k chars of messages, plus max_tokens 2,048) and the fifth's. Room
@@ -178,9 +180,10 @@ async function newChat(title: string): Promise<string> {
 }
 
 /** Open the chat and wait until React has hydrated `selector`. */
-async function openChat(id: string, selector: string) {
+async function openChat(id: string, selector: string, beforeLoad?: string) {
 	const page = await chrome.browser.newPage();
 	await page.setViewport({ width: 1400, height: 900 });
+	if (beforeLoad) await page.evaluateOnNewDocument(beforeLoad);
 	await page.goto(`${server.url}/chat/${id}`, { waitUntil: "domcontentloaded", timeout: 180_000 });
 	await hydrated(page, selector, 120_000);
 	return page;
@@ -572,6 +575,58 @@ test("(j) a limit learned in another chat reaches the open page's footer without
 		assert.equal(settingsOnDisk().learnedContextLimits?.[`${STUB}:stub-a`], LIMIT, "the rejection taught the limit");
 		await footerReads(page, "28.5k");
 		assert.equal(await page.evaluate(() => (window as { lh54?: boolean }).lh54), true, "the same page, never reloaded");
+	} finally {
+		await page.close();
+	}
+});
+
+/** The page's EventSource behind a switch (window.lhChannel): drop()
+ *  closes the connection as a sleep or a network blip does, so what the
+ *  server sends meanwhile never arrives; reopen() connects again, which
+ *  fires the page's own open handler. A script, not a function: tsx
+ *  would wrap a nested class in its __name helper, which the page lacks. */
+const DROPPABLE_CHANNEL = `(() => {
+	const Native = window.EventSource;
+	window.EventSource = function (url, init) {
+		const listeners = [];
+		const channel = { onopen: null };
+		const connect = () => {
+			const es = new Native(url, init);
+			es.onopen = (ev) => channel.onopen && channel.onopen(ev);
+			for (const [name, cb] of listeners) es.addEventListener(name, cb);
+			return es;
+		};
+		let es = connect();
+		channel.addEventListener = (name, cb) => { listeners.push([name, cb]); es.addEventListener(name, cb); };
+		channel.close = () => es.close();
+		channel.drop = () => es.close();
+		channel.reopen = () => { es = connect(); };
+		window.lhChannel = channel;
+		return channel;
+	};
+})();`;
+
+type ChannelWindow = { lhChannel: { drop(): void; reopen(): void } };
+
+test("(k) a limit learned while the page's event channel is down reaches its footer when the channel reopens (LH-54)", async () => {
+	const open = await newChat("Open, then disconnected");
+	await grow(open, 1);
+	const other = await newChat("Elsewhere, meanwhile");
+	await grow(other, 5);
+	const page = await openChat(open, '[data-testid="composer"] textarea', DROPPABLE_CHANNEL);
+	try {
+		await footerReads(page, "1.5M");
+		const reconnects: string[] = [];
+		page.on("request", (r) => { if (new URL(r.url()).pathname === "/api/events") reconnects.push(r.url()); });
+		await page.evaluate(() => (window as unknown as ChannelWindow).lhChannel.drop());
+		await send(other, "Keep going, part 6.");
+		await settled(other, "the recovered reply elsewhere", replyAfterRecovery);
+		assert.equal(settingsOnDisk().learnedContextLimits?.[`${STUB}:stub-a`], LIMIT, "the rejection taught the limit");
+		await new Promise((r) => setTimeout(r, 2_000));
+		assert.ok((await page.$eval('[data-testid="stats-context"]', (el) => el.textContent ?? "")).trim().endsWith("/ 1.5M"), "the event never reached the page while it was down");
+		await page.evaluate(() => (window as unknown as ChannelWindow).lhChannel.reopen());
+		await footerReads(page, "28.5k");
+		assert.equal(reconnects.length, 1, "the page reconnected once, and the reconnect brought the limit");
 	} finally {
 		await page.close();
 	}

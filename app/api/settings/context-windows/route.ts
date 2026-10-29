@@ -11,13 +11,15 @@
  * can still be cleared. Either save also forgets the limit a provider
  * stated for the pair (learnedContextLimits, LH-55): the user's word on
  * the window replaces it, and a real limit is learned again only from a
- * rejection newer than the save (learnedLimitsClearedAt).
+ * rejection newer than the save (learnedLimitsClearedAt). Every save
+ * tells open windows the catalog changed (models-changed, LH-54), so
+ * their footers follow the new window.
  *
  * A static sibling of [section], so it wins the route match; the generic
  * section route has no contextWindows parser and cannot write the map.
  */
 
-import { contextWindowKey } from "@/src/core";
+import { contextWindowKey, emit } from "@/src/core";
 import { contextWindowBounds, parseContextWindowBody, updateSettingsRecord } from "@/src/server";
 
 export const dynamic = "force-dynamic";
@@ -52,5 +54,6 @@ export async function PUT(request: Request) {
 		const { [key]: _learned, ...learnedContextLimits } = record.learnedContextLimits ?? {};
 		return { ...record, contextWindows: windows, learnedContextLimits, learnedLimitsClearedAt: { ...record.learnedLimitsClearedAt, [key]: Date.now() } };
 	});
+	emit("models-changed", {});
 	return Response.json({ settings: next });
 }

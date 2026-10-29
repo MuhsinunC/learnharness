@@ -41,7 +41,8 @@ export interface ServerEvents {
 	/** Web subscription state changed. No account or credential data on the bus. */
 	"subscriptions-changed": Record<string, never>;
 	/** What /api/models answers changed server-side: a provider stated a
-	 *  context limit (LH-54). Open windows refetch the catalog, so the
+	 *  context limit, or a pair's window was saved, which also clears a
+	 *  learned limit (LH-54). Open windows refetch the catalog, so the
 	 *  footer's window follows without a reload. */
 	"models-changed": Record<string, never>;
 	/** A chat's record changed WITHOUT a turn (the silent dismissal write).
