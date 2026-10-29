@@ -42,9 +42,13 @@ function endTurnResult(reason: string): CallToolResult {
 	};
 }
 
-export function createToolServer(tools: Tool[], opts: { timeoutMs: number; onCall?: (toolCallId: string) => void }): {
+export function createToolServer(tools: Tool[], opts: { timeoutMs: number; onCall?: (toolCallId: string) => void; onCancel?: (toolCallId: string) => void; onRefuse?: () => void }): {
 	config: McpSdkServerConfig & { instance: McpServer };
 	closeAll: (reason: string) => void;
+	/** A live child (LH-62) settles a parked call with pi's real result; a call that has not arrived yet gets it on arrival. */
+	answer: (toolCallId: string, result: CallToolResult) => void;
+	/** True while an answer waits for a call that has not arrived. */
+	awaitsCall: (toolCallId: string) => boolean;
 	calls: string[];
 } {
 	const names = new Set<string>();
@@ -60,6 +64,8 @@ export function createToolServer(tools: Tool[], opts: { timeoutMs: number; onCal
 	const server = new McpServer({ name: MCP_SERVER_NAME, version: "1.0.0" }, { capabilities: { tools: {} } });
 	const calls: string[] = [];
 	const parked = new Set<(result: CallToolResult) => void>();
+	const parkedById = new Map<string, (result: CallToolResult) => void>();
+	const answers = new Map<string, CallToolResult>();
 	let closedResult: CallToolResult | undefined;
 
 	server.server.setRequestHandler(ListToolsRequestSchema, () => ({
@@ -72,28 +78,40 @@ export function createToolServer(tools: Tool[], opts: { timeoutMs: number; onCal
 
 	server.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
 		const name = request.params.name;
-		if (!names.has(name)) throw new Error(`Unknown tool: ${name}`);
+		// A refused call gets an error result inside Claude Code, which then runs on without pi (LH-62).
+		const refuse = (message: string) => { opts.onRefuse?.(); return new Error(message); };
+		if (!names.has(name)) throw refuse(`Unknown tool: ${name}`);
 		const toolCallId = request.params._meta?.[TOOL_USE_ID_META];
 		if (typeof toolCallId !== "string") {
-			throw new Error(`${name}: tools/call is missing _meta["${TOOL_USE_ID_META}"] — cannot pair the result with its tool call`);
+			throw refuse(`${name}: tools/call is missing _meta["${TOOL_USE_ID_META}"] — cannot pair the result with its tool call`);
 		}
 		calls.push(toolCallId);
 		opts.onCall?.(toolCallId);
 		// Park until the query closes, leaving Claude Code without a result
 		// from which it could start another request. Late calls cannot hang.
 		if (closedResult) return closedResult;
+		const answered = answers.get(toolCallId);
+		if (answered) {
+			answers.delete(toolCallId);
+			return answered;
+		}
 		return new Promise<CallToolResult>((resolve) => {
 			const settle = (result: CallToolResult) => {
 				parked.delete(settle);
+				if (parkedById.get(toolCallId) === settle) parkedById.delete(toolCallId);
 				extra.signal.removeEventListener("abort", onAbort);
 				resolve(result);
 			};
-			const onAbort = () => settle(endTurnResult("cancelled"));
+			const onAbort = () => {
+				settle(endTurnResult("cancelled"));
+				opts.onCancel?.(toolCallId);
+			};
 			if (extra.signal.aborted) {
 				onAbort();
 				return;
 			}
 			parked.add(settle);
+			parkedById.set(toolCallId, settle);
 			extra.signal.addEventListener("abort", onAbort, { once: true });
 		});
 	});
@@ -103,11 +121,22 @@ export function createToolServer(tools: Tool[], opts: { timeoutMs: number; onCal
 		closedResult = endTurnResult(reason);
 		for (const resolve of parked) resolve(closedResult);
 		parked.clear();
+		parkedById.clear();
+		answers.clear();
+	}
+
+	function answer(toolCallId: string, result: CallToolResult): void {
+		if (closedResult) return;
+		const settle = parkedById.get(toolCallId);
+		if (settle) settle(result);
+		else answers.set(toolCallId, result);
 	}
 
 	return {
 		config: { type: "sdk", name: MCP_SERVER_NAME, instance: server, timeout: opts.timeoutMs },
 		closeAll,
+		answer,
+		awaitsCall: (toolCallId) => answers.has(toolCallId),
 		calls,
 	};
 }

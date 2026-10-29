@@ -21,6 +21,8 @@ export type QueryInputs = {
 	appendPrompt: string;
 	mcpServers?: Record<string, McpServerConfig>;
 	resumeId?: string;
+	/** A live child (LH-62) runs every tool step of a conversation, so no turn cap. */
+	live?: boolean;
 };
 
 export function buildQueryOptions(inputs: QueryInputs, platform: NodeJS.Platform = process.platform): Options {
@@ -47,7 +49,7 @@ export function buildQueryOptions(inputs: QueryInputs, platform: NodeJS.Platform
 		},
 		...(inputs.effort !== undefined ? { effort: inputs.effort } : {}),
 		...(inputs.mcpServers !== undefined ? { mcpServers: inputs.mcpServers } : {}),
-		maxTurns: 1,
+		...(inputs.live ? {} : { maxTurns: 1 }),
 		persistSession: false,
 		env: buildChildEnv(process.env, inputs.endpoint, inputs.executable),
 		permissionMode: "dontAsk",
