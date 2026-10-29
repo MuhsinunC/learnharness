@@ -7,10 +7,15 @@
 // - loads `--resume` history from $HOME/.claude/projects/*/<id>.jsonl;
 // - per API request: stream events (signed thinking first when `--effort`
 //   is passed), then `message_stop`, then one trailing `assistant` frame per
-//   content block, as Claude Code does;
+//   content block, as Claude Code does; `fallback` sends the assistant
+//   frames alone, without a stop reason, as its non-streaming fallback does;
 // - runs tool calls one at a time as `tools/call` with
 //   `_meta["claudecode/toolUseId"]`, then emits the `user` tool_result echo
-//   before the next request; `claude/endTurn` or `--max-turns` end the turn;
+//   before the next request; `claude/endTurn` or `--max-turns` end the turn.
+//   `toolCall: "refused"` answers the call itself with an error, as Claude
+//   Code does for input it rejects before calling the server, and
+//   `toolCall: "no-meta"` leaves the tool-use id out of the call;
+// - the result's usage sums every request since the last user input;
 // - queues user messages that arrive mid-turn.
 // Each request (the full message list it would send) goes to the test's
 // responder, which picks the reply. This proves LearnHarness's side of the
@@ -62,6 +67,7 @@ if (resume) {
 
 let system = "";
 let server;
+let toolTimeout;
 let tools = [];
 let seq = 0;
 const waiting = new Map();
@@ -85,16 +91,18 @@ const frame = (fields) => ({ ...fields, parent_tool_use_id: null, session_id: se
 const event = (e) => out(frame({ type: "stream_event", event: e }));
 async function turn() {
 	await connected;
+	const total = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
 	for (let requests = 1; ; requests++) {
-		const body = { pid: process.pid, sessionId, resume, model: flag("--model"), effort: flag("--effort"), maxTurns, system, tools, messages: structuredClone(messages) };
+		const body = { pid: process.pid, sessionId, resume, model: flag("--model"), effort: flag("--effort"), maxTurns, system, tools, toolTimeout, messages: structuredClone(messages) };
 		const reply = await post("/request", body);
 		if (reply.hang) await new Promise(() => {});
 		const sent = JSON.stringify(messages);
 		let shared = 0;
 		while (shared < sent.length && sent[shared] === previous[shared]) shared++;
 		const usage = { input_tokens: 3, output_tokens: 5, cache_read_input_tokens: Math.floor(shared / 4), cache_creation_input_tokens: Math.ceil((sent.length - shared) / 4) };
+		for (const key of Object.keys(total)) total[key] += usage[key];
 		if (reply.error) {
-			out(frame({ type: "result", subtype: "success", is_error: true, result: reply.error, usage, stop_reason: null, num_turns: requests, duration_ms: 1, duration_api_ms: 1, total_cost_usd: 0 }));
+			out(frame({ type: "result", subtype: "success", is_error: true, result: reply.error, usage: { ...total }, stop_reason: null, num_turns: requests, duration_ms: 1, duration_api_ms: 1, total_cost_usd: 0 }));
 			return;
 		}
 		const id = `msg_stub_${process.pid}_${++ids}`;
@@ -104,8 +112,8 @@ async function turn() {
 		if (reply.text) content.push({ type: "text", text: reply.text });
 		for (const call of reply.tools ?? []) content.push({ type: "tool_use", id: `toolu_stub_${process.pid}_${++ids}`, name: `mcp__${server}__${call.name}`, input: call.arguments });
 		const stop = content.some((b) => b.type === "tool_use") ? "tool_use" : "end_turn";
-		event({ type: "message_start", message: { id, role: "assistant", content: [], usage: { ...usage, output_tokens: 1 } } });
-		content.forEach((block, index) => {
+		if (!reply.fallback) event({ type: "message_start", message: { id, role: "assistant", content: [], usage: { ...usage, output_tokens: 1 } } });
+		if (!reply.fallback) content.forEach((block, index) => {
 			if (block.type === "thinking") {
 				event({ type: "content_block_start", index, content_block: { type: "thinking", thinking: "", signature: "" } });
 				event({ type: "content_block_delta", index, delta: { type: "thinking_delta", thinking: block.thinking } });
@@ -119,19 +127,22 @@ async function turn() {
 			}
 			event({ type: "content_block_stop", index });
 		});
-		event({ type: "message_delta", delta: { stop_reason: stop }, usage });
-		event({ type: "message_stop" });
-		for (const block of content) out(frame({ type: "assistant", message: { id, role: "assistant", content: [block], stop_reason: stop, usage } }));
+		if (!reply.fallback) {
+			event({ type: "message_delta", delta: { stop_reason: stop }, usage });
+			event({ type: "message_stop" });
+		}
+		for (const block of content) out(frame({ type: "assistant", message: { id, role: "assistant", content: [block], stop_reason: reply.fallback ? null : stop, usage } }));
 		append("assistant", content);
 		previous = JSON.stringify(messages);
 		if (stop === "end_turn") {
-			out(frame({ type: "result", subtype: "success", is_error: false, result: reply.text ?? "", usage, stop_reason: "end_turn", num_turns: requests, duration_ms: 1, duration_api_ms: 1, total_cost_usd: 0 }));
+			out(frame({ type: "result", subtype: "success", is_error: false, result: reply.text ?? "", usage: { ...total }, stop_reason: "end_turn", num_turns: requests, duration_ms: 1, duration_api_ms: 1, total_cost_usd: 0 }));
 			return;
 		}
 		const results = [];
 		let endTurn = false;
 		for (const block of content.filter((b) => b.type === "tool_use")) {
-			const response = await mcp("tools/call", { name: block.name.slice(`mcp__${server}__`.length), arguments: block.input, _meta: { "claudecode/toolUseId": block.id } });
+			const response = reply.toolCall === "refused" ? { error: { message: "stub claude: input refused before the call" } }
+				: await mcp("tools/call", { name: block.name.slice(`mcp__${server}__`.length), arguments: block.input, ...(reply.toolCall === "no-meta" ? {} : { _meta: { "claudecode/toolUseId": block.id } }) });
 			const result = response.result ?? { content: [{ type: "text", text: String(response.error?.message) }], isError: true };
 			if (result._meta?.["claude/endTurn"]) endTurn = true;
 			results.push({ type: "tool_result", tool_use_id: block.id, content: result.content, is_error: result.isError === true });
@@ -139,7 +150,7 @@ async function turn() {
 		out(frame({ type: "user", message: { role: "user", content: results } }));
 		append("user", results);
 		if (endTurn || (maxTurns !== undefined && requests >= maxTurns)) {
-			out(frame({ type: "result", subtype: endTurn ? "success" : "error_max_turns", is_error: false, result: "", usage, stop_reason: null, num_turns: requests, duration_ms: 1, duration_api_ms: 1, total_cost_usd: 0 }));
+			out(frame({ type: "result", subtype: endTurn ? "success" : "error_max_turns", is_error: false, result: "", usage: { ...total }, stop_reason: null, num_turns: requests, duration_ms: 1, duration_api_ms: 1, total_cost_usd: 0 }));
 			return;
 		}
 	}
@@ -157,7 +168,7 @@ async function drain() {
 	running = false;
 }
 
-await post("/spawn", { pid: process.pid, argv, sessionId });
+await post("/spawn", { pid: process.pid, argv, sessionId, baseUrl: process.env.ANTHROPIC_BASE_URL, token: process.env.ANTHROPIC_AUTH_TOKEN });
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
 	const message = JSON.parse(line);
 	if (message.type === "control_response") {
@@ -168,6 +179,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
 		if (message.request.subtype === "initialize") {
 			system = message.request.appendSystemPrompt ?? "";
 			server = message.request.sdkMcpServers?.[0];
+			toolTimeout = message.request.sdkMcpServerConfigs?.[server]?.timeout;
 			connected = connect();
 		}
 		out({ type: "control_response", response: { subtype: "success", request_id: message.request_id, response: {} } });

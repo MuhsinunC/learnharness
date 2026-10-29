@@ -21,13 +21,15 @@ export interface StubClaudeRequest {
 	model?: string;
 	effort?: string;
 	maxTurns?: number;
+	/** The MCP tool-call timeout the SDK registered for LearnHarness's server. */
+	toolTimeout?: number;
 	/** The appended system prompt (LearnHarness's own). */
 	system: string;
 	tools: string[];
 	messages: Array<{ role: "user" | "assistant"; content: StubClaudeBlock[] }>;
 }
 export type StubClaudeReply =
-	| { text?: string; tools?: Array<{ name: string; arguments: Record<string, unknown> }> }
+	| { text?: string; tools?: Array<{ name: string; arguments: Record<string, unknown> }>; fallback?: boolean; toolCall?: "refused" | "no-meta" }
 	| { error: string }
 	| { hang: true };
 export type StubClaudeResponder = (req: StubClaudeRequest) => StubClaudeReply | Promise<StubClaudeReply>;
@@ -35,7 +37,8 @@ export type StubClaudeResponder = (req: StubClaudeRequest) => StubClaudeReply | 
 export interface StubClaude {
 	executable: string;
 	requests: StubClaudeRequest[];
-	spawns: Array<{ pid: number; argv: string[]; sessionId: string }>;
+	/** Each child's pid, argv and the endpoint address and token in its env. */
+	spawns: Array<{ pid: number; argv: string[]; sessionId: string; baseUrl?: string; token?: string }>;
 	setResponder(responder: StubClaudeResponder): void;
 	close(): Promise<void>;
 }
