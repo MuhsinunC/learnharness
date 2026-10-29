@@ -62,8 +62,10 @@ export class EventMapper {
 	private lastRateLimitWarnStep: number | null = null;
 	private lastRateLimitWarnThreshold: number | undefined;
 	redact: ((text: string) => string) | undefined;
-	/** A live child's result sums every request since its last input, so streamed usage wins (LH-62). */
+	/** A live child's result sums every request since its last input, which earlier calls already counted, so only per-request usage counts (LH-62). */
 	resultUsageSpansCalls = false;
+	/** The turn ended because Claude Code went past its tool calls with results of its own, so a live child no longer matches the transcript (LH-62). */
+	ranOn = false;
 	onToolTurnEnded: (() => void) | undefined;
 	constructor(private stream: AssistantMessageEventStream, model: Model<any>,
 		private toolNameMap: ReadonlyMap<string, string>, private logger: EventMapperLogger) {
@@ -93,22 +95,23 @@ export class EventMapper {
 		if (message.type === "stream_event") this.processStreamEvent(message);
 		else if (message.type === "assistant") this.processAssistantMessage(message);
 		else if (message.type === "result") this.finish(message);
-		else if (message.type === "user") this.endToolTurn("user frame");
+		else if (message.type === "user") this.endToolTurn("user frame", true);
 	}
 	/** lh-2h calls this once every pending tool call id seen by the mapper has a
 	 * matching parked MCP tools/call. Ends the turn so the orchestrator can close it. */
-	endToolTurn(reason: string): void {
+	endToolTurn(reason: string, ranOn = false): void {
 		if (this.terminal || !this.turnSawToolCall) return;
+		this.ranOn = ranOn;
 		this.logger.debug(`endToolTurn: ${reason}`);
 		this.endTurn(this.output.stopReason === "length" ? "length" : "toolUse");
 	}
 	finish(result: SDKMessage): void {
 		if (this.terminal) return;
 		if (result.type === "result") {
-			if (result.usage) {
+			if (result.usage && !this.resultUsageSpansCalls) {
 				const aggregate = { usage: emptyUsage() };
 				this.updateUsage(aggregate, result.usage);
-				if (!this.requests.some(r => r.finalUsage) || (!this.resultUsageSpansCalls && aggregate.usage.totalTokens > this.output.usage.totalTokens))
+				if (!this.requests.some(r => r.finalUsage) || aggregate.usage.totalTokens > this.output.usage.totalTokens)
 					this.output.usage = aggregate.usage;
 			}
 			if (result.stop_reason != null && (!this.currentRequest?.stopReason || result.stop_reason === "max_tokens"))
@@ -372,7 +375,7 @@ export class EventMapper {
 		const supersedes = (message as { supersedes?: string[] }).supersedes;
 		if (supersedes?.length) this.supersedeFrames(supersedes);
 		if (this.currentRequest?.id !== id && this.currentRequest?.fallbackTools && this.turnSawToolCall) {
-			this.endToolTurn("different assistant id");
+			this.endToolTurn("different assistant id", true);
 			return;
 		}
 		if (this.currentRequest?.id !== id) {

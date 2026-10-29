@@ -11,10 +11,11 @@ import { startStubClaude, type StubClaude, type StubClaudeReply, type StubClaude
 // real server). Each learner message reaches the same child through its
 // streaming input, and each tool result answers the parked MCP call in that
 // child, so request N+1 extends request N, as the prompt cache needs. A
-// model or effort switch, an abort, an idle timeout, a restart, a
-// compaction or an over-context recovery (LH-40) falls back to a new child
-// that imports the record's history. The stub stands in for Claude Code's
-// side of the protocol only; the live re-measure proves the real binary.
+// model, effort or endpoint-token switch, an abort, an idle timeout, a
+// restart, a compaction, an over-context recovery (LH-40) or a child that
+// runs on without pi's tool results falls back to a new child that imports
+// the record's history. The stub stands in for Claude Code's side of the
+// protocol only; the live re-measure proves the real binary.
 
 const TICKET = "lh-62";
 const PREFIX = "mcp__custom-tools__";
@@ -36,8 +37,10 @@ const SUMMARY = [
 const FILLER = "Limits describe what a function approaches. ".repeat(1400);
 const TOO_LONG = "Prompt is too long: 130000 tokens > 100000 maximum";
 const HAIKU = { provider: "claude-code", id: "claude-haiku-5-5" };
+/** Longer than the one-hour MCP call timeout LearnHarness used before. */
+const LONG_IDLE_MS = 7_200_000;
 
-type Msg = { id?: string; role: string; content: unknown; customType?: string; stopReason?: string; details?: { notice?: string } };
+type Msg = { id?: string; role: string; content: unknown; customType?: string; stopReason?: string; details?: { notice?: string }; usage?: { input: number; output: number } };
 type Chat = { messages: Msg[]; turnInFlight: boolean; compacting?: boolean };
 type Block = { type: string; text?: string; id?: string; name?: string; toolCallId?: string };
 
@@ -49,18 +52,27 @@ const learnerTexts = (r: StubClaudeRequest) =>
 const lastText = (r: StubClaudeRequest) => learnerTexts(r).at(-1) ?? "";
 const isProber = (r: StubClaudeRequest) => offers(r, "probe_done");
 const failedOnce = new Set<string>();
+/** A request whose learner text has [hold] waits here, by that text, until the test releases it. */
+const held = new Map<string, () => void>();
 
-function respond(r: StubClaudeRequest): StubClaudeReply {
+/** Markers in the learner's text pick the reply: [ls] calls a tool, [fallback] sends no stream events, [refuse] and [no-meta] break the call. */
+function respond(r: StubClaudeRequest): StubClaudeReply | Promise<StubClaudeReply> {
 	if (r.system.startsWith(SUMMARIZER)) return { text: SUMMARY };
 	const last = lastText(r);
 	if (isProber(r) && !called(r, "probe_done")) return { tools: [{ name: "probe_done", arguments: ASSESSMENT }] };
 	if (last.includes("[hang]")) return { hang: true };
+	if (last.includes("[hold]")) return new Promise((resolve) => held.set(last, () => resolve({ text: `Reply to: ${last}` })));
 	if (last.includes("[ask]") && !called(r, "ask_user_question")) return { text: "One question first.", tools: [{ name: "ask_user_question", arguments: { question: QUESTION } }] };
+	const fallback = last.includes("[fallback]");
+	if (last.includes("[ls]") && !called(r, "ls")) {
+		const toolCall = last.includes("[refuse]") ? "refused" : last.includes("[no-meta]") ? "no-meta" : undefined;
+		return { tools: [{ name: "ls", arguments: { path: "lh62-missing-dir" } }], fallback, ...(toolCall ? { toolCall } : {}) };
+	}
 	if (last.includes("[too-long]") && !failedOnce.has(last)) {
 		failedOnce.add(last);
 		return { error: TOO_LONG };
 	}
-	return { text: `Reply to: ${last}${last.includes("[long]") ? ` ${FILLER}` : ""}` };
+	return { text: `Reply to: ${last}${last.includes("[long]") ? ` ${FILLER}` : ""}`, fallback };
 }
 
 const alive = (pid: number) => {
@@ -162,7 +174,7 @@ function assertExtends(next: StubClaudeRequest, prev: StubClaudeRequest, label: 
 }
 
 describe("one live child per conversation", () => {
-	const t = harness({ LH_CLAUDE_CODE_MAX_CHILDREN: "3" });
+	const t = harness({ LH_CLAUDE_CODE_MAX_CHILDREN: "3", LH_CLAUDE_CODE_IDLE_MS: String(LONG_IDLE_MS) });
 
 	test("learner messages and tool results continue the same child, request after request", async () => {
 		await t.open("a");
@@ -189,7 +201,7 @@ describe("one live child per conversation", () => {
 
 		const record = await t.chat("a");
 		assert.deepEqual(requestTokens(turns.at(-1)!), recordTokens(record.messages.slice(0, -1)), "the child received exactly the chat record");
-		assert.match(t.h.server.log(), /claude-code: live session closed \(model, effort, prompt or tools changed\)/);
+		assert.match(t.h.server.log(), /claude-code: live session closed \(model, effort, prompt, tools or credentials changed\)/);
 	});
 
 	test("a question answered after a pause resolves the parked call in the same child", async () => {
@@ -200,6 +212,7 @@ describe("one live child per conversation", () => {
 		const posed = await t.settle("b", "the question card", (c) => JSON.stringify(c.messages.at(-1)?.content ?? "").includes("ask_user_question"));
 		const ask = (posed.messages.at(-1)!.content as Block[]).find((b) => b.type === "toolCall")!;
 		const asked = t.teacher("b").at(-1)!;
+		assert(asked.toolTimeout! > LONG_IDLE_MS, `the parked call's MCP timeout (${asked.toolTimeout}) outlasts the idle close`);
 		await new Promise((r) => setTimeout(r, 8_000)); // the learner thinks
 		assert(alive(asked.pid), "the parked child survives the pause");
 
@@ -213,6 +226,41 @@ describe("one live child per conversation", () => {
 		assert.equal(result?.tool_use_id, ask.id);
 		assert.match(JSON.stringify(result?.content), /Yes/);
 	});
+
+	test("a tool step on the non-streaming fallback continues the child and counts each request once", async () => {
+		const text = "[a] [ls] [fallback] Look quietly.";
+		const before = t.teacher("a").length;
+		await t.say("a", "[ls] [fallback] Look quietly.");
+		const [call, reply] = t.teacher("a").slice(before);
+		assert(call && reply && called(reply, "ls"), "the tool step and the reply after it");
+		assertExtends(reply, call, "the result after a quiet-window park");
+		const record = await t.chat("a");
+		const turn = record.messages.slice(record.messages.findLastIndex((m) => m.role === "user" && JSON.stringify(m.content).includes(text)) + 1);
+		const usage = turn.filter((m) => m.role === "assistant").map((m) => [m.usage?.input, m.usage?.output]);
+		assert.deepEqual(usage, [[3, 5], [3, 5]], "each call is billed its own request, not the turn's total");
+	});
+
+	/** The tool step's child gave its call a result of its own; pi's result goes to a new child that imports the record. */
+	async function ranOn(tag: string, text: string, reason: RegExp): Promise<void> {
+		await t.open(tag);
+		const before = t.teacher(tag).length, logged = t.h.server.log().length;
+		await t.say(tag, text);
+		const turn = t.teacher(tag).slice(before);
+		const call = turn[0]!, reply = turn.at(-1)!;
+		assert.notEqual(reply.pid, call.pid, "pi's result went to a new child");
+		assert.match(t.spawned(reply.pid).argv.join(" "), /--resume/);
+		assert.deepEqual(requestTokens(reply), recordTokens((await t.chat(tag)).messages.slice(0, -1)), "the new child holds the record");
+		assert.match(t.h.server.log().slice(logged), reason);
+		await until(() => !alive(call.pid), "the old child to exit", 30_000);
+	}
+	// Whether the idle child's watch or pi's next call sees Claude Code's own result first is a race; both close the child.
+	const ANSWERED_ITSELF = "Claude Code answered a tool call itself";
+	test("a child that answers a call itself after the turn ended is closed", () =>
+		ranOn("k", "[ls] [refuse] Look around.", new RegExp(`live session closed \\((idle child sent user|${ANSWERED_ITSELF})\\)`)));
+	test("a child that answers a call itself before the turn ended is closed", () =>
+		ranOn("l", "[ls] [refuse] [fallback] Look again.", /live session closed \(Claude Code ran past the tool calls\)/));
+	test("a call the tool server refuses closes the child", () =>
+		ranOn("m", "[ls] [no-meta] Once more.", new RegExp(`live session closed \\((tool call refused|${ANSWERED_ITSELF})\\)`)));
 
 	test("an effort or model switch starts a new child from the record", async () => {
 		const before = t.teacher("b").at(-1)!;
@@ -260,6 +308,22 @@ describe("one live child per conversation", () => {
 		for (let i = 1; i < c.length; i++) assertExtends(c[i]!, c[i - 1]!, `c request ${i + 1}`);
 		for (let i = 1; i < d.length; i++) assertExtends(d[i]!, d[i - 1]!, `d request ${i + 1}`);
 	});
+
+	test("a new endpoint token on the same relay starts a new child with it", async () => {
+		const relay = (token: string) => t.h.server.json("/api/claude-code", { method: "PUT", body: { mode: "endpoint", executable: t.h.claude.executable, baseUrl: "http://127.0.0.1:9", token } });
+		await relay("lh62-token-one");
+		await t.say("c", "On the relay.");
+		const first = t.teacher("c").at(-1)!;
+		assert.equal(t.spawned(first.pid).token, "lh62-token-one");
+		await relay("lh62-token-two");
+		await t.say("c", "With the new token.");
+		const second = t.teacher("c").at(-1)!;
+		assert.notEqual(second.pid, first.pid, "the old token's child is not reused");
+		assert.equal(t.spawned(second.pid).token, "lh62-token-two");
+		assert.match(t.spawned(second.pid).argv.join(" "), /--resume/);
+		assert.deepEqual(requestTokens(second), recordTokens((await t.chat("c")).messages.slice(0, -1)));
+		await until(() => !alive(first.pid), "the old token's child to exit", 30_000);
+	});
 });
 
 describe("the child cap and compaction", () => {
@@ -296,6 +360,51 @@ describe("the child cap and compaction", () => {
 		for (let i = first + 1; i < turns.length; i++) assertExtends(turns[i]!, turns[i - 1]!, `request ${i + 1} after the compaction`);
 		assert.match(t.h.server.log(), /live session closed \(history changed\)/);
 		await until(() => !alive(turns[first - 1]!.pid), "the old child to exit", 30_000);
+	});
+
+	test("an idle child yields its slot to a waiting caller only if one still waits after the gap", async () => {
+		const ask = (tag: string, text: string) => t.post(tag, { type: "text", text: `[${tag}] ${text}` });
+		const reached = (tag: string, text: string) => until(() => t.requestsOf(tag).find((r) => lastText(r) === `[${tag}] ${text}`), `the request for ${text}`, 60_000);
+		const release = (tag: string, text: string) => held.get(`[${tag}] ${text}`)!();
+		const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+		await t.open("p");
+		await t.open("q");
+		const p = ask("p", "[hold] Wait, p.");
+		await reached("p", "[hold] Wait, p.");
+		let q = ask("q", "[hold] Wait, q.");
+		const child = (await reached("q", "[hold] Wait, q.")).pid;
+		// Both slots are busy: r's first call queues.
+		t.chats.set("r", (await t.h.server.json<{ id: string }>("/api/chats", { body: { title: "r" } })).id);
+		const r = ask("r", "Teach me limits.");
+		await pause(1_500);
+		assert.equal(t.requestsOf("r").length, 0, "r waits for a slot");
+
+		// q's child goes idle while r waits, then r gives up before the gap ends.
+		release("q", "[hold] Wait, q.");
+		await (await q).arrayBuffer();
+		await t.settle("q", "q's reply", (c) => answered(c, "[q] [hold] Wait, q."));
+		const abort = await t.h.server.api("/api/activity/abort", { body: { kind: "turn", id: t.chats.get("r") } });
+		assert.equal(abort.status, 200, await abort.clone().text());
+		await (await r).arrayBuffer();
+		await pause(4_000);
+		assert(alive(child), "with no caller left waiting, q's child keeps its slot");
+		assert.doesNotMatch(t.h.server.log(), /live session closed \(slot needed\)/);
+
+		// This time r still waits when the gap ends, so q's child yields to it.
+		q = ask("q", "[hold] Again, q.");
+		await reached("q", "[hold] Again, q.");
+		const again = ask("r", "Teach me limits.");
+		await pause(1_500);
+		assert.equal(t.requestsOf("r").length, 0, "r waits for a slot again");
+		release("q", "[hold] Again, q.");
+		await (await q).arrayBuffer();
+		await until(() => !alive(child), "q's child to yield its slot", 30_000);
+		assert.match(t.h.server.log(), /live session closed \(slot needed\)/);
+		await (await again).arrayBuffer();
+		await t.settle("r", "r's reply", (c) => answered(c, "[r] Teach me limits."));
+		release("p", "[hold] Wait, p.");
+		await (await p).arrayBuffer();
+		await t.settle("p", "p's reply", (c) => answered(c, "[p] [hold] Wait, p."));
 	});
 });
 

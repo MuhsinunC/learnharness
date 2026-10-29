@@ -42,11 +42,13 @@ function endTurnResult(reason: string): CallToolResult {
 	};
 }
 
-export function createToolServer(tools: Tool[], opts: { timeoutMs: number; onCall?: (toolCallId: string) => void; onCancel?: (toolCallId: string) => void }): {
+export function createToolServer(tools: Tool[], opts: { timeoutMs: number; onCall?: (toolCallId: string) => void; onCancel?: (toolCallId: string) => void; onRefuse?: () => void }): {
 	config: McpSdkServerConfig & { instance: McpServer };
 	closeAll: (reason: string) => void;
 	/** A live child (LH-62) settles a parked call with pi's real result; a call that has not arrived yet gets it on arrival. */
 	answer: (toolCallId: string, result: CallToolResult) => void;
+	/** True while an answer waits for a call that has not arrived. */
+	awaitsCall: (toolCallId: string) => boolean;
 	calls: string[];
 } {
 	const names = new Set<string>();
@@ -76,10 +78,12 @@ export function createToolServer(tools: Tool[], opts: { timeoutMs: number; onCal
 
 	server.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
 		const name = request.params.name;
-		if (!names.has(name)) throw new Error(`Unknown tool: ${name}`);
+		// A refused call gets an error result inside Claude Code, which then runs on without pi (LH-62).
+		const refuse = (message: string) => { opts.onRefuse?.(); return new Error(message); };
+		if (!names.has(name)) throw refuse(`Unknown tool: ${name}`);
 		const toolCallId = request.params._meta?.[TOOL_USE_ID_META];
 		if (typeof toolCallId !== "string") {
-			throw new Error(`${name}: tools/call is missing _meta["${TOOL_USE_ID_META}"] — cannot pair the result with its tool call`);
+			throw refuse(`${name}: tools/call is missing _meta["${TOOL_USE_ID_META}"] — cannot pair the result with its tool call`);
 		}
 		calls.push(toolCallId);
 		opts.onCall?.(toolCallId);
@@ -132,6 +136,7 @@ export function createToolServer(tools: Tool[], opts: { timeoutMs: number; onCal
 		config: { type: "sdk", name: MCP_SERVER_NAME, instance: server, timeout: opts.timeoutMs },
 		closeAll,
 		answer,
+		awaitsCall: (toolCallId) => answers.has(toolCallId),
 		calls,
 	};
 }

@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import type { AssistantMessage, Message, ToolResultMessage, Usage, Tool } from "@earendil-works/pi-ai";
 import { normalizeContext } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
@@ -8,7 +7,7 @@ import { providerEventObserver, type ProviderEventObserver } from "../provider-e
 import type { PdfResult, PdfToolInput } from "../../core/contracts.ts";
 import { getHeadless, type HeadlessApi } from "./headless.ts";
 import { isProviderAuthError, modelCallError } from "./auth-fallback.ts";
-import { closeLiveSession } from "../claude-code/live.ts";
+import { runSession } from "../run-session.ts";
 import { pdfExtract, pdfInfo, pdfProbe, pdfSearch, type PdfSearchHit } from "./pdf-ops.ts";
 
 /**
@@ -187,7 +186,7 @@ export async function runPdfReaderAgent(
 	// BYOK (owner, 2026-09-22): the level rides the injected engine — no
 	// factory pin to consult (engine.level is the resolved/clamped value).
 	const reasoning = engine.level;
-	const sessionId = randomUUID();
+	const { id: sessionId, end: endSession } = runSession();
 	const prompt = [
 		`PDF path: ${pdfPath}`,
 		`Question (what the teacher needs from this document): ${input.question || "(no question — give a structural overview)"}`,
@@ -341,7 +340,7 @@ export async function runPdfReaderAgent(
 		const msg = err instanceof Error ? err.message : String(err);
 		return { path: pdfPath, question: input.question, brief: `PDF failed: the reader crashed — ${msg}`, pagesRead: [...read].sort((a, b) => a - b), pagesConsulted: [...consulted].sort((a, b) => a - b) };
 	} finally {
-		closeLiveSession(sessionId);
+		endSession();
 	}
 
 	// Iteration limit: deliver whatever was honestly consulted (never invention).

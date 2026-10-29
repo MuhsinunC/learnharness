@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import type { AssistantMessage, Message, Tool, ToolResultMessage, Usage } from "@earendil-works/pi-ai";
 import { normalizeContext } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
@@ -7,7 +6,7 @@ import { providerEventObserver, type ProviderEventObserver } from "../provider-e
 import type { VisualResult } from "../../core/contracts.ts";
 import { getHeadless, type HeadlessApi } from "./headless.ts";
 import { isProviderAuthError, modelCallError } from "./auth-fallback.ts";
-import { closeLiveSession } from "../claude-code/live.ts";
+import { runSession } from "../run-session.ts";
 
 /**
  * The visual-maker sub-agent (vision §2.5): authors ONE precise SVG from a
@@ -145,7 +144,7 @@ export async function runVisualMaker(input: VisualMakerInput, opts: VisualMakerO
 	// BYOK (owner, 2026-09-22): the level rides the injected engine — no
 	// factory pin to consult (engine.level is the resolved/clamped value).
 	const reasoning = engine.level;
-	const sessionId = randomUUID();
+	const { id: sessionId, end: endSession } = runSession();
 	const prompt = [
 		"Brief for ONE precise figure (from the teacher, verbatim — it is everything you know):",
 		brief,
@@ -296,7 +295,7 @@ export async function runVisualMaker(input: VisualMakerInput, opts: VisualMakerO
 		const msg = err instanceof Error ? err.message : String(err);
 		return { svg: "", notes: `FAILED: the maker crashed — ${msg}` };
 	} finally {
-		closeLiveSession(sessionId);
+		endSession();
 	}
 
 	// Iteration limit: deliver the last written SVG only if it was looked at.

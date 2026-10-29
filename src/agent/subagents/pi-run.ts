@@ -1,12 +1,11 @@
 import { Agent, type AgentEvent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage, Usage } from "@earendil-works/pi-ai";
-import { randomUUID } from "node:crypto";
 import { APP_IDENTITY, piEngineFor, type PiEngine } from "../models.ts";
 import { usageWasAdmitted } from "../subscription-request-cycle.ts";
 import { providerEventObserver } from "../provider-events.ts";
 import { modelCallError } from "./auth-fallback.ts";
 import type { ModelRole } from "../../../config.ts";
-import { closeLiveSession } from "../claude-code/live.ts";
+import { runSession } from "../run-session.ts";
 
 /**
  * The shared sub-agent runner (docs/pi-engine-swap.md §6): one helper every
@@ -66,7 +65,7 @@ export function subagentEngine(role: ModelRole, override?: PiEngine): PiEngine {
 export async function runSubagent(tools: AgentTool<any, any>[], opts: SubagentRunOptions): Promise<SubagentRunResult> {
 	const engine = subagentEngine(opts.role, opts.engine);
 	let turns = 0;
-	const sessionId = randomUUID();
+	const { id: sessionId, end: endSession } = runSession();
 	// Debug recorder (owner, 2026-10-04): raw provider events per job run.
 	const providerEvents = opts.chatId ? providerEventObserver(opts.chatId, `job:${opts.role}`) : undefined;
 	const agent = new Agent({
@@ -132,7 +131,7 @@ export async function runSubagent(tools: AgentTool<any, any>[], opts: SubagentRu
 		else await agent.continue();
 	} finally {
 		opts.abortSignal?.removeEventListener("abort", onAbort);
-		closeLiveSession(sessionId);
+		endSession();
 	}
 
 	if (aborted || opts.abortSignal?.aborted) {
