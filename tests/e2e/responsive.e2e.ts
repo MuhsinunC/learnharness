@@ -5,7 +5,7 @@ import path from "node:path";
 import { after, before, test } from "node:test";
 import type { ElementHandle, Page } from "puppeteer-core";
 import { bootServer, until, type LhServer } from "./harness/server.ts";
-import { launchChrome, type HeadlessChrome } from "./harness/chrome.ts";
+import { hydrated, launchChrome, type HeadlessChrome } from "./harness/chrome.ts";
 import { calledTool, lastToolName, reply, startStubProvider, type StubProvider, type StubRequest } from "./harness/stub-provider.ts";
 import { png } from "./harness/png.ts";
 import { COMPACT_QUERY } from "../../components/compact-query.ts";
@@ -165,10 +165,7 @@ class Walk {
 	async goto(pathname: string): Promise<void> {
 		await this.page.goto(server.url + pathname, { waitUntil: "domcontentloaded", timeout: 180_000 });
 		// Hydrated: React's handlers are on the sidebar's search input.
-		await this.page.waitForFunction(
-			() => Object.keys(document.querySelector("[data-testid=session-search]") ?? {}).some((k) => k.startsWith("__reactProps")),
-			{ timeout: 180_000 },
-		);
+		await hydrated(this.page, "[data-testid=session-search]");
 	}
 
 	async el(selector: string): Promise<ElementHandle<Element>> {

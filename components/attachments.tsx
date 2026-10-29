@@ -2,7 +2,7 @@
 
 import { useCallback, useRef, useState } from "react";
 import { XIcon } from "lucide-react";
-import { findImagePaths, IMAGES_UNSUPPORTED_CODE, MAX_ATTACHMENT_BYTES, MAX_IMAGE_EDGE, PATH_COMPUTER_ONLY, sniffImageExt, type AttachmentRef } from "@/src/core";
+import { findImagePaths, IMAGES_UNSUPPORTED_CODE, MAX_ATTACHMENT_BYTES, MAX_IMAGE_EDGE, sniffImageExt, type AttachmentRef } from "@/src/core";
 import { useSettingsSaved } from "@/components/settings-signal";
 
 /**
@@ -67,15 +67,19 @@ export async function fitImage(file: File): Promise<File> {
 	return new File([best], `${base}.${best.type === "image/jpeg" ? "jpg" : "png"}`, { type: best.type });
 }
 
-type Intake = { ref?: AttachmentRef; error?: string; refused?: boolean };
+type Intake = { ref?: AttachmentRef; error?: string; refused?: boolean; computerOnly?: boolean };
 
 /** Read a JSON refusal off a failed response. */
 async function refusalOf(res: Response | null): Promise<Intake> {
 	const json = (await res?.json().catch(() => ({}))) as { error?: string; code?: string; computerOnly?: boolean } | undefined;
-	// Only a path read is computer-only; its generic text would say "change this".
-	if (json?.computerOnly) return { error: PATH_COMPUTER_ONLY, refused: true };
-	return { error: json?.error ?? "The image could not be attached.", refused: json?.code === IMAGES_UNSUPPORTED_CODE };
+	const computerOnly = json?.computerOnly === true;
+	return { error: json?.error ?? "The image could not be attached.", refused: computerOnly || json?.code === IMAGES_UNSUPPORTED_CODE, computerOnly };
 }
+
+/** The server's refusal of path reads to this browser (a logged-in
+ *  session, LH-45). Access is fixed for the page's life, so later sends
+ *  skip the request; a model refusal is never kept, it changes with the model. */
+let pathsRefused: string | null = null;
 
 /** The composer-side state for one chat (or the new-session draft, with
  *  no chatId): pending refs, the notice line, and the intake paths. Every
@@ -145,16 +149,22 @@ export function useAttachments(chatId?: string) {
 		async (text: string): Promise<{ text: string; refs: AttachmentRef[] }> => {
 			setNotice(null);
 			const refs = [...items];
+			const hits = findImagePaths(text);
+			if (pathsRefused && hits.length > 0) {
+				setNotice(`${pathsRefused} The path was sent as text.`);
+				return { text, refs };
+			}
 			let out = text;
-			for (const hit of findImagePaths(text).reverse()) {
+			for (const hit of hits.reverse()) {
 				let intake: Intake;
 				try {
 					intake = await takePath(hit.path);
 				} catch {
 					continue;
 				}
-				const { ref, error, refused } = intake;
+				const { ref, error, refused, computerOnly } = intake;
 				if (refused) {
+					if (computerOnly) pathsRefused = error!;
 					setNotice(`${error} The path was sent as text.`);
 					break;
 				}

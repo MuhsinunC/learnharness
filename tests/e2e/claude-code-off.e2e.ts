@@ -4,7 +4,7 @@ import path from "node:path";
 import { after, before, describe, test } from "node:test";
 import type { Page } from "puppeteer-core";
 import { bootServer, until, type LhServer } from "./harness/server.ts";
-import { launchChrome, type HeadlessChrome } from "./harness/chrome.ts";
+import { hydrated as reactHydrated, launchChrome, type HeadlessChrome } from "./harness/chrome.ts";
 import { reply, startStubProvider, type StubProvider } from "./harness/stub-provider.ts";
 
 // LH-61: a Claude Code (subscription) selection that is off keeps v0.3.9's
@@ -39,12 +39,7 @@ const FIELD = '[data-testid=composer] textarea, textarea[placeholder="What do yo
 async function hydrated(page: Page, pathname: string, server: LhServer): Promise<void> {
 	await page.setViewport({ width: 1280, height: 800 });
 	await page.goto(`${server.url}${pathname}`, { waitUntil: "domcontentloaded", timeout: 180_000 });
-	await page.waitForSelector(FIELD, { timeout: 180_000 });
-	await page.waitForFunction(
-		(field) => Object.keys(document.querySelector(field)!).some((k) => k.startsWith("__reactProps")),
-		{ timeout: 180_000 },
-		FIELD,
-	);
+	await reactHydrated(page, FIELD);
 	// The model control has read the session (or the Strong slot): the send guards key on it.
 	await until(async () => {
 		const label = await page.$eval("[data-testid=stats-model]", (el) => el.textContent ?? "").catch(() => "");

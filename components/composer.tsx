@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useRef, useSyncExternalStore } from "react";
 import { ArrowRightIcon, CornerDownLeftIcon, ImageIcon, SquareIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Hint } from "@/components/ui/hint";
@@ -36,6 +36,9 @@ export function enterAction(state: {
 	if (state.nextProblem) return "next";
 	return "none";
 }
+
+/** window.lh never changes while a page lives. */
+const noSubscription = () => () => {};
 
 export function Composer({
 	busy,
@@ -83,9 +86,8 @@ export function Composer({
 }) {
 	// A browser has no image paths to type (a phone, a logged-in session):
 	// a picker is its way in (LH-45). The desktop window keeps paste, drop
-	// and paths. Post-mount, so server and client first renders agree.
-	const [picker, setPicker] = useState(false);
-	useEffect(() => setPicker(!window.lh), []);
+	// and paths. The server snapshot keeps hydration in agreement.
+	const picker = useSyncExternalStore(noSubscription, () => !window.lh, () => false);
 	const fileInput = useRef<HTMLInputElement>(null);
 	const act = () => {
 		const action = enterAction({ busy, canSend, nextProblem });
@@ -119,9 +121,11 @@ export function Composer({
 						hidden
 						data-testid="attach-image-input"
 						onChange={(e) => {
-							const images = [...(e.target.files ?? [])].filter((f) => f.type.startsWith("image/"));
+							// accept= already chose images; a photo some providers hand
+							// over with no type goes on, and the server names any it refuses.
+							const files = [...(e.target.files ?? [])];
 							e.target.value = ""; // allow re-picking the same image
-							if (images.length > 0) onFiles(images);
+							if (files.length > 0) onFiles(files);
 						}}
 					/>
 					<button
