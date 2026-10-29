@@ -28,13 +28,16 @@ export function contextWindowCaption(entry: ModelCatalogEntry): string {
  * confirmation, so the modal is the only way past it; a server refusal
  * (a stale client catalog) opens the same modal at the server's maximum.
  *
- * Callers key this per pair + stored value, so switching models shows
- * that pair's own value and a landed save resets the field.
+ * Callers key this per pair, so switching models shows that pair's own
+ * value. A stored value that changes under the field (a save landing, a
+ * late catalog load) clears a stale error but keeps an open modal and the
+ * value it confirms (LH-52): remounting on it closed the modal unasked.
  */
 export function ContextWindowField({ entry }: { entry: ModelCatalogEntry }) {
 	const stored = entry.customContextWindow === undefined ? "" : String(entry.customContextWindow);
 	const [pending, setPending] = useState<{ tokens: number; maximum: number } | null>(null);
 	const [error, setError] = useState<string | null>(null);
+	useEffect(() => setError(null), [stored]);
 
 	async function write(tokens: number | null, confirmAboveMax: boolean) {
 		setError(null);
