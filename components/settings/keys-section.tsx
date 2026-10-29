@@ -27,6 +27,7 @@ import { useEffect, useRef, useState } from "react";
 import { AUTH_KEYS, type AuthKeyStatus } from "@/src/core";
 import { SettingsGroup } from "./controls.tsx";
 import { SubscriptionConnections } from "./subscription-connections.tsx";
+import { ComputerOnlyNote, useComputerOnly } from "./remote-access.tsx";
 import { ProviderMenuList } from "./model-menu.tsx";
 import { MenuShell } from "@/components/menu-shell";
 import { notifySettingsSaved } from "@/components/settings-signal";
@@ -126,6 +127,7 @@ function KeyTableRow({
 	onSave,
 	onDelete,
 	onCancel,
+	needsPassword,
 	testid,
 }: {
 	label: string;
@@ -134,8 +136,10 @@ function KeyTableRow({
 	status: AuthKeyStatus;
 	expanded: boolean;
 	onToggle: () => void;
-	onSave: (value: string) => Promise<string | null>;
-	onDelete?: () => Promise<void>;
+	onSave: (value: string, password: string) => Promise<string | null>;
+	onDelete?: (password: string) => Promise<string | null>;
+	/** Web mode with remote access on: ask for the current password beside the key. */
+	needsPassword?: boolean;
 	/** Folds the editor (owner, fix wave: the way OUT of a paste prompt
 	 *  must be visible — Cancel beside Save/Delete, not only Esc). */
 	onCancel: () => void;
@@ -143,16 +147,27 @@ function KeyTableRow({
 }) {
 	const envOwned = status.source === "env";
 	const [value, setValue] = useState("");
+	const [password, setPassword] = useState("");
 	const [error, setError] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false);
+	const passwordMissing = !!needsPassword && !password;
 
 	async function save() {
-		if (!value.trim() || busy) return;
+		if (!value.trim() || busy || passwordMissing) return;
 		setBusy(true);
 		setError(null);
-		const err = await onSave(value);
+		const err = await onSave(value, password);
 		if (err) setError(err);
 		else setValue("");
+		setBusy(false);
+	}
+
+	async function remove() {
+		if (!onDelete || busy || passwordMissing) return;
+		setBusy(true);
+		setError(null);
+		const err = await onDelete(password);
+		if (err) setError(err);
 		setBusy(false);
 	}
 
@@ -179,10 +194,11 @@ function KeyTableRow({
 						autoFocus
 						className="h-7 min-w-0 flex-1 rounded-sm border border-border bg-background px-1.5 font-mono text-xs text-foreground outline-none placeholder:text-muted-foreground/60 focus:border-muted-foreground/50"
 					/>
+					{needsPassword && <PasswordField value={password} onChange={setPassword} disabled={busy} testid={`${testid}-password`} onEnter={() => void save()} />}
 					<button
 						type="button"
 						onClick={() => void save()}
-						disabled={busy || !value.trim()}
+						disabled={busy || !value.trim() || passwordMissing}
 						data-testid={`${testid}-save`}
 						className="shrink-0 text-xs text-foreground underline-offset-2 hover:underline disabled:text-muted-foreground/40 disabled:no-underline"
 					>
@@ -200,8 +216,8 @@ function KeyTableRow({
 					{status.present && status.source === "file" && onDelete && (
 						<button
 							type="button"
-							onClick={() => void onDelete()}
-							disabled={busy}
+							onClick={() => void remove()}
+							disabled={busy || passwordMissing}
 							data-testid={`${testid}-delete`}
 							className="shrink-0 text-xs text-muted-foreground/70 underline-offset-2 hover:text-red-500 hover:underline"
 						>
@@ -342,6 +358,10 @@ export function KeysSection({
 	/** The paste editor for a freshly chosen Add-provider target. */
 	const [adding, setAdding] = useState<ProviderKeyInfo | null>(null);
 	const [addError, setAddError] = useState<string | null>(null);
+	/** A logged-in browser in the desktop app reads key status but saves nothing (proxy.ts). */
+	const computerOnly = useComputerOnly();
+	const keysLocked = computerOnly?.keys ? computerOnly.message : null;
+	const needsPassword = !!computerOnly?.confirmKeys;
 
 	// Escape folds any open editor (unfolded row or the Add-provider paste)
 	// WITHOUT closing the dialog. Claimed at document CAPTURE phase — the
@@ -384,10 +404,13 @@ export function KeysSection({
 		if (initialRow !== undefined) setOpenRow(initialRow);
 	}, [initialRow]);
 
-	async function saveKey(id: string, value: string): Promise<string | null> {
+	/** proxy.ts reads the re-entered password (web mode, remote access on) from this header. */
+	const passwordHeader = (password: string): Record<string, string> => (password ? { "x-lh-current-password": encodeURIComponent(password) } : {});
+
+	async function saveKey(id: string, value: string, password = ""): Promise<string | null> {
 		const res = await fetch(`/api/keys/${id}`, {
 			method: "PUT",
-			headers: { "content-type": "application/json" },
+			headers: { "content-type": "application/json", ...passwordHeader(password) },
 			body: JSON.stringify({ value }),
 		});
 		if (!res.ok) {
@@ -402,10 +425,12 @@ export function KeysSection({
 		return null;
 	}
 
-	async function deleteKey(id: string): Promise<void> {
-		await fetch(`/api/keys/${id}`, { method: "DELETE" }).catch(() => undefined);
+	async function deleteKey(id: string, password = ""): Promise<string | null> {
+		const res = await fetch(`/api/keys/${id}`, { method: "DELETE", headers: passwordHeader(password) }).catch(() => null);
+		if (res && !res.ok) return ((await res.json().catch(() => ({}))) as { error?: string }).error ?? `Delete failed (${res.status})`;
 		await reload();
 		notifySettingsSaved("keys");
+		return null;
 	}
 
 	if (loading || statuses === null) {
@@ -414,8 +439,8 @@ export function KeysSection({
 
 	const { providerRows, toolRows, unknownRows, addable } = classifyKeys(statuses, providers);
 
-	async function saveNewProvider(p: ProviderKeyInfo, value: string) {
-		const err = await saveKey(p.envVar, value);
+	async function saveNewProvider(p: ProviderKeyInfo, value: string, password: string) {
+		const err = await saveKey(p.envVar, value, password);
 		if (err) setAddError(err);
 		else {
 			setAdding(null);
@@ -426,6 +451,7 @@ export function KeysSection({
 	return (
 		<>
 			<SettingsGroup label="Model API keys" testid="group-provider-keys">
+				{keysLocked && <ComputerOnlyNote testid="keys-computer-only" message={keysLocked} />}
 				{providerRows.map((status) => (
 					<KeyTableRow
 						key={status.id}
@@ -434,13 +460,14 @@ export function KeysSection({
 						status={status}
 						expanded={openRow === status.id}
 						onToggle={() => setOpenRow(openRow === status.id ? null : status.id)}
-						onSave={async (v) => {
-							const err = await saveKey(status.id, v);
+						onSave={async (v, pw) => {
+							const err = await saveKey(status.id, v, pw);
 							if (!err) setOpenRow(null); // fold on success — rest state
 							return err;
 						}}
 						onCancel={() => setOpenRow(null)}
-						onDelete={() => deleteKey(status.id)}
+						onDelete={keysLocked ? undefined : (pw) => deleteKey(status.id, pw)}
+						needsPassword={needsPassword}
 						testid={`key-${status.id.toLowerCase()}`}
 					/>
 				))}
@@ -456,7 +483,7 @@ export function KeysSection({
 				{adding && (
 					<div className="flex items-center gap-2 rounded-sm px-1 py-1.5" data-testid={`key-${adding.id}-editor`}>
 						<span className="shrink-0 font-ui text-xs text-foreground">{adding.label}</span>
-						<AddProviderEditor provider={adding} onSave={(v) => void saveNewProvider(adding, v)} onCancel={() => setAdding(null)} error={addError} />
+						<AddProviderEditor provider={adding} needsPassword={needsPassword} onSave={(v, pw) => void saveNewProvider(adding, v, pw)} onCancel={() => setAdding(null)} error={addError} />
 					</div>
 				)}
 				{unknownRows.length > 0 && <div data-testid="group-unknown-keys">
@@ -480,13 +507,14 @@ export function KeysSection({
 						status={status}
 						expanded={openRow === status.id}
 						onToggle={() => setOpenRow(openRow === status.id ? null : status.id)}
-						onSave={async (v) => {
-							const err = await saveKey(status.id, v);
+						onSave={async (v, pw) => {
+							const err = await saveKey(status.id, v, pw);
 							if (!err) setOpenRow(null);
 							return err;
 						}}
 						onCancel={() => setOpenRow(null)}
-						onDelete={() => deleteKey(status.id)}
+						onDelete={keysLocked ? undefined : (pw) => deleteKey(status.id, pw)}
+						needsPassword={needsPassword}
 						testid={`key-${status.id.toLowerCase()}`}
 					/>
 				))}
@@ -511,16 +539,20 @@ export function KeysSection({
  *  beneath the Add row until saved or cancelled. */
 function AddProviderEditor({
 	provider,
+	needsPassword,
 	onSave,
 	onCancel,
 	error,
 }: {
 	provider: ProviderKeyInfo;
-	onSave: (value: string) => void;
+	needsPassword: boolean;
+	onSave: (value: string, password: string) => void;
 	onCancel: () => void;
 	error: string | null;
 }) {
 	const [value, setValue] = useState("");
+	const [password, setPassword] = useState("");
+	const ready = !!value.trim() && (!needsPassword || !!password);
 	return (
 		<>
 			<input
@@ -528,7 +560,7 @@ function AddProviderEditor({
 				value={value}
 				onChange={(e) => setValue(e.target.value)}
 				onKeyDown={(e) => {
-					if (e.key === "Enter" && value.trim()) onSave(value);
+					if (e.key === "Enter" && ready) onSave(value, password);
 				}}
 				placeholder="Paste key…"
 				aria-label={`${provider.label} key`}
@@ -536,10 +568,11 @@ function AddProviderEditor({
 				autoFocus
 				className="h-7 min-w-0 flex-1 rounded-sm border border-border bg-background px-1.5 font-mono text-xs text-foreground outline-none placeholder:text-muted-foreground/60 focus:border-muted-foreground/50"
 			/>
+			{needsPassword && <PasswordField value={password} onChange={setPassword} testid={`key-${provider.id}-password`} onEnter={() => ready && onSave(value, password)} />}
 			<button
 				type="button"
-				onClick={() => value.trim() && onSave(value)}
-				disabled={!value.trim()}
+				onClick={() => ready && onSave(value, password)}
+				disabled={!ready}
 				data-testid={`key-${provider.id}-save`}
 				className="shrink-0 text-xs text-foreground underline-offset-2 hover:underline disabled:text-muted-foreground/40 disabled:no-underline"
 			>
@@ -559,5 +592,25 @@ function AddProviderEditor({
 				</p>
 			)}
 		</>
+	);
+}
+
+/** The current remote-access password, re-entered beside a key (web mode, remote access on). */
+function PasswordField({ value, onChange, disabled, testid, onEnter }: { value: string; onChange: (v: string) => void; disabled?: boolean; testid: string; onEnter: () => void }) {
+	return (
+		<input
+			type="password"
+			value={value}
+			onChange={(e) => onChange(e.target.value)}
+			onKeyDown={(e) => {
+				if (e.key === "Enter") onEnter();
+			}}
+			placeholder="Remote-access password"
+			aria-label="Current remote-access password"
+			autoComplete="current-password"
+			data-testid={testid}
+			disabled={disabled}
+			className="h-7 w-36 shrink-0 rounded-sm border border-border bg-background px-1.5 font-mono text-xs text-foreground outline-none placeholder:text-muted-foreground/60 focus:border-muted-foreground/50"
+		/>
 	);
 }

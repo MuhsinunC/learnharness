@@ -112,6 +112,17 @@ jobs:
           cp "$golden/graph/"* "$data/data/graph/"
           cp "$golden/settings.json" "$data/data/settings.json"
           printf 'fixture bytes\n' > "$data/nested dir/file with space"
+          # Remote access (LH-43): a login password makes the app take its fixed
+          # loopback port (3757). The record src/server/web-login.ts writes, made
+          # with the same Node scrypt; the password is CI-only dummy data.
+          node - "$data/data/web-login.json" <<'JS'
+          const { randomBytes, scryptSync } = require("node:crypto");
+          const fs = require("node:fs");
+          const salt = randomBytes(16);
+          const hash = scryptSync("ci-remote-access-dummy", salt, 32, { N: 2 ** 15, r: 8, p: 3, maxmem: 64 * 1024 * 1024 });
+          const record = { version: 1, password: { salt: salt.toString("base64"), hash: hash.toString("base64"), N: 2 ** 15, r: 8, p: 3 }, sessions: [] };
+          fs.writeFileSync(process.argv[2], JSON.stringify(record), { mode: 0o600 });
+          JS
           bash tests/fork-mac-e2e/data-manifest.sh write "$data" "$ART/data-manifest.jsonl"
       - name: Quarantine downloaded fork
         run: |
@@ -168,8 +179,27 @@ jobs:
             sleep 1
           done
           [[ $port =~ ^[0-9]+$ ]]
+          [[ $port == 3757 ]] # the seeded login password selects the fixed remote port
           [[ $(curl --max-time 20 -sSL -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/") == 200 ]]
           [[ $(curl --max-time 20 -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/api/models") == 403 ]]
+          # A phone behind `tailscale serve`: its Host and forwarding headers.
+          serve=(-H 'Host: ci-mac.example.ts.net' -H 'X-Forwarded-Host: ci-mac.example.ts.net' -H 'X-Forwarded-Proto: https'
+            -H 'X-Forwarded-For: 100.101.102.103' -H 'Tailscale-User-Login: learner@example.com')
+          curl --max-time 20 -sS "${serve[@]}" -o /dev/null -D "$RUNNER_TEMP/remote-page.txt" "http://127.0.0.1:$port/chat/new"
+          grep -Eq '^HTTP/[0-9.]+ 303' "$RUNNER_TEMP/remote-page.txt"
+          grep -iq '^location: /login?next=%2Fchat%2Fnew' "$RUNNER_TEMP/remote-page.txt"
+          curl --max-time 20 -sS "${serve[@]}" -o "$RUNNER_TEMP/remote-login-page.html" "http://127.0.0.1:$port/login"
+          grep -Fq 'type="password"' "$RUNNER_TEMP/remote-login-page.html"
+          [[ $(curl --max-time 20 -sS "${serve[@]}" -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/api/models") == 403 ]]
+          curl --max-time 60 -sS "${serve[@]}" -H 'Origin: https://ci-mac.example.ts.net' -o /dev/null -D "$RUNNER_TEMP/remote-login.txt" \
+            --data-urlencode 'password=ci-remote-access-dummy' --data-urlencode 'next=/' "http://127.0.0.1:$port/login"
+          grep -Eq '^HTTP/[0-9.]+ 303' "$RUNNER_TEMP/remote-login.txt"
+          cookie=$(sed -nE 's/^[Ss]et-[Cc]ookie: (lh_session=[A-Za-z0-9_-]+);.*/\1/p' "$RUNNER_TEMP/remote-login.txt")
+          [[ -n $cookie ]]
+          echo "::add-mask::${cookie#lh_session=}"
+          [[ $(curl --max-time 60 -sS "${serve[@]}" -H "Cookie: $cookie" -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/api/models") == 200 ]]
+          rm -f "$RUNNER_TEMP/remote-login.txt"
+          unset cookie
           # Inspect only descendants; never log the child's environment or secret.
           secret=
           for child in $(pgrep -P "$pid"); do
@@ -178,6 +208,13 @@ jobs:
           done
           [[ $secret =~ ^[0-9a-f]{64}$ ]]
           echo "::add-mask::$secret"
+          # LH-43: with the seeded password, a header-less page load must log in, and
+          # the window's page cookie (an HMAC of the secret, set by main.cjs) opens it.
+          page_key=$(SECRET="$secret" python3 -c 'import hashlib, hmac, os; print(hmac.new(os.environ["SECRET"].encode(), b"lh-desktop-page", hashlib.sha256).hexdigest())')
+          echo "::add-mask::$page_key"
+          [[ $(curl --max-time 20 -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/") == 303 ]]
+          [[ $(curl --max-time 60 -sS -H "Cookie: lh_desktop=$page_key" -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/") == 200 ]]
+          unset page_key
           [[ $(curl --max-time 60 -sS -H "x-learnharness-desktop: $secret" \
             -o "$RUNNER_TEMP/models.json" -w '%{http_code}' "http://127.0.0.1:$port/api/models") == 200 ]]
           [[ $(curl --max-time 60 -sS -H "x-learnharness-desktop: $secret" \
@@ -263,13 +300,14 @@ jobs:
           # Every seeded file must stay byte-identical except data/graph/positions.json:
           # components/graph-view.tsx and components/graph-canvas.ts re-persist it
           # after the launch-time physics settle. Validate its structure instead.
+          # data/web-login.json gains the session the remote-access check logged in.
           # Startup purges only unseeded edges/events ledgers; no jobs are seeded.
           # Dummy sign-in files and the nested space-named file must also survive.
           # Logs, Chromium profile and caches may be added and are listed by name.
           # Runs after the quit so the live Chromium profile is not walked mid-write.
           if ! bash tests/fork-mac-e2e/data-manifest.sh subset \
             "$HOME/Library/Application Support/LearnHarness" "$ART/data-manifest.jsonl" \
-            data/graph/positions.json > "$ART/new-data-entries.jsonl" 2> "$ART/allowed-changes.txt"; then
+            data/graph/positions.json data/web-login.json > "$ART/new-data-entries.jsonl" 2> "$ART/allowed-changes.txt"; then
             cat "$ART/allowed-changes.txt" >&2
             exit 1
           fi

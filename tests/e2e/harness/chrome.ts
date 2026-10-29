@@ -17,7 +17,8 @@ export interface HeadlessChrome {
 	close(): Promise<void>;
 }
 
-export async function launchChrome(ticket: string): Promise<HeadlessChrome> {
+/** `args` are appended to the defaults, e.g. a --host-resolver-rules map. */
+export async function launchChrome(ticket: string, args: string[] = []): Promise<HeadlessChrome> {
 	const base = path.join(os.homedir(), ".cache", "lh-e2e", ticket);
 	fs.mkdirSync(base, { recursive: true });
 	const userDataDir = fs.mkdtempSync(path.join(base, "chrome-"));
@@ -26,7 +27,7 @@ export async function launchChrome(ticket: string): Promise<HeadlessChrome> {
 		headless: true,
 		userDataDir,
 		...(executablePath ? { executablePath } : { channel: "chrome" as const }),
-		args: ["--disable-gpu", "--no-first-run", "--no-default-browser-check", "--disable-dev-shm-usage"],
+		args: ["--disable-gpu", "--no-first-run", "--no-default-browser-check", "--disable-dev-shm-usage", ...args],
 	});
 	return {
 		browser,

@@ -32,7 +32,7 @@ const { attachSubscriptionChild, subscriptionControl } = require("./subscription
 const { desktopAPIHeaders } = require("./desktop-api.cjs");
 const { openWebSubscriptionBrowser } = require("./web-subscription-browser.cjs");
 const { isForkBuild } = require("./updater-gate.cjs");
-const { randomBytes } = require("node:crypto");
+const { createHmac, randomBytes } = require("node:crypto");
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -170,6 +170,30 @@ function freePort() {
 	});
 }
 
+/** REMOTE ACCESS (LH-43, docs/remote-access.md): once the learner has set a
+ *  login password (the server's data/web-login.json), the server takes a
+ *  fixed loopback port so `tailscale serve --bg <port>` can point at it.
+ *  Still 127.0.0.1 only; proxy.ts makes everything tailscale serve forwards
+ *  log in, and the window keeps its secret header. LH_REMOTE_PORT overrides
+ *  3757; a busy port falls back to a random one (Settings says so). */
+const REMOTE_PORT = (() => {
+	const port = Number(process.env.LH_REMOTE_PORT);
+	return Number.isInteger(port) && port > 1023 && port < 65536 ? port : 3757;
+})();
+
+function portFree(port) {
+	return new Promise((resolve) => {
+		const srv = net.createServer();
+		srv.once("error", () => resolve(false));
+		srv.listen(port, "127.0.0.1", () => srv.close(() => resolve(true)));
+	});
+}
+
+async function serverPort() {
+	if (fs.existsSync(path.join(DATA_DIR(), "web-login.json")) && (await portFree(REMOTE_PORT))) return REMOTE_PORT;
+	return freePort();
+}
+
 /** BYOK keys: auth.json in userData, flat {VAR: value} map, 0600 —
  *  SERVER-MANAGED since the auth-keys wave (2026-09-19). This shell no
  *  longer reads or injects it: the child gets LH_AUTH_FILE below and does
@@ -223,6 +247,8 @@ function startServer(port) {
 					LH_AUTH_FILE: AUTH_FILE(),
 					LH_DESKTOP_SERVER: "1",
 					LH_DESKTOP_API_SECRET: desktopAPISecret,
+					// Web login (LH-43): the port Settings tells tailscale serve to use.
+					LH_REMOTE_PORT: String(REMOTE_PORT),
 				},
 				stdio: ["ignore", "pipe", "pipe", "ipc"],
 			},
@@ -660,7 +686,7 @@ async function main() {
 	// spawn, no packaging, full HMR. The rest of this shell still applies
 	// (guards, menu, single instance).
 	const devUrl = process.env.LH_DEV_URL;
-	const url = devUrl ?? `http://127.0.0.1:${await freePort()}`;
+	const url = devUrl ?? `http://127.0.0.1:${await serverPort()}`;
 	if (!devUrl) {
 		desktopAPISecret = randomBytes(32).toString("hex");
 		const ownedOrigin = new URL(url).origin;
@@ -668,6 +694,12 @@ async function main() {
 		session.defaultSession.webRequest.onBeforeSendHeaders({ urls: ["<all_urls>"] }, (details, callback) => {
 			callback({ requestHeaders: desktopAPIHeaders(details, ownedOrigin, desktopAPISecret, [...trustedAppWindows]) });
 		});
+		// Web login (LH-43): once a remote-access password exists, page loads
+		// need a per-launch value too (src/server/desktop-access.ts). Only this
+		// session holds it, HttpOnly and SameSite=Strict. Cookies ignore ports,
+		// so it is an HMAC of the secret, never the API secret itself.
+		const pageKey = createHmac("sha256", desktopAPISecret).update("lh-desktop-page").digest("hex");
+		await session.defaultSession.cookies.set({ url: ownedOrigin, name: "lh_desktop", value: pageKey, httpOnly: true, sameSite: "strict" });
 		chatgpt = createChatGPT({
 			store: fileStore(path.join(app.getPath("userData"), "chatgpt-credentials.json")),
 			openExternal: (target) => shell.openExternal(target),
