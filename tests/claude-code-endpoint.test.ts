@@ -140,3 +140,10 @@ test("R4: URL normalization preserves input spelling apart from whitespace and o
 		assert.equal(endpointStatus().baseUrl, null);
 	}
 });
+
+test("the server exports the shared pure endpoint predicate and normalization", async () => {
+	const core = await import("../src/core/claude-code-endpoint.ts");
+	assert.equal(isAllowedEndpointUrl, core.isAllowedEndpointUrl);
+	assert.equal(core.normalizeEndpointUrl(" https://Relay.example/Path/ "), "https://Relay.example/Path");
+	for (const value of [null, undefined, 42, "https://user:pass@relay.example", "https://relay.example/?", "https://relay.example/#"]) assert.equal(core.normalizeEndpointUrl(value), null);
+});

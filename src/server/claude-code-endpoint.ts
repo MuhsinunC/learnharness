@@ -5,26 +5,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { AUTH_FILE } from "../../config.ts";
-import type { ClaudeCodeEndpoint } from "../core/claude-code-endpoint.ts";
+import { normalizeEndpointUrl, type ClaudeCodeEndpoint } from "../core/claude-code-endpoint.ts";
+export { isAllowedEndpointUrl } from "../core/claude-code-endpoint.ts";
 
 export function endpointFile(): string {
 	return path.join(path.dirname(AUTH_FILE), "claude-endpoint.json");
-}
-
-function normalizeEndpointUrl(value: unknown): string | null {
-	if (typeof value !== "string") return null;
-	const trimmed = value.trim();
-	if (!trimmed || /[?#]/.test(trimmed)) return null;
-	try {
-		const url = new URL(trimmed);
-		if (url.username || url.password || !(url.protocol === "https:" ||
-			(url.protocol === "http:" && (url.hostname === "127.0.0.1" || url.hostname === "localhost")))) return null;
-		return trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
-	} catch { return null; }
-}
-
-export function isAllowedEndpointUrl(value: string): boolean {
-	return normalizeEndpointUrl(value) !== null;
 }
 
 export function validToken(value: unknown): value is string {
