@@ -73,7 +73,9 @@ Pi's shape, with Codex's clipping and option 2 as the fallback
   prompt, declarations, marker and tail fill only 0.8 of what the reply's
   room leaves (LH-55): a provider may count 15-20% more than chars/3.5
   (the OB-0645 live check measured OpenRouter's pre-flight count at about
-  1.18x; see "The reply's room" for the request margin). When the margin
+  1.18x). That room already takes off an overcount the rejection stated
+  (see "The learned overcount"); the 0.8 covers a provider whose
+  rejection states no count of its own. When the margin
   leaves no room but the held-back floor itself still does, the retry gets
   that whole room rather than none, so recovery never drops the whole
   history. A rejection's stated limit counts only while the rejection is
@@ -172,7 +174,32 @@ Repair on the chat whose old rejection taught the limit neither writes it
 back nor condenses toward it. Re-saving the value already stored sends
 nothing, hence "a new value".
 Before LH-55 a learned limit capped the engine window for good, and raising
-the custom window did nothing.
+the custom window did nothing. Learning a limit and saving a window both
+emit `models-changed` on the server's event channel (LH-54), so every open
+window refetches `/api/models` and its footer follows without a reload; a
+window whose channel was down refetches when it reconnects.
+
+## The learned overcount (LH-54)
+
+Some providers count more than pi-ai's chars/3.5 before they accept a
+request: OpenRouter's pre-flight counted about 1.18x the tokens it then
+billed, and the billed count matched pi-ai's estimate (OB-0645, qwen3-14b).
+Its rejection states its own count ("you requested about 41217 tokens
+(24953 of text input, 3331 of tool input, 12933 in the output)"), and the
+engine stamps every length rejection with pi-ai's estimate of the request
+it sent (`sentEstimate`). Their ratio, the stated input over that
+estimate, is saved per `provider:id` under `learnedOvercounts`, the larger
+of it and any earlier one, by the same rejection and under the same rules
+that teach the limit (in force, never from a held-back request; above 2 it
+is taken for a misread and ignored). A window save leaves it: it describes
+the provider's count, not the window. A provider that never showed one,
+or whose rejections state no count, keeps pi-ai's flat 4096. On the route
+that reproduces the live case (a custom 1M window over a real 40,960), the
+rejection that teaches the limit teaches the overcount too, so the extra
+rejection the live re-check saw after the limit was learned (part 15,
+23.9k tokens, 257 over) does not recur (`tests/e2e/recovery-margin.e2e.ts`
+(f)). The cost is one recovered rejection for a model whose window was
+right from the start.
 
 ## The window seam (LH-38)
 
@@ -195,7 +222,7 @@ engine's window is the real limit, that clamp keeps every request inside it,
 so the budgets' job is to keep room for the reply:
 `outputReserveTokens(window, maxTokens)` is the model's max output plus
 pi-ai's 4096, at least pi's 16,384 and at most a quarter of the window
-plus 4096. The threshold compaction fires at
+plus 4096. With no learned overcount the threshold compaction fires at
 `min(settings threshold, window − that reserve)`, so a request at the
 threshold still gets that much output, and a recovery's whole request fits
 `window − reserve` (see Target).
@@ -216,6 +243,8 @@ output of 1,024 or less, the reply's room alone leaves none. Thresholds
 | 128,000, 8,192 | 111,616 | 122,880 |
 | 200,000, 64,000 | 145,904 | 194,880 |
 | 32,000, 1,024 (e2e) | 19,904 | 26,880 |
+| 163,840, 16,384, overcount 1.18 (e2e) | 119,148 | 134,508 |
+| 40,960, 16,384, overcount 1.18 (e2e) | 21,156 | 30,372 |
 
 Before LH-50 a custom 1M window over a real
 40,960 one (OpenRouter qwen/qwen3-14b, 16,384 max output) made every request
@@ -224,25 +253,30 @@ were rejected again, and the chat ended unrecoverable; one huge paste's
 recovery retry was rejected outright (`tests/e2e/output-budget.e2e.ts`
 reproduces both).
 
-The 4096 is pi-ai's flat margin under the window. A provider whose
-pre-flight count runs above pi-ai's estimate gets a margin that scales with
-the input instead (LH-54, `PREFLIGHT_OVERCOUNT` in `src/agent/models.ts`):
-OpenRouter counted about 1.18x the tokens it billed, which matched pi-ai's
-estimate, so its requests keep `max(4096, 0.2 × estimate)` free. With the
-flat margin, every request between ~22.8k tokens and the threshold of a
-learned 40,960 window was rejected and condensed
-(`tests/e2e/recovery-margin.e2e.ts` (f)). pi-ai's margin is a constant,
-so the extra goes to pi-ai as a window that much smaller, which every
-API's max-tokens clamp reads. The reserve and the threshold above still
-count the flat 4096, so on such a route a request just under the
-threshold gets up to 20% of its input less than the model's max output.
-Providers with no measured overcount (Baseten among them) keep 4096.
+The 4096 is pi-ai's flat margin under the window. A model with a learned
+overcount `r` (see "The learned overcount") keeps `4096 + (r − 1) ×
+estimate` free instead (`contextMarginTokens` in `src/agent/models.ts`):
+with the flat margin alone, every request between ~22.8k tokens and the
+threshold of a learned 40,960 window was rejected and condensed. pi-ai's
+margin is a constant, so the extra goes to pi-ai as a window that much
+smaller, which every API's max-tokens clamp reads. The held-back floor,
+the threshold and recovery's rooms are all sized from that same margin
+(`inputBudgetTokens`, its inverse): the floor comes down to
+`(window − 4096 − min(1024, max output)) / r`, and the threshold keeps the
+same growth room below it as with no overcount (the reserve less 4096 and
+that least reply room), so it still lands first and a request at the
+threshold still gets at least the reserve's room for its reply. When only
+the requests kept the larger margin (LH-54's first cut, a fixed 1.2x for
+OpenRouter), a 163,840 window with a 16,384 max output compacted at 143.4k
+while its requests were held back from ~135.7k
+(`tests/e2e/recovery-margin.e2e.ts` (h)).
 
 A request whose reply room (window − pi-ai's estimate − that margin)
 would fall below min(1024, the model's max output) is never sent:
 `piEngineForSpec`'s stream function holds it back as a length rejection
 marked `heldBack` ("Not sent: the reply would have only R tokens of room in
-this chat's N-token context window."). It is a last-resort guard: normal
+this chat's N-token context window (about E tokens of request and a
+M-token margin)."; R = N − E − M). It is a last-resort guard: normal
 growth reaches the threshold first. Overflow recovery then condenses the
 chat and retries once; if the system prompt and tool declarations alone
 leave no room, the chat says plainly that it is too long for the model.
