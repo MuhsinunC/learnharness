@@ -3,7 +3,25 @@
 End-to-end tests boot the real server in web mode, talk to it over HTTP, and
 drive the UI in headless Chrome. A local stub stands in for every model.
 Run them with `npm run test:e2e`. It runs `tests/e2e/*.e2e.ts`, one file at a
-time, because each file boots its own `next dev` in this checkout.
+time, because each file boots its own server.
+
+## One production build per source state
+
+`bootServer` serves a production build, not `next dev`, so no route compiles
+on its first hit (that compile, under load, was the suite's main source of
+timeouts). The first boot runs `next build` and the desktop's
+`scripts/build-server.mjs` (static files, public/, the payload guards), then
+copies `.next/standalone` to `~/.cache/lh-e2e/build-<hash>`. The hash covers
+every tracked or unignored file outside `tests/` and `docs/`, the lockfile
+and `next.config.ts` included. Later boots, in this run or the next, reuse it
+until a source file changes; a stale build is pruned when a new one lands.
+Each test starts that build's `server.js` (what the desktop ships) with its
+own `LH_DATA_DIR`. Every `LH_E2E*` seam is read from `process.env` at request
+time, so one build serves every test's env. Editing a test never rebuilds;
+editing app code does, once (a few minutes at `nice -n 19`).
+
+`LH_E2E_DEV=1 npm run test:e2e` serves `next dev` instead, for debugging
+with fast refresh.
 
 ## Pieces
 

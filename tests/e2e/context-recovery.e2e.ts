@@ -184,14 +184,33 @@ async function openChat(id: string, selector: string) {
 	return page;
 }
 
-/** The sidebar row for a chat title, once the session list has loaded. */
+/** The sidebar row for a chat title, once the session list has loaded
+ *  and React has hydrated it (a right-click before that opens nothing). */
 const sidebarRow = (page: Page, title: string) =>
 	until(async () => {
 		for (const r of await page.$$('[data-testid="session-row"], [data-testid="session-row-kbd"]')) {
-			if ((await r.evaluate((el) => el.textContent ?? "")).includes(title)) return r;
+			const [text, hydrated] = await r.evaluate((el) => [el.textContent ?? "", Object.keys(el).some((k) => k.startsWith("__reactProps"))] as const);
+			if (text.includes(title) && hydrated) return r;
 		}
 		return null;
 	}, `the sidebar row for ${title}`);
+
+/** Click `selector` and return the response to the POST it fires; one
+ *  more click if the first fired nothing (it landed before React attached). */
+async function clickForPost(page: Page, selector: string, urlPart: string) {
+	for (let attempt = 0; ; attempt++) {
+		const fired = page.waitForRequest((r) => r.method() === "POST" && r.url().includes(urlPart), { timeout: 10_000 });
+		await page.click(selector);
+		let request;
+		try {
+			request = await fired;
+		} catch (err) {
+			if (attempt === 1) throw err;
+			continue;
+		}
+		return until(() => request.response(), `the response to ${urlPart}`, 120_000);
+	}
+}
 
 /** Leave the chat as one broken before this release: the learner's
  *  message, then the provider's length rejection (pi-ai's persisted text
@@ -304,7 +323,8 @@ test("(b) Repair this chat fixes a chat already in the broken state", async () =
 
 	const page = await openChat(id, '[data-testid="repair-chat"]');
 	try {
-		await page.click('[data-testid="repair-chat"]');
+		const res = await clickForPost(page, '[data-testid="repair-chat"]', "/repair");
+		assert.equal(res.status(), 200, await res.text());
 		await settled(id, "the repair marker", (c) => recoveryMarkers(c).length === 1);
 		await page.waitForFunction(
 			() => !document.querySelector('[data-testid="chat-error"]') &&
@@ -333,7 +353,8 @@ test("(b) the session menu repairs a broken chat and refuses a healthy one", asy
 	const page = await openChat(id, '[data-testid="session-row"]');
 	try {
 		await (await sidebarRow(page, "Sequences")).click({ button: "right" });
-		await page.click('[data-testid="ctx-repair"]');
+		const res = await clickForPost(page, '[data-testid="ctx-repair"]', "/repair");
+		assert.equal(res.status(), 200, await res.text());
 		const repaired = await settled(id, "the menu repair marker", (c) => recoveryMarkers(c).length === 1);
 		assert.equal(repaired.messages.at(-1)!.customType, "compaction");
 		// A working chat's menu offers no Repair (the list's repairable flag).
@@ -472,7 +493,7 @@ test("(h) a refused repair shows the server's reason, then the chat says plainly
 	try {
 		await (await sidebarRow(page, "Nothing to drop")).click({ button: "right" });
 		await page.waitForSelector('[data-testid="ctx-repair"]');
-		await page.click('[data-testid="ctx-repair"]');
+		assert.equal((await clickForPost(page, '[data-testid="ctx-repair"]', "/repair")).status(), 422);
 		await page.waitForFunction(
 			() => document.querySelector('[data-testid="ctx-repair-error"]')?.textContent === "Nothing older in this chat can be condensed.",
 			{ timeout: 60_000 },

@@ -918,27 +918,26 @@ function SessionsSidebar() {
 						    open until the server answers, to show a refusal's reason;
 						    the open chat adopts a repair through record-changed. */}
 						{chats?.find((c) => c.id === ctxChatId)?.repairable && (
-							<>
-								<button
-									type="button"
-									data-testid="ctx-repair"
-									disabled={ctxRepair?.chatId === ctxChatId && ctxRepair.busy}
-									onClick={() => {
-										const chatId = ctxChatId;
-										setCtxRepair({ chatId, busy: true });
-										void repairChatRequest(chatId).then((refusal) => {
-											if (refusal === null) setCtxChatId(null);
-											setCtxRepair(refusal === null ? null : { chatId, busy: false, error: refusal });
-										});
-									}}
-									className="flex items-center rounded-lg px-2.5 py-1.5 text-left text-foreground transition-colors hover:bg-accent disabled:opacity-50"
-								>
-									Repair this chat
-								</button>
-								{ctxRepair?.chatId === ctxChatId && ctxRepair.error && (
-									<p data-testid="ctx-repair-error" className="px-2.5 pb-1 text-muted-foreground">{ctxRepair.error}</p>
-								)}
-							</>
+							<button
+								type="button"
+								data-testid="ctx-repair"
+								disabled={ctxRepair?.chatId === ctxChatId && ctxRepair.busy}
+								onClick={() => {
+									const chatId = ctxChatId;
+									setCtxRepair({ chatId, busy: true });
+									void repairChatRequest(chatId).then((refusal) => {
+										if (refusal === null) setCtxChatId(null);
+										setCtxRepair(refusal === null ? null : { chatId, busy: false, error: refusal });
+									});
+								}}
+								className="flex items-center rounded-lg px-2.5 py-1.5 text-left text-foreground transition-colors hover:bg-accent disabled:opacity-50"
+							>
+								Repair this chat
+							</button>
+						)}
+						{/* Outside the gate: a refusal that marks the chat hopeless drops the item, never the reason. */}
+						{ctxRepair?.chatId === ctxChatId && ctxRepair.error && (
+							<p data-testid="ctx-repair-error" className="px-2.5 pb-1 text-muted-foreground">{ctxRepair.error}</p>
 						)}
 						<button
 							type="button"

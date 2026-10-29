@@ -99,8 +99,9 @@ it("production respawn delivers a failure result for an available provider's mis
 		enableClaudeCodeProvider("/nonexistent/claude");
 		stores.settingsStore.writeSettings({ version: 1, models: { cheap: { model: { provider: "claude-code", id: "no-such-model" } } } });
 		let wakes = 0;
-		setTurnRunner(async () => { wakes++; return 200; });
 		const chat = stores.chatStore.createChat("Missing catalog model");
+		// Count only this chat's wakes: the sweep may also retry earlier tests' pending deliveries.
+		setTurnRunner(async (chatId) => { if (chatId === chat.id) wakes++; return 200; });
 		const job = stores.jobStore.createJob({ chatId: chat.id, kind: "research", toolCallId: "missing-model" });
 		sweep();
 		await waitFor(() => stores.jobStore.getJob(job.id)?.status === "error" && wakes > 0);
