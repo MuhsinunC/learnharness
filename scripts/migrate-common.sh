@@ -8,6 +8,7 @@ export PATH LC_ALL=C
 
 bundle_id=com.learnharness.LearnHarness
 state_msg='Nothing was changed.'
+ship_status_warned=no; ship_record_noted=no
 fail() { printf '%s\n' "$*" >&2; exit 1; }
 hash_file() {
     digest=$(shasum -a 256 < "$1") || fail "Could not compute the SHA-256 digest of $1. $state_msg"
@@ -149,7 +150,8 @@ cleanup() {
 # Test-only hooks: bash -c COMMAND hook ARG. Quit/launch get the app path as $1;
 # LH_NO_GUI=1 skips the launch hook, open, and window-process wait.
 # ps gets the field (comm or command) and prints "pid comm" or "pid command";
-# launchctl gets the ShipIt label; lsappinfo gets the bundle id and prints each
+# launchctl gets the ShipIt label, prints launchctl list-style output, and exits 0
+# when loaded or non-zero when not loaded; lsappinfo gets the bundle id and prints each
 # instance's ASN line followed by its "pid = N" line.
 # Test-only timeout overrides: QUIT_TIMEOUT=30, SHIPIT_TIMEOUT=60,
 # SHIPIT_SETTLE=5, LAUNCH_TIMEOUT=30 (all prefixed LH_MIGRATE_).
@@ -191,9 +193,18 @@ app_running() {
 report_running() { sed 's/^/Running LearnHarness copy: /' "$tmp/running" >&2 || true; }
 # Destructive swaps call this right before they move anything.
 ensure_still_quit() {
+    reopened_msg='LearnHarness was reopened during the migration. Nothing more was changed. Quit it and run again.'
+    if [ "$state_msg" != 'Nothing was changed.' ]; then reopened_msg="$reopened_msg $state_msg"; fi
     if app_running; then
         report_running
-        fail 'LearnHarness was reopened during the migration. Nothing more was changed. Quit it and run again.'
+        fail "$reopened_msg"
+    fi
+    if ship_running; then
+        fail "A LearnHarness update is still installing; try again in a minute. $state_msg"
+    fi
+    if app_running; then
+        report_running
+        fail "$reopened_msg"
     fi
 }
 # The installed app's window process; its Node-mode backend runs server.js with the same executable.
@@ -205,12 +216,46 @@ gui_running() {
 }
 ship_running() {
     label=$bundle_id.ShipIt
+    launchctl_status=0
     if [ -n "${LH_MIGRATE_LAUNCHCTL_CMD:-}" ]; then
-        /bin/bash -c "$LH_MIGRATE_LAUNCHCTL_CMD" hook "$label" > "$tmp/launchctl" || true
-    else launchctl list "$label" > "$tmp/launchctl" 2>/dev/null || true; fi
-    if /usr/bin/grep -Eq '"PID"[[:space:]]*=' "$tmp/launchctl"; then return 0; fi
-    processes command > "$tmp/ps" || fail "Could not read the process listing. $state_msg"
-    awk -v label="$label" '{sub(/^[[:space:]]*[0-9]+[[:space:]]+/,"");if(index($0,label)>0)found=1}END{exit !found}' "$tmp/ps"
+        /bin/bash -c "$LH_MIGRATE_LAUNCHCTL_CMD" hook "$label" > "$tmp/launchctl" 2> "$tmp/launchctl-error" || launchctl_status=$?
+    else
+        launchctl list "$label" > "$tmp/launchctl" 2> "$tmp/launchctl-error" || launchctl_status=$?
+    fi
+    loaded=no
+    launchctl_error=$(sed -n '1p' "$tmp/launchctl-error")
+    if [ "$launchctl_status" -eq 0 ] && [ ! -s "$tmp/launchctl-error" ]; then
+        loaded=yes
+    elif [ "$launchctl_status" -eq 113 ] && [[ "$launchctl_error" == "Could not find service \"$label\""* ]]; then
+        loaded=no
+    else
+        fail "Could not query launchd for $label (exit $launchctl_status: $launchctl_error). $state_msg"
+    fi
+    if [ "$loaded" = yes ]; then
+        if /usr/bin/grep -Eq '^[[:space:]]*"PID"[[:space:]]*=[[:space:]]*[0-9]+;' "$tmp/launchctl"; then return 0; fi
+        last_exit_status=$(awk '
+            /^[[:space:]]*"LastExitStatus"[[:space:]]*=[[:space:]]*-?[0-9]+;/ {
+                sub(/^[^=]*=[[:space:]]*/, ""); sub(/;.*/, "")
+                print ($0+0 == 0 ? "done" : "retry"); exit
+            }' "$tmp/launchctl")
+        case "$last_exit_status" in
+            retry) return 0;;
+            done) ;;
+            *)
+                if [ "$ship_status_warned" = no ]; then
+                    printf 'Could not read the launchd status of %s; treating it as an update still installing.\n' "$label" >&2
+                    ship_status_warned=yes
+                fi
+                return 0;;
+        esac
+    fi
+    processes comm > "$tmp/ship-comm" || fail "Could not read the process listing. $state_msg"
+    if awk '{sub(/^[[:space:]]*[0-9]+[[:space:]]+/,"");if($0 ~ /\/ShipIt$/)found=1}END{exit !found}' "$tmp/ship-comm"; then return 0; fi
+    if exists "$HOME/Library/Caches/$label/ShipItState.plist" && [ "$ship_record_noted" = no ]; then
+        printf 'Note: an old update record was found; continuing.\n'
+        ship_record_noted=yes
+    fi
+    return 1
 }
 request_quit() {
     if [ -n "${LH_MIGRATE_QUIT_CMD:-}" ]; then
@@ -368,8 +413,8 @@ unique_path() {
 prepare_app() {
     new_app=$(unique_path "$apps/.LearnHarness.app.lh-new-$stamp")
     ditto "$1" "$new_app"
-    xattr -dr com.apple.quarantine "$new_app"
     codesign --verify --deep --strict "$new_app"
+    xattr -drs com.apple.quarantine "$new_app"
 }
 swap_app() {
     aside_app=$(unique_path "$apps/.LearnHarness.app.lh-old-$stamp")
@@ -377,7 +422,7 @@ swap_app() {
     if exists "$app"; then mv "$app" "$aside_app"; fi
     mv "$new_app" "$app"
     new_app=; swap_pending=no
-    if exists "$aside_app"; then rm -rf "${aside_app:?}"; fi
+    if exists "$aside_app"; then rm -rf "${aside_app:?}" || printf 'Could not remove %s; delete it yourself.\n' "$aside_app" >&2; fi
     aside_app=
 }
 # Move current data aside, then make staged dir $1 live (empty $1: leave the data path absent).

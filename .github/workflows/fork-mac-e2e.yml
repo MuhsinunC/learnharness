@@ -127,7 +127,8 @@ jobs:
             grep -Fx "$line" "$ART/migrate-output.txt"
           done
           if grep -F 'Warning: no window process was seen' "$ART/migrate-output.txt"; then exit 1; fi
-          backup=$(sed -n 's/^Backup: //p' "$ART/migrate-output.txt")
+          backup=$(sed -n 's/^Backup: //p' "$ART/migrate-output.txt" | sort -u)
+          [[ -n $backup && $(printf '%s\n' "$backup" | wc -l) -eq 1 ]]
           test -d "$backup"
           echo "BACKUP=$backup" >> "$GITHUB_ENV"
       - name: Check private backup and installed signature
@@ -142,7 +143,7 @@ jobs:
           [[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$BACKUP/LearnHarness.app/Contents/Info.plist") == 0.3.6 ]]
           app=/Applications/LearnHarness.app
           [[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist") == "$FORK_VERSION" ]]
-          xattr -lr "$app" > "$ART/app-xattrs.txt"
+          xattr -lrs "$app" > "$ART/app-xattrs.txt"
           if grep -F com.apple.quarantine "$ART/app-xattrs.txt"; then exit 1; fi
           codesign --verify --deep --strict "$app"
           codesign -dv --verbose=2 "$app" > "$ART/codesign.txt" 2>&1

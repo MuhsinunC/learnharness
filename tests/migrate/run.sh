@@ -93,6 +93,9 @@ case "$name" in
         # Like ps -o comm (executable only) or -o command (with arguments): emit PID EXE [ARGS].
         emit() { if [ "$1" = comm ]; then printf '%s %s\n' "$2" "$3"; else printf '%s %s%s\n' "$2" "$3" "${4:+ $4}"; fi; }
         mode=$1
+        if [ -f "$LH_TEST_ROOT/late-reopened" ]; then emit "$mode" 132 "$exe"; fi
+        if [ -f "$LH_TEST_ROOT/shipit-process" ]; then emit "$mode" 133 "$LH_MIGRATE_APPS_DIR/LearnHarness.app/Contents/Frameworks/Squirrel.framework/Resources/ShipIt"; fi
+        if [ -f "$LH_TEST_ROOT/shipit-log-reader" ]; then emit "$mode" 134 /usr/bin/tail "-f $HOME/Library/Caches/com.learnharness.LearnHarness.ShipIt/x.log"; fi
         if [ -f "$LH_TEST_ROOT/stubborn" ] || [ -f "$LH_TEST_ROOT/launched" ]; then emit "$mode" 123 "$exe";
         elif [ -f "$LH_TEST_ROOT/running" ] && [ "$quits" -eq 0 ]; then emit "$mode" 123 "$exe"; fi
         # Reopened mid-run: once the new app is staged, or once rollback moved the data aside.
@@ -113,9 +116,29 @@ case "$name" in
             emit "$mode" 131 /bin/bash "migrate-to-fork.sh --dmg $LH_TEST_ROOT/tmp/mnt/LearnHarness.app/Contents/MacOS/LearnHarness"
         fi;;
     'launchctl stub')
-        if [ -f "$LH_TEST_ROOT/shipit" ]; then printf '"PID" = 123;\n'; fi
+        if [ -f "$LH_TEST_ROOT/reopen-after-ship-check" ] && ls -d "$LH_MIGRATE_APPS_DIR"/.LearnHarness.app.lh-new-* >/dev/null 2>&1; then touch "$LH_TEST_ROOT/late-reopened"; fi
+        if [ -f "$LH_TEST_ROOT/launchctl-denied" ]; then printf 'Operation not permitted\nsecond error line\n' >&2; exit 5; fi
+        if [ -f "$LH_TEST_ROOT/launchctl-stderr" ]; then printf 'Unexpected warning\n' >&2; exit 0; fi
+        if [ -f "$LH_TEST_ROOT/launchctl-wrong-label" ]; then printf 'Could not find service "other.label" in domain for port\n' >&2; exit 113; fi
+        if [ -f "$LH_TEST_ROOT/shipit" ]; then printf '"PID" = 123;\n'; exit 0; fi
         # An update restart relaunches the app while ShipIt finishes.
-        if [ -f "$LH_TEST_ROOT/shipit-once" ]; then rm "$LH_TEST_ROOT/shipit-once"; touch "$LH_TEST_ROOT/relaunched"; printf '"PID" = 123;\n'; fi;;
+        if [ -f "$LH_TEST_ROOT/shipit-once" ]; then rm "$LH_TEST_ROOT/shipit-once"; touch "$LH_TEST_ROOT/relaunched"; printf '"PID" = 123;\n'; exit 0; fi
+        if [ -f "$LH_TEST_ROOT/shipit-loaded" ]; then printf '{\n"LastExitStatus" = 256;\n}\n'; exit 0; fi
+        if [ -f "$LH_TEST_ROOT/shipit-done" ]; then
+            printf '{\n\t"Label" = "%s";\n\t"LastExitStatus" = 0;\n};\n' "$1"
+            exit 0
+        fi
+        if [ -f "$LH_TEST_ROOT/shipit-garbled" ]; then
+            printf '{\n"PreviousPID" = 123;\n"PreviousLastExitStatus" = 0;\n}\n'
+            exit 0
+        fi
+        if { [ -f "$LH_TEST_ROOT/shipit-on-new" ] && ls -d "$LH_MIGRATE_APPS_DIR"/.LearnHarness.app.lh-new-* >/dev/null 2>&1; } ||
+            { [ -f "$LH_TEST_ROOT/shipit-on-aside" ] && ls -d "$LH_MIGRATE_DATA_DIR".fork-* >/dev/null 2>&1; }; then
+            printf '{\n"PID" = 123;\n"LastExitStatus" = 0;\n}\n'
+            exit 0
+        fi
+        printf 'Could not find service "%s" in domain for port\n' "$1" >&2
+        exit 113;;
     'lsappinfo stub')
         if [ -f "$LH_TEST_ROOT/bundle-running" ] && [ "$quits" -eq 0 ]; then printf 'ASN:0x0-0x1-"LearnHarness":\n    pid = 128 !cgsConnection\n'; fi
         # Entries with no pid, pid 0, a dead pid, and a live pid that is not a LearnHarness executable.
@@ -219,10 +242,18 @@ case_2() {
     invoke --launch-stub-test "$repo/scripts/migrate-to-fork.sh"
     [ -f "$case_root/launched" ]
     # The undo command is printed before the launch step.
-    [ "$(grep -n '^To undo: ' "$case_root/output" | cut -d: -f1)" -lt "$(grep -n '^Launching LearnHarness' "$case_root/output" | cut -d: -f1)" ]
+    [ "$(grep -n '^To undo: ' "$case_root/output" | head -1 | cut -d: -f1)" -lt "$(grep -n '^Launching LearnHarness' "$case_root/output" | cut -d: -f1)" ]
+    [ "$(grep -c '^Backup: ' "$case_root/output")" = 2 ]
+    backup=$(sed -n 's/^Backup: //p' "$case_root/output" | sort -u)
+    [ -n "$backup" ] && [ "$(printf '%s\n' "$backup" | wc -l)" -eq 1 ]
+    [ -d "$backup" ]
+    [ "$(grep -c '^To undo: ' "$case_root/output")" = 2 ]
+    [ "$(grep '^To undo: ' "$case_root/output" | sort -u | wc -l)" -eq 1 ]
+    [ "$(grep -n '^To undo: ' "$case_root/output" | head -1 | cut -d: -f1)" -lt "$(grep -n '^Verifying data\.\.\.$' "$case_root/output" | tail -1 | cut -d: -f1)" ]
+    [ "$(tail -1 "$case_root/output")" = Done. ]
     unchanged_data
     [ "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$apps/LearnHarness.app/Contents/Info.plist")" = 0.3.4-fork.2 ]
-    if xattr -lr "$apps/LearnHarness.app" | grep -q com.apple.quarantine; then return 1; fi
+    if xattr -lrs "$apps/LearnHarness.app" | grep -q com.apple.quarantine; then return 1; fi
     snapshot "$apps/LearnHarness.app" > "$case_root/installed"
     snapshot "$case_root/source/LearnHarness.app" > "$case_root/source-app"
     cmp "$case_root/installed" "$case_root/source-app"
@@ -478,7 +509,7 @@ case_14() {
     backups="$case_root/odd \$HOME \`touch pwned\` \"double\" 'single'"
     migrate --dry-run
     backup=$(backup_path)
-    line=$(grep '^To undo: ' "$case_root/output")
+    line=$(grep '^To undo: ' "$case_root/output" | head -1)
     # Parse only: never run the printed command (it carries none of the test hooks).
     (cd "$case_root" && eval "set -- ${line#To undo: }" &&
         [ "$#" -eq 3 ] && [ "$1" = /bin/bash ] && [ "$2" = "$backup/rollback-fork.sh" ] && [ "$3" = "$backup" ])
@@ -573,7 +604,9 @@ case_17() {
     # Rollback, before the app swap (the data is already restored).
     touch "$case_root/reopen-on-aside"
     if invoke "$backup/rollback-fork.sh" "$backup"; then return 1; fi
-    grep -Fxq "$reopened" "$case_root/output"
+    aside=$(find "$(dirname "$data")" -maxdepth 1 -name 'LearnHarness.fork-*')
+    [ -d "$aside" ]
+    grep -Fxq "$reopened The backup data is restored, but the app is not. Rerun the rollback to finish. Your previous data is preserved at $aside." "$case_root/output"
     unchanged_data
     snapshot "$apps/LearnHarness.app" > "$case_root/now-app"; cmp "$case_root/fork-app" "$case_root/now-app"
     [ "$(find "$apps" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = 1 ]
@@ -605,7 +638,152 @@ case_18() {
     grep -Fxq 'LH_NO_GUI=1: not launching the app' "$case_root/output"
     rm "$data/fifo"
 }
-for number in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18; do
+case_19() {
+    setup 19
+    touch "$case_root/shipit-loaded"
+    expect_failure
+    grep -Fxq 'A LearnHarness update is still installing; try again in a minute. Nothing was changed.' "$case_root/output"
+    no_backup; unchanged_data; unchanged_app
+}
+case_20() {
+    setup 20
+    cache=$fake_home/Library/Caches/com.learnharness.LearnHarness.ShipIt
+    mkdir -p "$cache"
+    printf 'old record\n' > "$cache/ShipItState.plist"
+    migrate
+    [ "$(tail -1 "$case_root/output")" = Done. ]
+    [ "$(grep -Fxc 'Note: an old update record was found; continuing.' "$case_root/output")" = 1 ]
+    [ "$(cat "$cache/ShipItState.plist")" = 'old record' ]
+    unchanged_data
+    # A dangling state-file symlink is also left in place.
+    rm "$cache/ShipItState.plist"
+    ln -s missing-state "$cache/ShipItState.plist"
+    migrate
+    [ "$(tail -1 "$case_root/output")" = Done. ]
+    [ "$(grep -Fxc 'Note: an old update record was found; continuing.' "$case_root/output")" = 1 ]
+    [ -L "$cache/ShipItState.plist" ]
+    [ "$(readlink "$cache/ShipItState.plist")" = missing-state ]
+    unchanged_data
+}
+case_21() {
+    # A staged official update stops each destructive swap; the backup stays.
+    setup 21
+    installing='A LearnHarness update is still installing; try again in a minute.'
+    touch "$case_root/shipit-on-new"
+    expect_failure
+    grep -Fxq "$installing Nothing was changed." "$case_root/output"
+    unchanged_data; unchanged_app
+    backup=$(backup_path)
+    [ -f "$backup/manifest.txt" ] && [ -f "$backup/data.tar.gz" ] && [ -d "$backup/LearnHarness.app" ]
+    [ "$(find "$apps" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = 1 ]
+    rm "$case_root/shipit-on-new"
+    migrate
+    backup=$(backup_path)
+    snapshot "$data" > "$case_root/fork-data"
+    snapshot "$apps/LearnHarness.app" > "$case_root/fork-app"
+    # Rollback, before the data swap.
+    touch "$case_root/shipit-on-new"
+    if invoke "$backup/rollback-fork.sh" "$backup"; then return 1; fi
+    grep -Fxq "$installing Nothing was changed." "$case_root/output"
+    snapshot "$data" > "$case_root/now-data"; cmp "$case_root/fork-data" "$case_root/now-data"
+    snapshot "$apps/LearnHarness.app" > "$case_root/now-app"; cmp "$case_root/fork-app" "$case_root/now-app"
+    [ -z "$(find "$(dirname "$data")" -maxdepth 1 \( -name '.lh-restore.*' -o -name 'LearnHarness.fork-*' \))" ]
+    [ "$(find "$apps" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = 1 ]
+    rm "$case_root/shipit-on-new"
+    # Rollback, before the app swap (the data is already restored).
+    touch "$case_root/shipit-on-aside"
+    if invoke "$backup/rollback-fork.sh" "$backup"; then return 1; fi
+    aside=$(find "$(dirname "$data")" -maxdepth 1 -name 'LearnHarness.fork-*')
+    [ -d "$aside" ]
+    grep -Fxq "$installing The backup data is restored, but the app is not. Rerun the rollback to finish. Your previous data is preserved at $aside." "$case_root/output"
+    unchanged_data
+    snapshot "$apps/LearnHarness.app" > "$case_root/now-app"; cmp "$case_root/fork-app" "$case_root/now-app"
+    [ "$(find "$apps" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = 1 ]
+    [ -f "$backup/manifest.txt" ]
+    rm "$case_root/shipit-on-aside"
+    invoke "$backup/rollback-fork.sh" "$backup"
+    unchanged_data; unchanged_app
+}
+case_22() {
+    setup 22
+    touch "$case_root/shipit-done"
+    migrate
+    [ "$(tail -1 "$case_root/output")" = Done. ]
+    if grep -Fq 'Note: an old update record was found; continuing.' "$case_root/output"; then return 1; fi
+    unchanged_data
+    cache=$fake_home/Library/Caches/com.learnharness.LearnHarness.ShipIt
+    mkdir -p "$cache"
+    printf 'old record\n' > "$cache/ShipItState.plist"
+    migrate
+    [ "$(tail -1 "$case_root/output")" = Done. ]
+    [ "$(grep -Fxc 'Note: an old update record was found; continuing.' "$case_root/output")" = 1 ]
+    [ "$(cat "$cache/ShipItState.plist")" = 'old record' ]
+    unchanged_data
+}
+case_23() {
+    setup 23
+    touch "$case_root/shipit-garbled"
+    expect_failure
+    grep -Fxq 'A LearnHarness update is still installing; try again in a minute. Nothing was changed.' "$case_root/output"
+    grep -Fxq 'Could not read the launchd status of com.learnharness.LearnHarness.ShipIt; treating it as an update still installing.' "$case_root/output"
+    [ "$(grep -Fc 'com.learnharness.LearnHarness.ShipIt' "$case_root/output")" = 1 ]
+    no_backup; unchanged_data; unchanged_app
+}
+case_24() {
+    # The app reopens between the two process samples at the pre-swap check.
+    setup 24
+    touch "$case_root/reopen-after-ship-check"
+    expect_failure
+    [ -f "$case_root/late-reopened" ]
+    grep -Fxq 'LearnHarness was reopened during the migration. Nothing more was changed. Quit it and run again.' "$case_root/output"
+    unchanged_app; unchanged_data
+    backup=$(backup_path)
+    [ -f "$backup/manifest.txt" ] && [ -f "$backup/data.tar.gz" ] && [ -d "$backup/LearnHarness.app" ]
+    [ "$(find "$apps" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = 1 ]
+}
+case_25() {
+    setup 25
+    # The default stub reports the exact not-found stderr and exit 113.
+    migrate --dry-run
+    [ "$(tail -1 "$case_root/output")" = Done. ]
+    for flag in launchctl-denied launchctl-stderr launchctl-wrong-label; do
+        touch "$case_root/$flag"
+        expect_failure
+        case "$flag" in
+            launchctl-denied) error='exit 5: Operation not permitted';;
+            launchctl-stderr) error='exit 0: Unexpected warning';;
+            launchctl-wrong-label) error='exit 113: Could not find service "other.label" in domain for port';;
+        esac
+        grep -Fxq "Could not query launchd for com.learnharness.LearnHarness.ShipIt ($error). Nothing was changed." "$case_root/output"
+        if grep -Fq 'second error line' "$case_root/output"; then return 1; fi
+        unchanged_app; unchanged_data
+        rm "$case_root/$flag"
+    done
+}
+case_26() {
+    setup 26
+    touch "$case_root/shipit-process"
+    expect_failure
+    grep -Fxq 'A LearnHarness update is still installing; try again in a minute. Nothing was changed.' "$case_root/output"
+    no_backup; unchanged_app; unchanged_data
+    rm "$case_root/shipit-process"
+    touch "$case_root/shipit-log-reader"
+    migrate
+    [ "$(tail -1 "$case_root/output")" = Done. ]
+    unchanged_data
+}
+case_27() {
+    setup 27
+    chmod 000 "$case_root/fork.dmg"
+    for invalid_hash in invalid '' "$digest"$'\n'"$digest"; do
+        expect_failure --dmg "$case_root/fork.dmg" --sha256 "$invalid_hash"
+        grep -Fxq 'Invalid SHA-256 digest.' "$case_root/output"
+        if grep -Fq 'Could not copy the local DMG.' "$case_root/output"; then return 1; fi
+        no_backup; unchanged_app; unchanged_data
+    done
+    chmod 600 "$case_root/fork.dmg"
+}
+for number in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27; do
     # Do not use `if case_N`: it disables errexit inside the entire case.
     set +e
     (set -e; "case_$number") > "$run_logs/case-$number.log" 2>&1

@@ -5,19 +5,23 @@ export PATH
 script_dir=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=scripts/migrate-common.sh
 . "$script_dir/migrate-common.sh"
-dry=no; dmg=; expected_hash=; release_json=${LH_MIGRATE_RELEASE_JSON:-}; force_unlock=no; release_version=
+dry=no; dmg=; expected_hash=; hash_supplied=no; release_json=${LH_MIGRATE_RELEASE_JSON:-}; force_unlock=no; release_version=
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --dry-run) dry=yes; shift;;
         --force-unlock) force_unlock=yes; shift;;
         --dmg|--sha256|--release-json)
             [ "$#" -ge 2 ] || fail "Missing argument for $1"
-            case "$1" in --dmg) dmg=$2;; --sha256) expected_hash=$2;; --release-json) release_json=$2;; esac
+            case "$1" in --dmg) dmg=$2;; --sha256) expected_hash=$2; hash_supplied=yes;; --release-json) release_json=$2;; esac
             shift 2;;
         -h|--help) printf '%s\n' 'Usage: migrate-to-fork.sh [--dry-run] [--force-unlock] [--dmg PATH [--sha256 HEX]] [--release-json PATH]'; exit 0;;
         *) fail "Unknown option: $1";;
     esac
 done
+if [ "$hash_supplied" = yes ]; then
+    case "$expected_hash" in *[!a-fA-F0-9]*) fail 'Invalid SHA-256 digest.';; esac
+    [ "${#expected_hash}" -eq 64 ] || fail 'Invalid SHA-256 digest.'
+fi
 [ -n "$dmg" ] || [ -z "$expected_hash" ] || fail '--sha256 requires --dmg.'
 init
 if [ -z "$dmg" ]; then
@@ -59,10 +63,11 @@ JXA
     curl -fL "$url" -o "$dmg"
 else
     [ -f "$dmg" ] || fail 'Local DMG not found.'
+    cp "$dmg" "$tmp/local.dmg" || fail 'Could not copy the local DMG. Nothing was changed.'
+    dmg=$tmp/local.dmg
     if [ -z "$expected_hash" ]; then printf '%s\n' 'Warning: local DMG has no supplied SHA-256 digest.'; fi
 fi
 if [ -n "$expected_hash" ]; then
-    printf '%s\n' "$expected_hash" | /usr/bin/grep -Eq '^[a-fA-F0-9]{64}$' || fail 'Invalid SHA-256 digest.'
     expected_hash=$(printf '%s' "$expected_hash" | tr 'ABCDEF' 'abcdef')
     [ "$(hash_file "$dmg")" = "$expected_hash" ] || fail 'DMG SHA-256 digest mismatch. Nothing was changed.'
 fi
@@ -169,7 +174,7 @@ if [ "$present" = yes ]; then
     rm -rf "${tmp:?}/archive"
 fi
 if [ "$dry" = yes ]; then
-    printf 'Dry run: would mount the DMG read-only, copy, remove quarantine, verify its signature, and swap %s.\n' "$app"
+    printf 'Dry run: would mount the DMG read-only, copy, verify its signature, remove quarantine, and swap %s.\n' "$app"
 else
     printf 'Installing the fork...\n'
     mount_dmg
@@ -186,9 +191,11 @@ else
     undo=$(printf '/bin/bash %q %q' "$backup/rollback-fork.sh" "$backup")
     ensure_still_quit
     swap_app
+    printf 'Backup: %s\n' "$backup"
+    printf 'To undo: %s\n' "$undo"
     state_msg="The fork is installed. To undo: $undo"
     [ "$(version "$app")" = "$fork_version" ] || fail "Installed version verification failed. $state_msg"
-    xattr -lr "$app" > "$tmp/xattrs"
+    xattr -lrs "$app" > "$tmp/xattrs"
     ! /usr/bin/grep -Fq 'com.apple.quarantine' "$tmp/xattrs" || fail "Quarantine remains on installed app. $state_msg"
     codesign --verify "$app"
 fi
