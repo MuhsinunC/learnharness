@@ -109,6 +109,40 @@ async function crossOriginRefused(headers: Record<string, string>, ownOrigin: st
 	assert.equal(graph.status, 400, "and reaches the import route itself (no files)");
 }
 
+const CSRF_REFUSAL = { error: "Change LearnHarness only from its own pages." };
+
+/** LH-60: reads too. Another page's GET is refused before the route runs
+ * (/api/stt/token would mint a Deepgram token with the learner's key,
+ * /api/models asks the subscription bridges), on every GET route; the
+ * app's own page and a non-browser client (`headers` alone: no Origin, no
+ * Sec-Fetch-Site) still reach the route. The harness has no Deepgram key,
+ * so reaching the token route is its 503. */
+async function crossSiteReadsRefused(headers: Record<string, string>, ownOrigin: string): Promise<void> {
+	for (const route of ["/api/stt/token", "/api/models"]) {
+		for (const extra of [{ "sec-fetch-site": "cross-site" }, { "sec-fetch-site": "same-site" }, { origin: "null" }, { origin: "https://evil.example" }] as Array<Record<string, string>>) {
+			const res = await raw(route, { headers: { ...headers, ...extra } });
+			assert.equal(res.status, 403, `${route} ${JSON.stringify(extra)}`);
+			assert.deepEqual(JSON.parse(res.body), CSRF_REFUSAL, `${route} ${JSON.stringify(extra)}`);
+		}
+		for (const extra of [{ origin: ownOrigin, "sec-fetch-site": "same-origin" }, {}] as Array<Record<string, string>>) {
+			const res = await raw(route, { headers: { ...headers, ...extra } });
+			if (route === "/api/stt/token") {
+				assert.equal(res.status, 503, `${route} ${JSON.stringify(extra)}: ${res.body}`);
+				assert.match(JSON.parse(res.body).message, /No DEEPGRAM_API_KEY/);
+			} else {
+				assert.equal(res.status, 200, `${route} ${JSON.stringify(extra)}: ${res.body}`);
+				assert(Array.isArray(JSON.parse(res.body).models), route);
+			}
+		}
+	}
+	const app = path.join(REPO_ROOT, "app");
+	for (const route of Object.keys(API_ROUTES)) {
+		if (!/export (?:const|async function|function) GET\b/.test(fs.readFileSync(path.join(app, route, "route.ts"), "utf8"))) continue;
+		const res = await raw(route.replace(/\[[^\]]+\]/g, "x"), { headers: { ...headers, "sec-fetch-site": "cross-site" }, headOnly: true });
+		assert.equal(res.status, 403, `GET ${route}`);
+	}
+}
+
 /** The `lh_session=…` pair from a login response. */
 function cookieOf(res: RawResponse): string {
 	const set = [res.headers["set-cookie"] ?? []].flat().find((c) => c.startsWith("lh_session="));
@@ -175,6 +209,7 @@ test("(a) no password: loopback needs no login, remote requests get nothing, and
 	const pathRead = await raw("/api/attachments/file", { method: "POST", headers: { ...local(), ...JSON_BODY }, body: JSON.stringify({ path: "/nonexistent/lh-43.png" }) });
 	assert(![401, 403].includes(pathRead.status), `without a password, host routes answer this computer as before (${pathRead.status})`);
 	await crossOriginRefused(local(), server.url);
+	await crossSiteReadsRefused(local(), server.url);
 
 	// GET /api/claude-code runs the executable: no other page may make it, not even with a GET.
 	// A stand-in on the server's own (harness) HOME records each run; the real claude is never found.
@@ -668,11 +703,15 @@ test("(i) every API route is classified, and a session reaches none of the compu
 	}
 });
 
-test("(i) cross-origin posts are refused with a session cookie too", async () => {
+test("(i) cross-origin posts and reads are refused with a session cookie too", async () => {
 	const cookie = cookieOf(await login("100.70.0.19", PASSWORD));
 	await crossOriginRefused(viaServe("100.70.0.19", { cookie }), `https://${TS_HOST}`);
+	await crossSiteReadsRefused(viaServe("100.70.0.19", { cookie }), `https://${TS_HOST}`);
 	const laptop = cookieOf(await loginLocal("100.70.0.19"));
 	await crossOriginRefused(local({ cookie: laptop }), server.url);
+	await crossSiteReadsRefused(local({ cookie: laptop }), server.url);
+	// Without the cookie a non-browser read is a 401, as every request is once a password exists.
+	assert.equal((await raw("/api/models", { headers: local() })).status, 401);
 });
 
 test("(c) a login that races turning remote access off gets the off page, never a 500", async () => {
