@@ -9,6 +9,8 @@
  *     loopback and every forwarding header is absent or loopback (Next
  *     fills x-forwarded-for/-host from the socket, so values are checked,
  *     not presence). Anything else, tailscale serve included, gets nothing.
+ *     The desktop server sends a "local" page load (no window cookie) to
+ *     the login page instead (proxy.ts, LH-45): its API would refuse it.
  *   - Password set: no header heuristic is trusted, since any header-less
  *     TCP forwarder (tailscale serve --tcp, editor port forwarding,
  *     ssh -R) would pass it. Every browser request needs a session, on
