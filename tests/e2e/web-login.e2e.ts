@@ -7,7 +7,8 @@ import { after, before, test } from "node:test";
 import type { Page } from "puppeteer-core";
 import { bootServer, REPO_ROOT, until, type LhServer } from "./harness/server.ts";
 import { launchChrome } from "./harness/chrome.ts";
-import { API_ROUTES } from "../../src/server/desktop-access.ts";
+import { API_ROUTES, routePath } from "../../src/server/desktop-access.ts";
+import { PATH_COMPUTER_ONLY } from "../../src/core/remote-access.ts";
 
 // LH-43: the web login, in web mode (`npm start`: the harness serves the
 // production build on 127.0.0.1, as scripts/web-server.mjs would). A phone
@@ -400,6 +401,8 @@ test("(d) headless Chrome on the tailnet logs in through the login page, uses th
 });
 
 const WEB_COMPUTER_ONLY = "Change this on the computer: run npm run remote-access:off, change it here, then set the password again.";
+/** proxy.ts's refusal of a computer-only route to a session: a typed image path gets its own (LH-45). */
+const computerOnly = (pathname: string) => ({ error: routePath(pathname) === "/api/attachments/file" ? PATH_COMPUTER_ONLY : WEB_COMPUTER_ONLY, computerOnly: true });
 
 test("(h) with a password, a session cannot run binaries, read paths, move endpoints or sign in on the computer", async () => {
 	const cookie = cookieOf(await login("100.70.0.12", PASSWORD));
@@ -421,7 +424,7 @@ test("(h) with a password, a session cannot run binaries, read paths, move endpo
 	] as const) {
 		const res = await send(pathname, method, body);
 		assert.equal(res.status, 403, `${method} ${pathname}`);
-		assert.deepEqual(JSON.parse(res.body), { error: WEB_COMPUTER_ONLY, computerOnly: true }, `${method} ${pathname}`);
+		assert.deepEqual(JSON.parse(res.body), computerOnly(pathname), `${method} ${pathname}`);
 	}
 	assert.equal((await send("/api/keys", "GET")).status, 200, "key status stays readable");
 	assert.equal((await send("/api/chats", "POST", { title: "From a session" })).status, 200);
@@ -660,7 +663,7 @@ test("(i) encoded and odd spellings of /api get the API's refusal, never the rou
 	for (const spelling of ["/%61pi/claude-code", "/%41PI/Claude-Code", "/api/claude%2Dcode", "/%61pi/subscriptions/browser", "/api/attachments/%66ile"]) {
 		const res = await raw(spelling, { method: "POST", headers: { ...viaServe("100.70.0.17", { cookie, origin: `https://${TS_HOST}` }), ...JSON_BODY }, body: "{}" });
 		assert.equal(res.status, 403, spelling);
-		assert.deepEqual(JSON.parse(res.body), { error: WEB_COMPUTER_ONLY, computerOnly: true }, spelling);
+		assert.deepEqual(JSON.parse(res.body), computerOnly(spelling), spelling);
 	}
 	// A spelling no route in API_ROUTES fits is refused to a session, never passed on.
 	for (const spelling of ["/api/claude-code-x", "/api/keys/a/b", "/api/nope", "/apix/settings", "/api"]) {
@@ -698,7 +701,7 @@ test("(i) every API route is classified, and a session reaches none of the compu
 		for (const method of methods) {
 			const res = await raw(route.replace(/\[[^\]]+\]/g, "x"), { method, headers: { ...viaServe("100.70.0.18", { cookie, origin: `https://${TS_HOST}` }), ...JSON_BODY }, body: method === "GET" ? undefined : "{}" });
 			assert.equal(res.status, 403, `${method} ${route}`);
-			assert.deepEqual(JSON.parse(res.body), { error: WEB_COMPUTER_ONLY, computerOnly: true }, `${method} ${route}`);
+			assert.deepEqual(JSON.parse(res.body), computerOnly(route), `${method} ${route}`);
 		}
 	}
 });

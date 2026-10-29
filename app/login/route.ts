@@ -14,6 +14,7 @@ import {
 	chargeLoginAttempt,
 	clientKey,
 	createSession,
+	fromThisMachine,
 	isDesktopServer,
 	loginRetryAfter,
 	passwordConfigured,
@@ -28,7 +29,12 @@ export const dynamic = "force-dynamic";
 
 const escape = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
-function page(status: number, next: string, message: string | null, extra: Record<string, string> = {}): Response {
+/** Remote access off in the desktop app (LH-45). Setting a password moves
+ * it to its fixed port once reopened, so neither text says "log in here". */
+const DESKTOP_OFF_HERE = `<p>Remote access is off. This is the LearnHarness desktop app: use it in its own window. To use it from a browser too, set a password in the desktop app under Settings → General → Remote access and reopen the app; Settings then shows the address to use.</p>`;
+const DESKTOP_OFF_REMOTE = `<p>Remote access is off. On the computer, set a password in the LearnHarness desktop app under Settings → General → Remote access and reopen the app; Settings then shows the address to open on this device.</p>`;
+
+function page(req: Request, status: number, next: string, message: string | null, extra: Record<string, string> = {}): Response {
 	const form = !remoteAccessAvailable()
 		? `<p>Remote access works only in the desktop app or with npm start, never with a development server.</p>`
 		: passwordConfigured()
@@ -38,8 +44,8 @@ function page(status: number, next: string, message: string | null, extra: Recor
 <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
 <button type="submit">Log in</button>
 </form>`
-		: isDesktopServer() // a browser that found the desktop app's server (LH-45)
-		? `<p>Remote access is off. This is the LearnHarness desktop app: use it in its own window. To use it from a browser, set a password in the desktop app under Settings → General → Remote access, then log in here.</p>`
+		: isDesktopServer() // a browser that found the desktop app's server, on this computer or forwarded
+		? fromThisMachine(req.headers) ? DESKTOP_OFF_HERE : DESKTOP_OFF_REMOTE
 		: `<p>Remote access is off. Set a password on the computer running LearnHarness: in the desktop app under Settings → General → Remote access, or with <code>npm run remote-access:set-password</code>.</p>`;
 	const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -69,24 +75,24 @@ const redirect = (location: string, extra: Record<string, string> = {}) =>
 export async function GET(req: Request): Promise<Response> {
 	const next = safeNext(new URL(req.url).searchParams.get("next"));
 	if (req.headers.get(ACCESS_HEADER)) return redirect(next);
-	return page(200, next, null);
+	return page(req, 200, next, null);
 }
 
 export async function POST(req: Request): Promise<Response> {
-	if (!sameOriginRequest(req.headers)) return page(403, "/", "This login form must be sent from its own page.");
+	if (!sameOriginRequest(req.headers)) return page(req, 403, "/", "This login form must be sent from its own page.");
 	const form = await req.formData().catch(() => null);
 	const next = safeNext(form?.get("next"));
-	if (!remoteAccessAvailable() || !passwordConfigured()) return page(403, next, null);
+	if (!remoteAccessAvailable() || !passwordConfigured()) return page(req, 403, next, null);
 	const key = clientKey(req.headers);
 	const wait = loginRetryAfter(key);
-	if (wait > 0) return page(429, next, "Too many failed attempts. Try again later.", { "Retry-After": String(wait) });
+	if (wait > 0) return page(req, 429, next, "Too many failed attempts. Try again later.", { "Retry-After": String(wait) });
 	const release = chargeLoginAttempt(key);
 	const password = form?.get("password");
 	const proof = typeof password === "string" && password ? await verifyPassword(password) : null;
-	if (!proof) return page(401, next, "Wrong password.");
+	if (!proof) return page(req, 401, next, "Wrong password.");
 	release();
 	// The password was changed or removed while this one was being checked.
 	const token = createSession(req.headers, proof);
-	if (!token) return passwordConfigured() ? page(401, next, "Wrong password.") : page(403, next, null);
+	if (!token) return passwordConfigured() ? page(req, 401, next, "Wrong password.") : page(req, 403, next, null);
 	return redirect(next, { "Set-Cookie": sessionCookie(token, req.headers) });
 }

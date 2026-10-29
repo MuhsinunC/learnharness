@@ -9,8 +9,9 @@
  *     loopback and every forwarding header is absent or loopback (Next
  *     fills x-forwarded-for/-host from the socket, so values are checked,
  *     not presence). Anything else, tailscale serve included, gets nothing.
- *     The desktop server sends a "local" page load (no window cookie) to
- *     the login page instead (proxy.ts, LH-45): its API would refuse it.
+ *     The desktop server has no "local": its window holds a per-launch
+ *     secret (proxy.ts), and a browser without it would load pages whose
+ *     every API call is refused, so it gets the login page (LH-45).
  *   - Password set: no header heuristic is trusted, since any header-less
  *     TCP forwarder (tailscale serve --tcp, editor port forwarding,
  *     ssh -R) would pass it. Every browser request needs a session, on
@@ -29,6 +30,7 @@ import { createHash, randomBytes, scrypt, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { PATHS } from "../../config.ts";
+import { isDesktopServer } from "./desktop-access.ts";
 import { TAILSCALE_BINS } from "./tailscale-bins.mjs";
 
 const SESSION_COOKIE = "lh_session";
@@ -220,7 +222,8 @@ function hostOf(value: string): string | null {
 	}
 }
 
-function fromThisMachine(headers: Headers): boolean {
+/** Host is loopback and nothing says the request was forwarded. */
+export function fromThisMachine(headers: Headers): boolean {
 	const host = hostOf(headers.get("host") ?? "");
 	if (!host || !isLoopbackHost(host)) return false;
 	const forwardedHost = headers.get("x-forwarded-host");
@@ -236,7 +239,7 @@ function fromThisMachine(headers: Headers): boolean {
  * proxy.ts's to check. See the trust rule above. */
 export function decideAccess(headers: Headers, env: Record<string, string | undefined> = process.env): Access | null {
 	const record = remoteAccessAvailable(env) ? readRecord() : null;
-	if (!record) return fromThisMachine(headers) ? "local" : null;
+	if (!record) return !isDesktopServer(env) && fromThisMachine(headers) ? "local" : null;
 	return validSession(record, headers) ? "session" : null;
 }
 
