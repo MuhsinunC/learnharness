@@ -7,7 +7,7 @@ import { GraphView } from "@/components/graph-view";
 import { MinimalHome } from "@/components/minimal-home";
 import { SetupDialog } from "@/components/setup-dialog";
 import { ComposerActions, NodePickerControl } from "@/components/composer-actions";
-import { ClaudeCodeOffNotice, preSendRemedy, useModelSetup, selectedModelUnavailable, openModelPicker, ZeroKeysPill } from "@/components/setup-cta";
+import { ClaudeCodeOffNotice, claudeCodeOff, useModelSetup, selectedModelUnavailable, openModelPicker, ZeroKeysPill } from "@/components/setup-cta";
 import { DictationBar, joinDictation, useDictation } from "@/components/dictation";
 import { useFieldCycle } from "@/components/field-cycle";
 import { SidebarToggle } from "@/components/sidebar";
@@ -45,8 +45,10 @@ export function Home({
 	// a topic opens the setup dialog WITH THE DRAFT PRESERVED (Save
 	// stores slots only; the learner sends the message themselves).
 	const { catalog, configured, zeroKeys } = useModelSetup(initialConfigured);
-	const remedy = preSendRemedy(zeroKeys, catalog);
-	const [noticeShown, setNoticeShown] = useState(false);
+	const strong = catalog?.slots.strong?.model;
+	const strongModel = strong ? `${strong.provider}:${strong.id}` : undefined;
+	// An off Claude Code Strong pin shows its notice in place of key setup.
+	const claudeOff = claudeCodeOff(catalog, strongModel);
 	const [setupOpen, setSetupOpen] = useState(false);
 	// Voice dictation (STT wave, 2026-09-17): finals append at the end of the
 	// topic draft; the strip lives in the stats bar's middle slot.
@@ -119,11 +121,6 @@ export function Home({
 			setSetupOpen(true);
 			return;
 		}
-		// A Claude Code Strong pin that is off needs restart instructions.
-		if (remedy === "notice") {
-			setNoticeShown(true);
-			return;
-		}
 		// The pre-send KEY guards (owner interlude, no-orphan-chats): the
 		// models case guards BEFORE creation; the key cases must too — a
 		// refused first send would otherwise leave an orphan error-shell
@@ -132,11 +129,10 @@ export function Home({
 		// an unavailable selection with another provider opens its ordinary
 		// picker. The server's admission gate remains the belt.
 		if (zeroKeys) {
-			setSetupOpen(true);
+			if (!claudeOff) setSetupOpen(true);
 			return;
 		}
-		const strong = catalog?.slots.strong?.model;
-		if (selectedModelUnavailable(catalog, strong ? `${strong.provider}:${strong.id}` : undefined)) {
+		if (selectedModelUnavailable(catalog, strongModel)) {
 			openModelPicker();
 			return; // Preserve the draft and never create an orphan session.
 		}
@@ -232,10 +228,8 @@ export function Home({
 								onClear={() => setPracticeProps([])}
 							/>
 						)}
-						setup={noticeShown && remedy === "notice" ? (
-							<ClaudeCodeOffNotice />
-						) : zeroKeys ? (
-							<ZeroKeysPill inline onOpen={() => setSetupOpen(true)} />
+						setup={zeroKeys ? (
+							claudeOff ? <ClaudeCodeOffNotice /> : <ZeroKeysPill inline onOpen={() => setSetupOpen(true)} />
 						) : (
 							!configured && (
 								<button

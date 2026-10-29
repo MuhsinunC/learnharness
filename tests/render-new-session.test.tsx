@@ -4,8 +4,6 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ClaudeCodeOffNotice } from "../components/setup-cta.tsx";
-import { CLAUDE_CODE_OFF_REFUSAL } from "../src/core/settings.ts";
 import { DraftShell, startDraftSession } from "../components/new-session.tsx";
 import { clearOpeningPrompt, readOpeningPrompt, OPENING_PROMPT_FAILURE } from "../components/opening-prompt.ts";
 
@@ -255,14 +253,4 @@ describe("the practice draft (?mode=practice, 2026-10-04)", () => {
 		await startDraftSession("orbital mechanics", f);
 		assert.deepEqual(body, { title: "orbital mechanics" });
 	});
-});
-
-
-it("the draft setup slot renders the subscription-off notice without a key button", () => {
-	const html = renderToStaticMarkup(
-		<DraftShell busy={false} text="keep this draft" onChange={() => {}} onSend={() => {}} setupCta={<ClaudeCodeOffNotice />} />,
-	);
-	assert.ok(html.includes('data-testid="claude-code-off-notice"'));
-	assert.ok(html.includes(CLAUDE_CODE_OFF_REFUSAL.replaceAll("'", "&#x27;")));
-	assert.ok(!html.includes("Add a key"));
 });

@@ -8,7 +8,7 @@ import { DictationBar, joinDictation, useDictation } from "@/components/dictatio
 import { useFieldCycle } from "@/components/field-cycle";
 import { SidebarToggle } from "@/components/sidebar";
 import { SetupDialog } from "@/components/setup-dialog";
-import { ClaudeCodeOffNotice, preSendRemedy, useModelSetup, selectedModelUnavailable, openModelPicker, ZeroKeysPill } from "@/components/setup-cta";
+import { ClaudeCodeOffNotice, claudeCodeOff, useModelSetup, selectedModelUnavailable, openModelPicker, ZeroKeysPill } from "@/components/setup-cta";
 import { StatsBar } from "@/components/stats-bar";
 import { ChainTableOverlay } from "@/components/chain-table.tsx";
 import { ComposerActions, NodePickerControl } from "@/components/composer-actions";
@@ -291,8 +291,10 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 	// Save stores the slots and never sends (owner ruling 2026-10-09) —
 	// the learner sends the draft themselves.
 	const { catalog, configured, zeroKeys } = useModelSetup(initialConfigured);
-	const remedy = preSendRemedy(zeroKeys, catalog);
-	const [noticeShown, setNoticeShown] = useState(false);
+	const strong = catalog?.slots.strong?.model;
+	const strongModel = strong ? `${strong.provider}:${strong.id}` : undefined;
+	// An off Claude Code Strong pin shows its notice in place of key setup.
+	const claudeOff = claudeCodeOff(catalog, strongModel);
 	const [setupOpen, setSetupOpen] = useState(false);
 	// No session yet: intake gates on the strong slot the new chat is
 	// stamped from.
@@ -305,11 +307,6 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 			setSetupOpen(true);
 			return;
 		}
-		// A Claude Code Strong pin that is off needs restart instructions.
-		if (remedy === "notice") {
-			setNoticeShown(true);
-			return;
-		}
 		// The pre-send KEY guards (owner interlude, no-orphan-chats): guard
 		// BEFORE startDraftSession creates the record — a refused first
 		// send would otherwise leave an orphan error-shell chat in the
@@ -317,11 +314,10 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 		// selection with another provider opens the ordinary Strong picker.
 		// The server's admission gate remains the belt.
 		if (zeroKeys) {
-			setSetupOpen(true);
+			if (!claudeOff) setSetupOpen(true);
 			return;
 		}
-		const strong = catalog?.slots.strong?.model;
-		if (selectedModelUnavailable(catalog, strong ? `${strong.provider}:${strong.id}` : undefined)) {
+		if (selectedModelUnavailable(catalog, strongModel)) {
 			openModelPicker();
 			return; // The learner replaces it explicitly, then sends again.
 		}
@@ -339,7 +335,7 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 				setBusy(false);
 				setStartError(true);
 			});
-	}, [router, configured, remedy, zeroKeys, catalog, mode, attach.items]);
+	}, [router, configured, claudeOff, zeroKeys, catalog, strongModel, mode, attach.items]);
 
 	return (
 		<>
@@ -386,10 +382,8 @@ export function NewSession({ initialConfigured, mode = "teach" }: { initialConfi
 					/>
 				}
 				setupCta={
-					noticeShown && remedy === "notice" ? (
-						<ClaudeCodeOffNotice />
-					) : zeroKeys ? (
-						<ZeroKeysPill inline onOpen={() => setSetupOpen(true)} />
+					zeroKeys ? (
+						claudeOff ? <ClaudeCodeOffNotice /> : <ZeroKeysPill inline onOpen={() => setSetupOpen(true)} />
 					) : (
 						!configured && (
 							<button
