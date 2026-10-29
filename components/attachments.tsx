@@ -77,8 +77,10 @@ async function refusalOf(res: Response | null): Promise<Intake> {
 }
 
 /** The server's refusal of path reads to this browser (a logged-in
- *  session, LH-45). Access is fixed for the page's life, so later sends
- *  skip the request; a model refusal is never kept, it changes with the model. */
+ *  session, LH-45), kept so later sends skip the request. One case goes
+ *  stale: turning remote access off from this page makes it local, and
+ *  paths still go as text until a reload. A model refusal is never kept,
+ *  since it changes with the model. */
 let pathsRefused: string | null = null;
 
 /** The composer-side state for one chat (or the new-session draft, with
