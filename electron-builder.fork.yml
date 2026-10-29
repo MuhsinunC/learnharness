@@ -1,0 +1,8 @@
+extends: ./electron-builder.yml
+publish: null
+mac:
+  identity: "-"
+  notarize: false
+  hardenedRuntime: false
+  target: dmg
+  artifactName: "${productName}-${version}-${arch}.${ext}"
