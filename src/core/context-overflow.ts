@@ -84,3 +84,33 @@ export function reportedContextLimit(text: string | undefined): number | null {
 	}
 	return null;
 }
+
+const tokenCount = (raw: string | undefined) => Number(raw?.replace(/,/g, ""));
+
+/** The INPUT a rejection says the provider counted, in tokens, or null
+ *  (LH-54): OpenRouter sums its parts ("(24953 of text input, 3331 of
+ *  tool input, 12933 in the output)"), OpenAI names the messages ("8500
+ *  in the messages" or "your messages resulted in 9192 tokens"),
+ *  Anthropic the prompt ("prompt is too long: 213462 tokens"). Never the
+ *  reply's max tokens, which the provider adds on top. */
+export function reportedInputTokens(text: string | undefined): number | null {
+	if (!text) return null;
+	const parts = [...text.matchAll(/([\d,]+) of [a-z ]*?input/gi)].map((m) => tokenCount(m[1]));
+	if (parts.length) return parts.every(Number.isFinite) ? parts.reduce((a, b) => a + b, 0) : null;
+	const n = tokenCount((/([\d,]+) in the messages/i.exec(text) ?? /messages resulted in ([\d,]+) tokens/i.exec(text) ?? /prompt is too long: ([\d,]+) tokens/i.exec(text))?.[1]);
+	return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/** Set by the engine on a provider's length rejection (LH-54,
+ *  agent/models.ts): pi-ai's estimate of the request's input, the one
+ *  the request's margin was sized from. With the provider's own count
+ *  (reportedInputTokens) it measures how much more the provider counts. */
+export interface SentEstimate {
+	sentEstimate: number;
+}
+
+/** The estimate the engine stamped on this rejection, if any. */
+export function sentEstimate(message: unknown): number | undefined {
+	const n = (message as Partial<SentEstimate> | undefined)?.sentEstimate;
+	return typeof n === "number" && n > 0 ? n : undefined;
+}

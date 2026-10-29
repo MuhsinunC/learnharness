@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { normalizeContext, type StreamFunction } from "@earendil-works/pi-ai";
+import { AssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import { piEngineForSpec, piModels } from "../src/agent/models.ts";
 
 const spec = { provider: "openrouter", id: "z-ai/glm-5.3" };
@@ -35,7 +36,7 @@ describe("global max output tokens", { concurrency: false }, () => {
 		const calls: Parameters<StreamFunction>[] = [];
 		models.streamSimple = ((...args: Parameters<StreamFunction>) => {
 			calls.push(args);
-			return undefined;
+			return new AssistantMessageEventStream();
 		}) as unknown as StreamFunction;
 		try { run(calls); } finally { models.streamSimple = original; }
 	}

@@ -6,7 +6,9 @@
  * actually enforces, then the turn is retried ONCE (chat-handler). The
  * learner's "Repair this chat" action runs the same compaction. The limit
  * a rejection states is remembered per model (learnedContextLimits), so
- * the threshold compaction fires before the next rejection.
+ * the threshold compaction fires before the next rejection, and so is how
+ * much more than pi-ai's estimate it says the provider counted
+ * (learnedOvercounts, LH-54), so every request keeps that much free.
  *
  * Nothing is ever deleted: the rejected reply stays in the record (pi
  * drops errored assistants on the wire), and full history stays behind a
@@ -42,6 +44,8 @@ import {
 	overflowProviderText,
 	planTreeToText,
 	reportedContextLimit,
+	reportedInputTokens,
+	sentEstimate,
 	type ChatRecord,
 	type CompactionDetails,
 	type LhMarkerMessage,
@@ -61,7 +65,7 @@ import {
 	summarySpan,
 	type CompactionDeps,
 } from "./compaction.ts";
-import { CONTEXT_SAFETY_TOKENS, replyFloorTokens, type PiEngine } from "../agent/models.ts";
+import { CONTEXT_SAFETY_TOKENS, inputBudgetTokens, replyFloorTokens, type PiEngine } from "../agent/models.ts";
 import { stores } from "./stores.ts";
 import { updateSettings } from "../store/settings.ts";
 
@@ -82,19 +86,46 @@ function rejectionInForce(overflow: LhMessage | undefined, model: { provider: st
 	return cleared === undefined || overflow.timestamp > cleared;
 }
 
-/** Remember the limit the chat's newest rejection states for its model —
- *  its own settings key, never the user's window. A held-back request
- *  has no provider text, so it never teaches a limit, nor does a
- *  rejection no longer in force (rejectionInForce). */
+/** An overcount above this is no tokenizer difference: the estimate
+ *  missed part of the request, and nothing is learned from it. */
+const MAX_OVERCOUNT = 2;
+
+/** How much more than pi-ai's estimate this rejection says the provider
+ *  counted (LH-54): its stated input over the estimate the engine
+ *  stamped when it sent the request. Undefined when either is missing
+ *  or the provider counted no more. */
+function rejectionOvercount(overflow: LhMessage | undefined): number | undefined {
+	const counted = reportedInputTokens(overflowProviderText(overflow));
+	const estimate = sentEstimate(overflow);
+	if (!counted || !estimate) return undefined;
+	const ratio = counted / estimate;
+	return ratio > 1 && ratio <= MAX_OVERCOUNT ? ratio : undefined;
+}
+
+/** Remember what the chat's newest rejection states for its model — its
+ *  own settings keys, never the user's window: the limit, and how much
+ *  more than pi-ai's estimate the provider counted (the larger of that
+ *  and what an earlier rejection showed). A held-back request has no
+ *  provider text, so it never teaches either, nor does a rejection no
+ *  longer in force (rejectionInForce). */
 export function learnStatedLimit(model: { provider: string; id: string }, messages: readonly LhMessage[]): void {
 	const overflow = lastOverflow(messages);
 	const stated = reportedContextLimit(overflowProviderText(overflow));
-	if (!stated) return;
+	const overcount = rejectionOvercount(overflow);
+	if (!stated && !overcount) return;
 	const modelId = `${model.provider}:${model.id}`;
 	let learned = false;
 	updateSettings((record) => {
-		learned = rejectionInForce(overflow, model, record.learnedLimitsClearedAt) && record.learnedContextLimits?.[modelId] !== stated;
-		return learned ? { ...record, learnedContextLimits: { ...record.learnedContextLimits, [modelId]: stated } } : record;
+		if (!rejectionInForce(overflow, model, record.learnedLimitsClearedAt)) return record;
+		learned = !!stated && record.learnedContextLimits?.[modelId] !== stated;
+		const higher = !!overcount && overcount > (record.learnedOvercounts?.[modelId] ?? 1);
+		return learned || higher
+			? {
+				...record,
+				...(learned ? { learnedContextLimits: { ...record.learnedContextLimits, [modelId]: stated! } } : {}),
+				...(higher ? { learnedOvercounts: { ...record.learnedOvercounts, [modelId]: overcount } } : {}),
+			}
+			: record;
 	});
 	// The catalog reports the learned limit: open windows refetch it (LH-54).
 	if (learned) emit("models-changed", {});
@@ -120,9 +151,9 @@ const WIRE_CHARS_PER_TOKEN = 3.5;
 /** The share of its room a recovery retry fills, the system prompt and
  *  tool declarations included (LH-55). The OB-0645 live check counted
  *  OpenRouter's pre-flight at about 1.18x the billed tokens: 1/1.18 ≈
- *  0.85, less some headroom. The request's own margin scales with its
- *  input on such a route (LH-54, agent/models contextMarginTokens); this
- *  share keeps the retry well under the held-back floor as well. */
+ *  0.85, less some headroom. The room itself already takes off an
+ *  overcount the rejection stated (LH-54, the engine's margin); the
+ *  share covers a provider whose rejection states no count of its own. */
 const RETRY_FIT_SHARE = 0.8;
 
 /** Per-line cap for the learner's dropped lines in the fallback marker. */
@@ -207,13 +238,15 @@ export interface RecoveryDeps extends Omit<CompactionDeps, "thresholdTokens" | "
 	/** The window to fit (recoveryWindowTokens). */
 	windowTokens: number;
 	/** What the marker and the kept tail may fill, in wire tokens:
-	 *  RETRY_FIT_SHARE of the window less the reply's room
-	 *  (outputReserveTokens), less the system prompt and tool
-	 *  declarations. At most 0 when those leave no room. */
+	 *  RETRY_FIT_SHARE of what the window leaves a request with the
+	 *  reply's room (outputReserveTokens) and the engine's margin, less
+	 *  the system prompt and tool declarations. At most 0 when those
+	 *  leave no room. */
 	fitTokens: number;
 	/** What they may fill before the request is held back: the same
-	 *  share of the window less pi-ai's margin and the least reply room
-	 *  (replyFloorTokens), less the prompt and declarations; the whole of
+	 *  share of what the window leaves with the engine's margin and the
+	 *  least reply room (replyFloorTokens), less the prompt and
+	 *  declarations; the whole of
 	 *  that room when the share leaves none. At most 0 when nothing can
 	 *  be sent: the chat is explained, never condensed. */
 	floorFitTokens: number;
@@ -241,7 +274,10 @@ export function recoveryDeps(chatStore: ChatStore, record: ChatRecord, engine: P
 	const inForce = rejectionInForce(overflow, engine.model, stores.settingsStore.readSettings()?.learnedLimitsClearedAt);
 	const windowTokens = recoveryWindowTokens(overflow, contextWindowFor(engine), failedRequestTokens, inForce);
 	const prefixTokens = requestPrefixTokens(record.id, kind);
-	const floorRoom = windowTokens - CONTEXT_SAFETY_TOKENS - replyFloorTokens(engine.model.maxTokens);
+	// Sized from the engine's own margin (LH-54): with the provider's
+	// overcount, both rooms come down as its requests' do.
+	const floorRoom = inputBudgetTokens(windowTokens, replyFloorTokens(engine.model.maxTokens), engine.overcount);
+	const reserveRoom = inputBudgetTokens(windowTokens, outputReserveTokens(windowTokens, engine.model.maxTokens) - CONTEXT_SAFETY_TOKENS, engine.overcount);
 	const marginedFloorFit = Math.floor(RETRY_FIT_SHARE * floorRoom) - prefixTokens;
 	return {
 		chatStore,
@@ -251,7 +287,7 @@ export function recoveryDeps(chatStore: ChatStore, record: ChatRecord, engine: P
 		rejectionInForce: inForce,
 		failedRequestTokens,
 		windowTokens,
-		fitTokens: Math.floor(RETRY_FIT_SHARE * (windowTokens - outputReserveTokens(windowTokens, engine.model.maxTokens))) - prefixTokens,
+		fitTokens: Math.floor(RETRY_FIT_SHARE * reserveRoom) - prefixTokens,
 		// A prefix that fits only without the margin still gets its room
 		// (LH-55): a budget of 0 would drop the whole history.
 		floorFitTokens: marginedFloorFit > 0 ? marginedFloorFit : floorRoom - prefixTokens,

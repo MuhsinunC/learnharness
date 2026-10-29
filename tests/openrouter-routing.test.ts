@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { normalizeContext, type OpenAICompletionsCompat, type StreamFunction } from "@earendil-works/pi-ai";
+import { AssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import { piEngineForSpec, piModels } from "../src/agent/models.ts";
 
 const spec = { provider: "openrouter", id: "z-ai/glm-5.3" };
@@ -48,7 +49,7 @@ describe("OpenRouter provider-routing file", { concurrency: false }, () => {
 			const models = piModels();
 			const original = models.streamSimple;
 			let captured: Parameters<StreamFunction>[0] | undefined;
-			models.streamSimple = ((model: Parameters<StreamFunction>[0]) => { captured = model; return undefined; }) as unknown as StreamFunction;
+			models.streamSimple = ((model: Parameters<StreamFunction>[0]) => { captured = model; return new AssistantMessageEventStream(); }) as unknown as StreamFunction;
 			try {
 				const requestModel = { ...catalog };
 				piEngineForSpec(spec).streamFn(requestModel, normalizeContext({ messages: [] }), {});
@@ -130,7 +131,7 @@ describe("OpenRouter provider-routing file", { concurrency: false }, () => {
 		const models = piModels();
 		const original = models.streamSimple;
 		let captured: Parameters<StreamFunction>[0] | undefined;
-		models.streamSimple = ((model: Parameters<StreamFunction>[0]) => { captured = model; return undefined; }) as unknown as StreamFunction;
+		models.streamSimple = ((model: Parameters<StreamFunction>[0]) => { captured = model; return new AssistantMessageEventStream(); }) as unknown as StreamFunction;
 		try {
 			const context = normalizeContext({ messages: [] });
 			engine.streamFn(models.getModel(spec.provider, spec.id)!, context, {});

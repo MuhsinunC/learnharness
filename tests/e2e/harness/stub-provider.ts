@@ -39,12 +39,17 @@ export const reply = {
 	tools: (calls: Array<{ name: string; arguments: unknown }>, text?: string): StubReply => ({ kind: "tools", calls, text }),
 	http: (status: number, body: unknown): StubReply => ({ kind: "http", status, body }),
 	baseten403: (): StubReply => ({ kind: "http", status: 403, body: BASETEN_403_BODY }),
-	contextLength: (limit = 8192): StubReply => ({
+	/** A length rejection stating `limit`. With `counted`, it also states
+	 *  what the provider counted, in OpenRouter's words; without, no count
+	 *  (a made-up one would teach the app a false overcount, LH-54). */
+	contextLength: (limit = 8192, counted?: { text: number; tool?: number; output: number }): StubReply => ({
 		kind: "http",
 		status: 400,
 		body: {
 			error: {
-				message: `This model's maximum context length is ${limit} tokens. However, your messages resulted in ${limit + 1000} tokens.`,
+				message: counted
+					? `This endpoint's maximum context length is ${limit} tokens. However, you requested about ${counted.text + (counted.tool ?? 0) + counted.output} tokens (${counted.text} of text input, ${counted.tool !== undefined ? `${counted.tool} of tool input, ` : ""}${counted.output} in the output). Please reduce the length of either one, or use the "middle-out" transform to compress your prompt automatically.`
+					: `This model's maximum context length is ${limit} tokens. Please reduce the length of the messages.`,
 				type: "invalid_request_error",
 				code: "context_length_exceeded",
 			},

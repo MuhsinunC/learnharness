@@ -32,7 +32,9 @@ with fast refresh.
     (default 100 / 20) drives the threshold compaction's usage anchor
   - `reply.tools([{ name, arguments }], text?)`
   - `reply.baseten403()`: HTTP 403 `{"error":"please check the api-key you provided"}`
-  - `reply.contextLength(limit?)`: HTTP 400 `context_length_exceeded`
+  - `reply.contextLength(limit?, counted?)`: HTTP 400 `context_length_exceeded`;
+    with `counted` (`{ text, tool?, output }`) it also states the provider's
+    count, in OpenRouter's words, which teaches the app its overcount
   - `reply.http(status, body)`
   - `reply.hang()`: the request is accepted and never answered
 

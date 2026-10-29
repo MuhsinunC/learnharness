@@ -119,7 +119,11 @@ test("background use on: the held-back paste is condensed and retried, never dro
 	assert.notEqual(last?.role, "user", "the chat does not end silently on the learner's message");
 	const heldBack = c.messages.find((m) => m.heldBack);
 	assert.ok(heldBack, "the held-back rejection is in the record");
-	assert.match(heldBack.errorMessage ?? "", /^Not sent: the reply would have only/);
+	// The room it states adds up (LH-54): the window, less the request, less the margin.
+	const [, room, window, request, margin] = (/^Not sent: the reply would have only (\d+) tokens of room in this chat's (\d+)-token context window \(about (\d+) tokens of request and a (\d+)-token margin\)\.$/.exec(heldBack.errorMessage ?? "") ?? []).map(Number);
+	assert.equal(window, WINDOW, heldBack.errorMessage);
+	assert.equal(margin, 4096, "no overcount shown: pi-ai's flat margin");
+	assert.equal(room, Math.max(window! - request! - margin!, 0), heldBack.errorMessage);
 	assert.equal(recoveryMarkers(c).length, 1, "recovery condensed the older part once");
 	assert.ok(c.messages.indexOf(heldBack) < c.messages.indexOf(recoveryMarkers(c)[0]!), "the marker follows the rejection");
 	assert.ok(isReply(last), "the retry is answered");

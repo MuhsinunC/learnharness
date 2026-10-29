@@ -387,6 +387,11 @@ export interface UserSettings {
 	 *  `provider:id` (LH-40, server-written, never the user's value): the
 	 *  threshold compaction uses min(window, learned limit). */
 	learnedContextLimits?: Record<string, number>;
+	/** How much more than pi-ai's estimate each `provider:id` counts
+	 *  against its window, as its own rejections showed (LH-54, server-
+	 *  written): requests keep that much more free. Absent pair = none
+	 *  shown, pi-ai's flat margin. */
+	learnedOvercounts?: Record<string, number>;
 	/** When the user last saved each pair's window (epoch ms, LH-55): a
 	 *  rejection older than it no longer teaches a limit. */
 	learnedLimitsClearedAt?: Record<string, number>;
@@ -638,6 +643,16 @@ function sanitizeContextWindows(raw: Record<string, unknown>): Record<string, nu
 	return out;
 }
 
+/** Ratios above 1 (a provider counting no more than pi-ai's estimate
+ *  needs no extra margin), kept as stored: never floored like a window. */
+function sanitizeOvercounts(raw: Record<string, unknown>): Record<string, number> {
+	const out: Record<string, number> = {};
+	for (const [key, value] of Object.entries(raw)) {
+		if (typeof value === "number" && Number.isFinite(value) && value > 1) out[key] = value;
+	}
+	return out;
+}
+
 /**
  * Coerce arbitrary JSON (disk file, network body) into a valid delta record:
  * known fields validated strictly (invalid ones drop/clamp per module doc),
@@ -681,6 +696,9 @@ export function sanitizeUserSettings(raw: unknown): UserSettings | null {
 	}
 	if (r.learnedContextLimits !== null && typeof r.learnedContextLimits === "object" && !Array.isArray(r.learnedContextLimits)) {
 		out.learnedContextLimits = sanitizeContextWindows(r.learnedContextLimits as Record<string, unknown>);
+	}
+	if (r.learnedOvercounts !== null && typeof r.learnedOvercounts === "object" && !Array.isArray(r.learnedOvercounts)) {
+		out.learnedOvercounts = sanitizeOvercounts(r.learnedOvercounts as Record<string, unknown>);
 	}
 	if (r.learnedLimitsClearedAt !== null && typeof r.learnedLimitsClearedAt === "object" && !Array.isArray(r.learnedLimitsClearedAt)) {
 		out.learnedLimitsClearedAt = sanitizeContextWindows(r.learnedLimitsClearedAt as Record<string, unknown>);

@@ -21,7 +21,7 @@ import { Value } from "typebox/value";
 import { type ModelRole } from "../../config.ts";
 import { claudeCodeProvider, type ClaudeCodeProviderDeps } from "./claude-code/provider.ts";
 import { DEFAULT_THINKING_ORDER } from "../core/settings.ts";
-import type { HeldBack } from "../core/context-overflow.ts";
+import { contextOverflowState, type HeldBack } from "../core/context-overflow.ts";
 import packageMetadata from "../../package.json" with { type: "json" };
 import { chatGPTModel } from "./chatgpt-bridge.ts";
 import { chatGPTStream } from "./chatgpt-stream.ts";
@@ -57,6 +57,10 @@ export interface PiEngine {
 	/** The resolved (config-or-settings, CLAMPED) thinking level —
 	 *  observability + tests; the streamFn pins it anyway. */
 	level?: ThinkingLevel;
+	/** The model's learned overcount (ResolvedModelSpec.overcount): the
+	 *  threshold compaction and recovery size from the same margin as
+	 *  the engine's requests (contextMarginTokens). */
+	overcount?: number;
 }
 
 export type { ThinkingLevel };
@@ -139,6 +143,10 @@ export interface ResolvedModelSpec {
 	 *  the engine's window never exceeds it, so pi-ai's max-tokens clamp
 	 *  uses the real limit, not a larger custom window (LH-50). */
 	contextLimit?: number;
+	/** How much more than pi-ai's estimate the provider counted in its
+	 *  own rejections (LH-54's learned overcount): the engine's requests
+	 *  keep that much more free (contextMarginTokens). */
+	overcount?: number;
 }
 
 /** The first entry of the baked default order the model supports (owner,
@@ -205,44 +213,57 @@ export const CONTEXT_SAFETY_TOKENS = 4096;
  *  or the model's whole max output when that is smaller. */
 export const replyFloorTokens = (maxTokens: number) => Math.min(1024, maxTokens);
 
-/** How much more than pi-ai's estimate a provider counts against the
- *  window before it accepts a request (LH-54). OpenRouter's pre-flight
- *  count ran about 1.18x the tokens it billed, and billed matched pi's
- *  estimate (OB-0646 live check, qwen3-14b), so its margin must grow
- *  with the input; 1.2 leaves a little headroom. A provider not listed
- *  has shown no overcount and keeps pi-ai's flat margin. */
-const PREFLIGHT_OVERCOUNT: Partial<Record<string, number>> = { openrouter: 1.2 };
+/** The margin a request keeps under the window, for pi-ai's estimate
+ *  of its input (LH-54): pi-ai's flat 4,096, plus what the provider
+ *  counts over that estimate when its rejections showed it counts more
+ *  (`overcount`, the learned ratio). The request clamp, the held-back
+ *  floor, the threshold compaction and recovery all size from it. */
+export function contextMarginTokens(estimate: number, overcount = 1): number {
+	return CONTEXT_SAFETY_TOKENS + Math.max(0, Math.ceil(estimate * (overcount - 1)));
+}
 
-/** The margin a request leaves under the window: pi-ai's flat 4,096, or
- *  the provider's overcount of the estimate when that is larger. */
-function contextMarginTokens(provider: string, estimate: number): number {
-	const overcount = PREFLIGHT_OVERCOUNT[provider];
-	return overcount ? Math.max(CONTEXT_SAFETY_TOKENS, Math.ceil(estimate * (overcount - 1))) : CONTEXT_SAFETY_TOKENS;
+/** Its inverse: the largest estimate a request may carry and still leave
+ *  its reply `room` tokens (estimate + margin + room ≤ window). */
+export function inputBudgetTokens(windowTokens: number, room: number, overcount = 1): number {
+	return Math.floor((windowTokens - CONTEXT_SAFETY_TOKENS - room) / Math.max(overcount, 1));
 }
 
 /** The reply room this request goes out with: window − pi-ai's estimate
  *  of the context (system prompt, tool declarations, messages) − the
- *  margin (contextMarginTokens). `extraMargin` is what that margin adds
- *  to pi-ai's own, which the stream passes on as a smaller window. */
-function replyRoom(model: Model<Api>, context: Context): { room: number; extraMargin: number } {
-	if (!(model.contextWindow > 0)) return { room: Infinity, extraMargin: 0 };
+ *  margin (contextMarginTokens). */
+function replyRoom(model: Model<Api>, context: Context, overcount: number | undefined): { room: number; estimate: number; margin: number } {
 	const estimate = estimateContextTokens(normalizeContext(context)).tokens;
-	const margin = contextMarginTokens(model.provider, estimate);
-	return { room: model.contextWindow - estimate - margin, extraMargin: margin - CONTEXT_SAFETY_TOKENS };
+	const margin = contextMarginTokens(estimate, overcount);
+	return { room: model.contextWindow > 0 ? model.contextWindow - estimate - margin : Infinity, estimate, margin };
+}
+
+/** The request's stream, with pi-ai's estimate stamped on a length
+ *  rejection (core SentEstimate): the provider's own count in it then
+ *  teaches the model's overcount (LH-54, context-recovery). */
+function withSentEstimate(source: AssistantMessageEventStream, estimate: number): AssistantMessageEventStream {
+	const output = new AssistantMessageEventStream();
+	void (async () => {
+		for await (const event of source) {
+			if (event.type === "error" && contextOverflowState(event.error) !== null) Object.assign(event.error, { sentEstimate: estimate });
+			output.push(event);
+		}
+		output.end();
+	})();
+	return output;
 }
 
 /** A request whose reply would be cut off silently is held back as a
  *  length rejection marked `heldBack` (LH-50, core/context-overflow):
  *  overflow recovery then condenses the chat, or explains that nothing
  *  can (context-recovery). No provider saw it, so it states no limit. */
-function heldBackStream(model: Model<Api>, room: number, lifecycle?: ChatGPTDispatchLifecycle) {
+function heldBackStream(model: Model<Api>, { room, estimate, margin }: ReturnType<typeof replyRoom>, lifecycle?: ChatGPTDispatchLifecycle) {
 	const output = new AssistantMessageEventStream();
 	const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 	markUnadmittedUsage(usage);
 	lifecycle?.noDispatch("heldBack");
 	const error: AssistantMessage & HeldBack = {
 		role: "assistant", api: model.api, provider: model.provider, model: model.id, content: [], usage, stopReason: "error", timestamp: Date.now(),
-		errorMessage: `Not sent: the reply would have only ${Math.max(room, 0)} tokens of room in this chat's ${model.contextWindow}-token context window.`,
+		errorMessage: `Not sent: the reply would have only ${Math.max(room, 0)} tokens of room in this chat's ${model.contextWindow}-token context window (about ${estimate} tokens of request and a ${margin}-token margin).`,
 		heldBack: true,
 	};
 	output.push({ type: "error", reason: "error", error });
@@ -285,6 +306,7 @@ export function piEngineForSpec(spec: ResolvedModelSpec, background: boolean | (
 	return {
 		model,
 		level,
+		...(spec.overcount !== undefined ? { overcount: spec.overcount } : {}),
 		// bound streamSimple: the agent loop forwards state.thinkingLevel as
 		// `reasoning` (undefined = off on pi-ai's scale); the clamp above keeps
 		// the pin honest even when config or settings drift off the map.
@@ -295,18 +317,21 @@ export function piEngineForSpec(spec: ResolvedModelSpec, background: boolean | (
 			const streamModel = model !== catalogModel && matches ? model
 				: cap !== undefined && !matches && requestModel.maxTokens > cap
 					? { ...requestModel, maxTokens: cap } : requestModel;
-			const { room, extraMargin } = replyRoom(streamModel, context);
-			if (room < replyFloorTokens(streamModel.maxTokens)) return heldBackStream(streamModel, room, lifecycle);
+			// The overcount is this model's: another model's request keeps
+			// pi-ai's flat margin.
+			const fit = replyRoom(streamModel, context, matches ? spec.overcount : undefined);
+			if (fit.room < replyFloorTokens(streamModel.maxTokens)) return heldBackStream(streamModel, fit, lifecycle);
 			const outputCeiling = cap === undefined ? undefined : Math.min(streamModel.maxTokens, cap);
 			// pi-ai's margin is fixed: every API's max-tokens clamp (thinking
 			// budgets included) reads the window, so a larger margin goes
 			// through a window that much smaller.
-			const sentModel = extraMargin > 0 ? { ...streamModel, contextWindow: streamModel.contextWindow - extraMargin } : streamModel;
-			return stream(sentModel, context, {
+			const extraMargin = fit.margin - CONTEXT_SAFETY_TOKENS;
+			const sentModel = extraMargin > 0 && streamModel.contextWindow > 0 ? { ...streamModel, contextWindow: streamModel.contextWindow - extraMargin } : streamModel;
+			return withSentEstimate(stream(sentModel, context, {
 				...options,
 				...(outputCeiling !== undefined && options?.maxTokens !== undefined && options.maxTokens > outputCeiling ? { maxTokens: outputCeiling } : {}),
 				reasoning: level === "off" ? undefined : level,
-			});
+			}), fit.estimate);
 		},
 	};
 }
