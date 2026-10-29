@@ -1,6 +1,7 @@
 "use client";
 
-import { ArrowRightIcon, CornerDownLeftIcon, SquareIcon } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { ArrowRightIcon, CornerDownLeftIcon, ImageIcon, SquareIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Hint } from "@/components/ui/hint";
 
@@ -75,10 +76,17 @@ export function Composer({
 	/** The signal's dispatcher (send({type:"next"})) — the chip and the
 	 *  empty-Enter share it. */
 	onNext?: () => void;
-	/** Image intake (LH-39): image files pasted into the textarea or
-	 *  dropped on the composer. Absent = the browser's default paste/drop. */
+	/** Image intake (LH-39): image files pasted into the textarea, dropped
+	 *  on the composer, or (in a browser) picked. Absent = the browser's
+	 *  default paste/drop, and no picker. */
 	onFiles?: (files: File[]) => void;
 }) {
+	// A browser has no image paths to type (a phone, a logged-in session):
+	// a picker is its way in (LH-45). The desktop window keeps paste, drop
+	// and paths. Post-mount, so server and client first renders agree.
+	const [picker, setPicker] = useState(false);
+	useEffect(() => setPicker(!window.lh), []);
+	const fileInput = useRef<HTMLInputElement>(null);
 	const act = () => {
 		const action = enterAction({ busy, canSend, nextProblem });
 		if (action === "stop") onStop();
@@ -101,6 +109,32 @@ export function Composer({
 				onFiles(images);
 			} : undefined}
 		>
+			{onFiles && picker && (
+				<>
+					<input
+						ref={fileInput}
+						type="file"
+						accept="image/*"
+						multiple
+						hidden
+						data-testid="attach-image-input"
+						onChange={(e) => {
+							const images = [...(e.target.files ?? [])].filter((f) => f.type.startsWith("image/"));
+							e.target.value = ""; // allow re-picking the same image
+							if (images.length > 0) onFiles(images);
+						}}
+					/>
+					<button
+						type="button"
+						aria-label="Attach an image"
+						data-testid="attach-image"
+						onClick={() => fileInput.current?.click()}
+						className="flex size-10 shrink-0 items-center justify-center rounded-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+					>
+						<ImageIcon className="size-5" />
+					</button>
+				</>
+			)}
 			<textarea
 				ref={inputRef}
 				value={value}

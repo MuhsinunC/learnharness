@@ -105,7 +105,13 @@ after(async () => {
 });
 
 test("(desktop) before a password: the window works as before, and nothing remote gets in", async () => {
-	assert.equal((await raw("/")).status, 200, "the window's page loads need nothing yet");
+	assert.equal((await raw("/", { headers: WINDOW_PAGE })).status, 200, "the window's page loads carry its cookie");
+	// LH-45: without it, a browser that found this port would load pages
+	// whose every API call is refused; it gets the login page instead.
+	const browser = await raw("/chat/new");
+	assert.equal(browser.status, 303);
+	assert.equal(browser.headers.location, "/login?next=%2Fchat%2Fnew");
+	assert.match((await raw("/login")).body, /Remote access is off\. This is the LearnHarness desktop app: use it in its own window\./);
 	assert.equal((await raw("/api/settings", { headers: WINDOW_API })).status, 200);
 	assert.equal((await raw("/api/settings")).status, 403, "loopback without the secret stays shut, as before");
 	const refusal = { error: "Desktop API access requires the trusted LearnHarness window." };
@@ -299,7 +305,7 @@ test("(desktop) the window changes and removes the password without the current 
 	assert.equal((await raw("/api/remote-access", { method: "DELETE", headers: { ...WINDOW_API, "content-type": "application/json" }, body: "{}" })).status, 200);
 	assert.equal((await remoteAccess()).enabled, false);
 	assert.equal((await raw("/api/settings", { headers: viaServe({ cookie: after }) })).status, 403, "off ends every session");
-	assert.equal((await raw("/")).status, 200, "and the window is back to needing nothing");
+	assert.equal((await raw("/", { headers: WINDOW_PAGE })).status, 200, "and the window is back to needing only its cookie");
 	assert.equal((await put(WINDOW_API, { password: PASSWORD })).status, 200);
 });
 

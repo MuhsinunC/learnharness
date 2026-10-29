@@ -39,6 +39,11 @@ export function proxy(request: NextRequest) {
 		// its page loads. Without it an API call needs a session, never "local".
 		if (api ? desktopAPIAuthorized(request.headers) : desktopPageAuthorized(request.headers)) access = "desktop";
 		else access = decideAccess(request.headers);
+		// A page without the window's cookie is a browser, not the window.
+		// Before any password its pages would load and then meet the refusal
+		// below on every API call (LH-45), so it gets the login page, which
+		// says to use the window or set a password.
+		if (!api && access === "local") access = null;
 		if (api && access !== "desktop" && access !== "session") {
 			return NextResponse.json(
 				{ error: "Desktop API access requires the trusted LearnHarness window." },
