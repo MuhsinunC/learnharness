@@ -1,0 +1,110 @@
+name: Fork Windows build
+
+# Builds the unsigned per-user NSIS installer for a fork version
+# (<package version>-fork.<N>) at the calling workflow's commit and keeps it
+# as the workflow artifact fork-windows-x64. It never tags, uploads to a
+# release or publishes; Fork release calls it and attaches the installer.
+on:
+  workflow_call:
+    inputs:
+      fork_build:
+        description: "N in <package version>-fork.<N>"
+        required: true
+        type: string
+    outputs:
+      exe_name:
+        description: "Installer file name"
+        value: ${{ jobs.build.outputs.exe_name }}
+      exe_sha256:
+        description: "Installer SHA-256"
+        value: ${{ jobs.build.outputs.exe_sha256 }}
+  push:
+    branches: [feat/lh-57-windows-build]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+      FORK_BUILD: ${{ inputs.fork_build || '1' }}
+    outputs:
+      exe_name: ${{ steps.package.outputs.exe_name }}
+      exe_sha256: ${{ steps.package.outputs.exe_sha256 }}
+    steps:
+      - name: Require a GitHub-hosted Windows x64 runner and a valid fork build
+        run: |
+          set -euo pipefail
+          [[ $GITHUB_ACTIONS == true && $RUNNER_ENVIRONMENT == github-hosted ]]
+          [[ $RUNNER_OS == Windows && $RUNNER_ARCH == X64 ]]
+          [[ $FORK_BUILD =~ ^[1-9][0-9]*$ ]] || { echo "fork_build must be a positive integer" >&2; exit 1; }
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+          cache: npm
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          npm ci
+          echo "FORK_VERSION=$(node -p 'require("./package.json").version')-fork.$FORK_BUILD" >> "$GITHUB_ENV"
+      # The same Windows checks as upstream's release package job.
+      - name: Native renderer tests on Windows
+        run: npx electron --import tsx --test tests/pdf-native-render.test.ts tests/pdf-ops.test.ts tests/svg-native-render.test.ts tests/browser-service.test.ts
+        env:
+          NODE_ENV: test
+          ELECTRON_RUN_AS_NODE: "1"
+      - name: Build and smoke the server
+        run: |
+          set -euo pipefail
+          npm run build
+          # Next rewrites this generated declaration during production builds.
+          git checkout -- next-env.d.ts
+          node scripts/smoke-provider-runtime.mjs
+          node scripts/build-server.mjs
+          node scripts/smoke-server.mjs
+          node scripts/smoke-server.mjs --electron
+      - name: Package the unsigned NSIS installer
+        id: package
+        run: |
+          set -euo pipefail
+          unset CSC_LINK CSC_KEY_PASSWORD WIN_CSC_LINK WIN_CSC_KEY_PASSWORD
+          export CSC_IDENTITY_AUTO_DISCOVERY=false
+          npx electron-builder --config electron-builder.fork.yml --win --x64 \
+            --publish never "-c.extraMetadata.version=$FORK_VERSION"
+          name="LearnHarness-$FORK_VERSION-x64-setup.exe"
+          test -f "dist/$name"
+          {
+            echo "exe_name=$name"
+            echo "exe_sha256=$(sha256sum "dist/$name" | cut -d ' ' -f 1)"
+          } >> "$GITHUB_OUTPUT"
+      - name: Check the packaged app's version and updater
+        run: |
+          set -euo pipefail
+          resources=dist/win-unpacked/resources
+          [[ $(node -e 'console.log(JSON.parse(require("@electron/asar").extractFile(process.argv[1], "package.json")).version)' "$resources/app.asar") == "$FORK_VERSION" ]]
+          # No update feed: the fork build must never fetch upstream's installer.
+          test ! -e "$resources/app-update.yml"
+          # The build must not have changed tracked files.
+          git diff --quiet HEAD
+      - name: Initialize packaged providers offline (host and packaged Electron Node)
+        run: |
+          set -euo pipefail
+          node scripts/smoke-provider-runtime.mjs --standalone dist/win-unpacked/resources/server/standalone
+          node scripts/smoke-provider-runtime.mjs --standalone dist/win-unpacked/resources/server/standalone --runtime dist/win-unpacked/LearnHarness.exe
+      - name: Exercise packaged demo runtime (own Electron, no system Chrome)
+        run: node scripts/smoke-demo-runtime.mjs --standalone dist/win-unpacked/resources/server/standalone --runtime dist/win-unpacked/LearnHarness.exe --browser
+      - uses: actions/upload-artifact@v7
+        with:
+          name: fork-windows-x64
+          retention-days: 7
+          if-no-files-found: error
+          path: dist/${{ steps.package.outputs.exe_name }}
