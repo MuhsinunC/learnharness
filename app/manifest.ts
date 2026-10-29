@@ -1,0 +1,21 @@
+import type { MetadataRoute } from "next";
+
+// Home-screen install (LH-46): standalone on Android and iOS, in the app's
+// dark palette. No service worker: neither platform needs one to install.
+export default function manifest(): MetadataRoute.Manifest {
+	return {
+		name: "LearnHarness",
+		short_name: "LearnHarness",
+		description: "A teacher agent with a memory — sessions, quizzes, and a knowledge graph of what you know.",
+		start_url: "/",
+		scope: "/",
+		display: "standalone",
+		theme_color: "#141414",
+		background_color: "#141414",
+		icons: [
+			{ src: "/pwa/icon-192.png", sizes: "192x192", type: "image/png" },
+			{ src: "/pwa/icon-512.png", sizes: "512x512", type: "image/png" },
+			{ src: "/pwa/icon-maskable-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
+		],
+	};
+}
