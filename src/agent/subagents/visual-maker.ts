@@ -7,6 +7,7 @@ import { providerEventObserver, type ProviderEventObserver } from "../provider-e
 import type { VisualResult } from "../../core/contracts.ts";
 import { getHeadless, type HeadlessApi } from "./headless.ts";
 import { isProviderAuthError, modelCallError } from "./auth-fallback.ts";
+import { closeLiveSession } from "../claude-code/live.ts";
 
 /**
  * The visual-maker sub-agent (vision §2.5): authors ONE precise SVG from a
@@ -294,6 +295,8 @@ export async function runVisualMaker(input: VisualMakerInput, opts: VisualMakerO
 		if (isProviderAuthError(err)) throw err; // the job runner's auth fallback decides
 		const msg = err instanceof Error ? err.message : String(err);
 		return { svg: "", notes: `FAILED: the maker crashed — ${msg}` };
+	} finally {
+		closeLiveSession(sessionId);
 	}
 
 	// Iteration limit: deliver the last written SVG only if it was looked at.

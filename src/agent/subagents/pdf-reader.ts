@@ -8,6 +8,7 @@ import { providerEventObserver, type ProviderEventObserver } from "../provider-e
 import type { PdfResult, PdfToolInput } from "../../core/contracts.ts";
 import { getHeadless, type HeadlessApi } from "./headless.ts";
 import { isProviderAuthError, modelCallError } from "./auth-fallback.ts";
+import { closeLiveSession } from "../claude-code/live.ts";
 import { pdfExtract, pdfInfo, pdfProbe, pdfSearch, type PdfSearchHit } from "./pdf-ops.ts";
 
 /**
@@ -339,6 +340,8 @@ export async function runPdfReaderAgent(
 		if (isProviderAuthError(err)) throw err; // the job runner's auth fallback decides
 		const msg = err instanceof Error ? err.message : String(err);
 		return { path: pdfPath, question: input.question, brief: `PDF failed: the reader crashed — ${msg}`, pagesRead: [...read].sort((a, b) => a - b), pagesConsulted: [...consulted].sort((a, b) => a - b) };
+	} finally {
+		closeLiveSession(sessionId);
 	}
 
 	// Iteration limit: deliver whatever was honestly consulted (never invention).
