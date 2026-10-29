@@ -71,9 +71,9 @@ Pi's shape, with Codex's clipping and option 2 as the fallback
   new marker and the kept tail, plus the reply's room (see "The reply's
   room"), all at pi-ai's chars/3.5, must stay within the target. The
   prompt, declarations, marker and tail fill only 0.8 of what the reply's
-  room leaves (LH-55): pi-ai's flat 4,096-token margin does not cover a
-  provider that counts 15-20% more than chars/3.5 (the OB-0645 live check
-  measured OpenRouter's pre-flight count at about 1.18x). When the margin
+  room leaves (LH-55): a provider may count 15-20% more than chars/3.5
+  (the OB-0645 live check measured OpenRouter's pre-flight count at about
+  1.18x; see "The reply's room" for the request margin). When the margin
   leaves no room but the held-back floor itself still does, the retry gets
   that whole room rather than none, so recovery never drops the whole
   history. A rejection's stated limit counts only while the rejection is
@@ -224,8 +224,22 @@ were rejected again, and the chat ended unrecoverable; one huge paste's
 recovery retry was rejected outright (`tests/e2e/output-budget.e2e.ts`
 reproduces both).
 
-A request whose reply room under pi-ai's own rule (window − its estimate −
-4096) would fall below min(1024, the model's max output) is never sent:
+The 4096 is pi-ai's flat margin under the window. A provider whose
+pre-flight count runs above pi-ai's estimate gets a margin that scales with
+the input instead (LH-54, `PREFLIGHT_OVERCOUNT` in `src/agent/models.ts`):
+OpenRouter counted about 1.18x the tokens it billed, which matched pi-ai's
+estimate, so its requests keep `max(4096, 0.2 × estimate)` free. With the
+flat margin, every request between ~22.8k tokens and the threshold of a
+learned 40,960 window was rejected and condensed
+(`tests/e2e/recovery-margin.e2e.ts` (f)). pi-ai's margin is a constant,
+so the extra goes to pi-ai as a window that much smaller, which every
+API's max-tokens clamp reads. The reserve and the threshold above still
+count the flat 4096, so on such a route a request just under the
+threshold gets up to 20% of its input less than the model's max output.
+Providers with no measured overcount (Baseten among them) keep 4096.
+
+A request whose reply room (window − pi-ai's estimate − that margin)
+would fall below min(1024, the model's max output) is never sent:
 `piEngineForSpec`'s stream function holds it back as a length rejection
 marked `heldBack` ("Not sent: the reply would have only R tokens of room in
 this chat's N-token context window."). It is a last-resort guard: normal

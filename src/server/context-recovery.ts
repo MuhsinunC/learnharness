@@ -119,9 +119,10 @@ const WIRE_CHARS_PER_TOKEN = 3.5;
 
 /** The share of its room a recovery retry fills, the system prompt and
  *  tool declarations included (LH-55). The OB-0645 live check counted
- *  OpenRouter's pre-flight at about 1.18x the billed tokens, and pi-ai's
- *  flat 4,096-token margin absorbs that only below ~22.7k tokens once it
- *  clamps max_tokens to the window: 1/1.18 ≈ 0.85, less some headroom. */
+ *  OpenRouter's pre-flight at about 1.18x the billed tokens: 1/1.18 ≈
+ *  0.85, less some headroom. The request's own margin scales with its
+ *  input on such a route (LH-54, agent/models contextMarginTokens); this
+ *  share keeps the retry well under the held-back floor as well. */
 const RETRY_FIT_SHARE = 0.8;
 
 /** Per-line cap for the learner's dropped lines in the fallback marker. */
