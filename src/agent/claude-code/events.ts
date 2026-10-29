@@ -61,6 +61,7 @@ export class EventMapper {
 	private rateLimitRejection: RateLimitInfo | null = null;
 	private lastRateLimitWarnStep: number | null = null;
 	private lastRateLimitWarnThreshold: number | undefined;
+	redact: ((text: string) => string) | undefined;
 	onToolTurnEnded: (() => void) | undefined;
 	constructor(private stream: AssistantMessageEventStream, model: Model<any>,
 		private toolNameMap: ReadonlyMap<string, string>, private logger: EventMapperLogger) {
@@ -119,6 +120,7 @@ export class EventMapper {
 		} else this.endTurn(this.output.stopReason === "length" ? "length" : this.turnSawToolCall ? "toolUse" : "stop");
 	}
 	fail(reason: "aborted" | "error", errorMessage: string): void {
+		errorMessage = this.redact?.(errorMessage) ?? errorMessage;
 		if (this.terminal) return;
 		this.output.stopReason = reason;
 		this.output.errorMessage = errorMessage;

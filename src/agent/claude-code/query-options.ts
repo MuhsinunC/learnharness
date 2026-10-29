@@ -5,6 +5,7 @@
 import { isAbsolute } from "node:path";
 import type { Options, EffortLevel, McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import type { ModelThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
+import type { ClaudeCodeEndpoint } from "../../core/claude-code-endpoint.ts";
 import { buildChildEnv } from "./child-env.ts";
 
 export const CONTINUE_TEXT = "[Continue from the tool result above.]";
@@ -12,6 +13,7 @@ export const MCP_SERVER_NAME = "custom-tools";
 export const MCP_TOOL_PREFIX = `mcp__${MCP_SERVER_NAME}__`;
 
 export type QueryInputs = {
+	endpoint?: ClaudeCodeEndpoint | null;
 	executable: string;
 	cwd: string;
 	cliModel: string;
@@ -47,7 +49,7 @@ export function buildQueryOptions(inputs: QueryInputs, platform: NodeJS.Platform
 		...(inputs.mcpServers !== undefined ? { mcpServers: inputs.mcpServers } : {}),
 		maxTurns: 1,
 		persistSession: false,
-		env: buildChildEnv(),
+		env: buildChildEnv(process.env, inputs.endpoint),
 		permissionMode: "dontAsk",
 		settingSources: [],
 		tools: [],

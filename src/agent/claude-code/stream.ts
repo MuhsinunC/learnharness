@@ -1,5 +1,7 @@
+import type { ClaudeCodeEndpoint } from "../../core/claude-code-endpoint.ts";
 import type { query, Query, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { createAssistantMessageEventStream, type AssistantMessageEventStream, type Model, type SimpleStreamOptions, type TranscriptContext } from "@earendil-works/pi-ai";
+import { redactSecrets } from "./redact.ts";
 import { convertPiMessages } from "./convert.ts";
 import { EventMapper, overageLatched, OVERAGE_REFUSAL, type EventMapperLogger } from "./events.ts";
 import { foldTranscript, splitPrompt } from "./history.ts";
@@ -13,31 +15,38 @@ const sweepKey = Symbol.for("lh.claudeCode.swept");
 const state = globalThis as typeof globalThis & { [sweepKey]?: Set<string> };
 export function resetClaudeCodeStreamForTests(): void { delete state[sweepKey]; }
 export const defaultLoadQuery = () => import("@anthropic-ai/claude-agent-sdk").then(m => m.query);
-type Deps = { executable: string; dataDir: string; claudeDir: string; loadQuery: () => Promise<typeof query>; logger: EventMapperLogger; parkQuietMs?: number; cleanupWaitMs?: number };
+type Deps = { endpoint?: () => ClaudeCodeEndpoint | null; executable: string; dataDir: string; claudeDir: string; loadQuery: () => Promise<typeof query>; logger: EventMapperLogger; parkQuietMs?: number; cleanupWaitMs?: number };
 
 /** options.maxTokens and LH_MAX_OUTPUT_TOKENS do not apply to this provider (no verified SDK surface). */
 export function streamClaudeCode(model: Model<any>, transcript: TranscriptContext, options: SimpleStreamOptions | undefined, deps: Deps): AssistantMessageEventStream {
 	const stream = createAssistantMessageEventStream();
 	const toolNameMap = new Map<string, string>();
-	const mapper = new EventMapper(stream, model, toolNameMap, deps.logger);
 	void run();
 	return stream;
 
 	async function run(): Promise<void> {
+		let endpoint: ClaudeCodeEndpoint | null | undefined;
+		const redact = (text: string) => redactSecrets(text, endpoint);
+		const logger: EventMapperLogger = {
+			debug: text => deps.logger.debug(redact(text)),
+			warn: text => deps.logger.warn(redact(text)),
+		};
+		const mapper = new EventMapper(stream, model, toolNameMap, logger);
+		mapper.redact = redact;
 		let cwd = "", sessionId: string | undefined, release: (() => void) | undefined;
 		let child: Query | undefined, server: ReturnType<typeof createToolServer> | undefined;
 		let pending: Promise<unknown> | undefined, settled = true, closed = false;
 		let parkTimer: ReturnType<typeof setTimeout> | undefined;
 		let wake!: () => void;
 		const ended = new Promise<undefined>(resolve => { wake = () => resolve(undefined); });
-		const warn = (error: unknown) => deps.logger.warn(`claude-code: ${String(error)}`);
+		const warn = (error: unknown) => logger.warn(`claude-code: ${String(error)}`);
 		const abort = () => { stopChild("aborted"); mapper.fail("aborted", "aborted"); wake(); };
 		function stopChild(reason: string): void {
 			clearTimeout(parkTimer);
 			if (closed || !child) return;
 			closed = true;
 			const interruptError = (error: unknown) => {
-				if (error instanceof Error && error.message.startsWith("Query closed")) deps.logger.debug(`claude-code: ${error.message}`);
+				if (error instanceof Error && error.message.startsWith("Query closed")) logger.debug(`claude-code: ${error.message}`);
 				else warn(error);
 			};
 			try { void child.interrupt().catch(interruptError); } catch (error) { interruptError(error); }
@@ -83,7 +92,10 @@ export function streamClaudeCode(model: Model<any>, transcript: TranscriptContex
 				markSessionActive(sessionId);
 			} catch (error) { if (!(error instanceof Error && error.message === "claude-code: empty history")) throw error; }
 			if (tools.length) server = createToolServer(tools, { timeoutMs: 3_600_000, onCall: checkParked });
+			endpoint = deps.endpoint?.();
+			if (deps.endpoint && !endpoint) throw new Error("claude-code: endpoint not configured");
 			const queryOptions = buildQueryOptions({ executable: deps.executable, cwd, cliModel,
+				...(endpoint ? { endpoint } : {}),
 				effort: resolveEffort(model, options?.reasoning), appendPrompt: systemPrompt, resumeId: sessionId,
 				...(server ? { mcpServers: { [MCP_SERVER_NAME]: server.config } } : {}) });
 			const loading = deps.loadQuery();
@@ -119,7 +131,7 @@ export function streamClaudeCode(model: Model<any>, transcript: TranscriptContex
 				let timer: ReturnType<typeof setTimeout> | undefined;
 				await Promise.race([pending, new Promise<void>(resolve => {
 					timer = setTimeout(() => {
-						deps.logger.warn("claude-code: iterator still pending 30s after close");
+						logger.warn("claude-code: iterator still pending 30s after close");
 						try { child?.close(); } catch (error) { warn(error); }
 						resolve();
 					}, 30_000);

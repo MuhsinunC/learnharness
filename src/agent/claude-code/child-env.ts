@@ -1,6 +1,8 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import type { ClaudeCodeEndpoint } from "../../core/claude-code-endpoint.ts";
+
 export const CHILD_ENV_ALLOWLIST = ["HOME", "PATH", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TMPDIR", "TERM", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR"] as const;
 
 // Applied to every child: LearnHarness owns its tools and compaction.
@@ -13,12 +15,12 @@ export const CC_CHILD_ENV = {
 	CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
 } as const;
 
-export function buildChildEnv(source: NodeJS.ProcessEnv = process.env): Record<string, string> {
+export function buildChildEnv(source: NodeJS.ProcessEnv = process.env, endpoint?: ClaudeCodeEndpoint | null): Record<string, string> {
 	const env: Record<string, string> = {};
 	for (const key of CHILD_ENV_ALLOWLIST) {
 		if (source[key] !== undefined) env[key] = source[key];
 	}
-	return { ...env, ...CC_CHILD_ENV };
+	return { ...env, ...CC_CHILD_ENV, ...(endpoint ? { ANTHROPIC_BASE_URL: endpoint.baseUrl, ANTHROPIC_AUTH_TOKEN: endpoint.token } : {}) };
 }
 
 export function childClaudeDir(source: NodeJS.ProcessEnv = process.env): string {

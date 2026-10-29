@@ -54,7 +54,8 @@ if (exists(leakedData)) {
 // the 2026-10-08 payload audit; excluded in next.config.ts — this guard
 // makes a regression loud instead of silent).
 const subscriptionSecrets = fs.readdirSync(STANDALONE).filter((name) => /^(chatgpt|github-copilot|xai)-credentials\.json/.test(name));
-for (const secret of ["auth.json", ...subscriptionSecrets, ".env", ".env.local"]) {
+for (const secret of ["auth.json", ...subscriptionSecrets, "claude-endpoint.json", ".env", ".env.local",
+	...fs.readdirSync(STANDALONE).filter(name => name.startsWith(".claude-endpoint.json.tmp-"))]) {
 	if (exists(path.join(STANDALONE, secret))) {
 		console.error(`[build-server] REFUSING: standalone contains ${secret} — dev secrets would ship in the app.`);
 		console.error("             Check outputFileTracingExcludes in next.config.ts.");

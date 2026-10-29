@@ -16,6 +16,8 @@ auth.json
 chatgpt-credentials.json*
 github-copilot-credentials.json*
 xai-credentials.json*
+claude-endpoint.json
+.claude-endpoint.json.tmp-*
 
 # dev-fresh launcher scratch (fresh-user sim): disposable per launch
 .fresh-data/
