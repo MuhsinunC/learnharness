@@ -100,12 +100,6 @@ const jobRunner = createJobRunner({
 	// undefined and the runner refuses the spawn honestly.
 	engineFor: (role) =>
 		resolveEngine(role),
-	// Key-presence gate (provider-key interlude, 2026-09-25): the runner
-	// reads the resolved engine's provider and asks THIS check (the agent
-	// layer may not read the key store); a missing key refuses the spawn
-	// with the 503-envelope family instead of dying mid-run.
-	providerKeyMissing: (provider, tier) =>
-		providerKeyPresent(provider) ? null : providerKeyMissingEnvelope(provider, [tier]),
 	// The auth fallback (LH-37) honors a subscription's background consent.
 	backgroundAllowed: connectionBackgroundAllowed,
 	// Search port wave (2026-09-20): the researcher's web_search runs on the
@@ -125,11 +119,6 @@ export const extraction = createExtractionPipeline({
 	// with the typed ModelsNotConfiguredError. Direct test values still win.
 	engineFor: (role) =>
 		resolveEngine(role),
-	// Key-presence gate (provider-key interlude, 2026-09-25): same check
-	// the job runner gets — a stage engine whose provider key is gone
-	// refuses BEFORE any batch runs (the typed throw), never mid-run.
-	providerKeyMissing: (provider, tier) =>
-		providerKeyPresent(provider) ? null : providerKeyMissingEnvelope(provider, [tier]),
 	// The auth fallback (LH-37), same consent gate as the job runner.
 	backgroundAllowed: connectionBackgroundAllowed,
 });
@@ -149,7 +138,9 @@ setTurnRunner(async (chatId, input) => {
 /** The settings-resolved engine for one role — BYOK (owner, 2026-09-22):
  *  the chain (role override → slot → NOTHING) may end empty, and undefined
  *  flows through to the per-need refusal gates (runner/extraction), read
- *  FRESH so a settings PUT between dispatch and spawn lands. */
+ *  FRESH so a settings PUT between dispatch and spawn lands. A pinned
+ *  provider whose key is gone (or Claude Code off) throws the typed
+ *  ProviderKeyMissingError: the one key-presence check for both gates. */
 function resolveEngine(role: ModelRole): PiEngine | undefined {
 	const record = stores.settingsStore.readSettings();
 	const spec = resolveRoleSpec(role, record);
