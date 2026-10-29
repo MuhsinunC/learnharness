@@ -77,9 +77,12 @@ with fast refresh.
   Save it with `PUT /api/claude-code {mode: "local", executable}` (send the
   server's own `origin` header). The responder receives each request the
   stub would send to the API (`pid`, `sessionId`, `model`, `effort`,
-  `system`, `tools`, the full `messages`) and returns `{ text?, tools? }`,
-  `{ error }` (a failed result) or `{ hang: true }`. `requests` and
-  `spawns` (each child's pid and argv) record them; see
+  `system`, `tools`, the MCP `toolTimeout`, the full `messages`) and
+  returns `{ text?, tools?, fallback?, toolCall? }`, `{ error }` (a failed
+  result) or `{ hang: true }`. `fallback` sends assistant frames without
+  stream events; `toolCall: "refused"` answers the call inside the stub,
+  `"no-meta"` sends it without its tool-use id. `requests` and `spawns`
+  (each child's pid, argv and endpoint `baseUrl`/`token`) record them; see
   `claude-code-session-reuse.e2e.ts`.
 - `chrome.ts`: `launchChrome(ticket)` starts headless system Chrome with a
   throwaway `--user-data-dir`. Set `CHROME_PATH` to override the binary.
