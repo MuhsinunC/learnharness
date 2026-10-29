@@ -3,7 +3,7 @@ type Ticket = { grant(): void };
 const state = globalThis as typeof globalThis & { [key]?: { active: number; queue: Ticket[] } };
 export function resetClaudeCodeSlotsForTests(): void { delete state[key]; }
 
-/** Callers waiting for a slot; a live child that goes idle while any wait closes (LH-62). */
+/** Callers waiting for a slot; a live child that goes idle while any wait yields its slot (LH-62). */
 export function claudeCodeSlotWaiters(): number { return state[key]?.queue.length ?? 0; }
 
 /** onFull runs once when every slot is taken, before this caller queues: it may close an idle live child (LH-62). */
