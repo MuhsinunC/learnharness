@@ -5,7 +5,8 @@ import { useChatSession } from "@/components/session";
 import { visibleQueuedSteers } from "@/components/session-core";
 import { SetupDialog } from "@/components/setup-dialog";
 import { Hint } from "@/components/ui/hint";
-import { useModelSetup, selectedModelUnavailable, openModelPicker, ZeroKeysPill } from "@/components/setup-cta";
+import { ClaudeCodeOffNotice, claudeCodeOff, useModelSetup, selectedModelUnavailable, openModelPicker, ZeroKeysPill } from "@/components/setup-cta";
+import { useModelCatalog } from "@/components/model-catalog";
 import { useStickToBottomContext, type StickToBottomContext } from "use-stick-to-bottom";
 import {
 	Conversation,
@@ -177,17 +178,6 @@ function parseImagesRefusal(message: string | undefined): string | null {
 	} catch {
 		return null;
 	}
-}
-
-/** Choose the remedy without sending a subscription provider to key setup. */
-export function providerRefusalAction(message: string | undefined): "setup" | "notice" | null {
-	if (!message || !parseProviderKeyRefusal(message)) return null;
-	return JSON.parse(message).provider === "claude-code" ? "notice" : "setup";
-}
-
-/** Show restart instructions rather than the transport envelope. */
-export function refusalBannerText(message: string): string {
-	return providerRefusalAction(message) === "notice" ? JSON.parse(message).error : message;
 }
 
 /** Retry sends no composer text. Its refusal must not resurrect the draft
@@ -596,9 +586,12 @@ export function Chat({
 	// Saved slot completeness is live, but the session's selected route
 	// comes from its own ordinary model control, never today's Strong pin.
 	const { catalog, configured, zeroKeys } = useModelSetup(initialConfigured);
+	const { refresh: refreshCatalog } = useModelCatalog();
 	const catalogRef = useRef(catalog);
 	catalogRef.current = catalog;
 	const [selectedModel, setSelectedModel] = useState<string | undefined>();
+	// An off Claude Code selection shows its notice in place of key setup.
+	const claudeOff = claudeCodeOff(catalog, selectedModel);
 	// The stats bar's model report also clears the image notice (LH-39).
 	const { modelChanged: attachModelChanged } = attach;
 	const modelChanged = useCallback((model: string | undefined) => {
@@ -694,15 +687,14 @@ export function Chat({
 		// provider key is gone also restores the draft. With another provider
 		// connected, repair belongs to the ordinary current-session picker;
 		// otherwise setup derives its exclusive provider/loading stage.
-		// Subscription refusals keep their banner and restart instructions.
-		const action = providerRefusalAction(error.message);
+		const keyRefused = parseProviderKeyRefusal(error.message);
 		// A model that can't read images (LH-39): the draft and its chips
 		// come back with the refusal as the composer's notice (no banner,
 		// no setup — the remedy is another model or the override). A
 		// refused steer has no orphan to drop, and a refetch mid-turn
 		// would wipe the live stream.
 		const images = parseImagesRefusal(error.message);
-		if (!missing && !action && !images) return; // a real error keeps the honest banner
+		if (!missing && !keyRefused && !images) return; // a real error keeps the honest banner
 		const refetch = !(images && busy);
 		// ORDER MATTERS: clearError() flips this effect's own dep (`error`)
 		// and would cancel the in-flight work below — so the banner dismiss,
@@ -721,16 +713,20 @@ export function Chat({
 				attach.restore(draftRef.current.refs);
 				draftRef.current = null;
 			}
-			recoverFromError();
 			if (images) {
+				recoverFromError();
 				clearError();
 				attach.showNotice(images);
 				return;
 			}
-			if (action === "notice") return;
 			clearError();
-			if (action === "setup" && catalogRef.current?.providers.some((p) => p.keyPresent)) openModelPicker();
-			else setSetupOpen(true);
+			// Claude Code off has no key to add: the picker when another
+			// provider can serve, else the off notice (the fresh catalog
+			// shows it in place of key setup).
+			const claudeRefused = keyRefused && (JSON.parse(error.message) as { provider?: string }).provider === "claude-code";
+			if (claudeRefused) refreshCatalog();
+			if (keyRefused && catalogRef.current?.providers.some((p) => p.keyPresent && !(claudeRefused && p.id === "claude-code"))) openModelPicker();
+			else if (!claudeRefused) setSetupOpen(true);
 		})();
 		return () => {
 			cancelled = true;
@@ -1282,14 +1278,11 @@ export function Chat({
 	const doSend = async () => {
 		if (busy || pending || compacting) return;
 		if (!textRef.current.trim() && attach.items.length === 0) return;
-		// A Claude Code selection that is off still sends: the server's refusal
-		// keeps the draft and shows the restart instructions in the banner.
-		const claudeCodeOff = !!selectedModel?.startsWith("claude-code:") && selectedModelUnavailable(catalog, selectedModel);
-		if (zeroKeys && !claudeCodeOff) {
-			setSetupOpen(true);
+		if (zeroKeys) {
+			if (!claudeOff) setSetupOpen(true);
 			return;
 		}
-		if (!claudeCodeOff && selectedModelUnavailable(catalog, selectedModel)) {
+		if (selectedModelUnavailable(catalog, selectedModel)) {
 			openModelPicker();
 			return; // No optimistic send and no change to the learner's draft.
 		}
@@ -1739,7 +1732,7 @@ export function Chat({
 							{openingError && <p role="alert" className="text-sm text-destructive">{OPENING_PROMPT_FAILURE}</p>}
 							{error && (
 								<div data-testid="chat-error" className="flex items-center gap-3 rounded-lg border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm">
-									<span className="min-w-0 flex-1">Something went wrong: {refusalBannerText(error.message)}</span>
+									<span className="min-w-0 flex-1">Something went wrong: {error.message}</span>
 									{repairError?.banner === error.message && (
 										<span data-testid="repair-error" className="shrink-0 text-xs text-muted-foreground">{repairError.text}</span>
 									)}
@@ -1801,7 +1794,11 @@ export function Chat({
 					queuedSteers={visibleQueuedSteers(steerQueue, nativeMessages)}
 					setupCta={
 						zeroKeys ? (
-							<ZeroKeysPill onOpen={() => setSetupOpen(true)} />
+							claudeOff ? (
+								<div className="pointer-events-auto mb-2"><ClaudeCodeOffNotice /></div>
+							) : (
+								<ZeroKeysPill onOpen={() => setSetupOpen(true)} />
+							)
 						) : (
 							!configured && (
 								<div className="pointer-events-auto mb-2 flex justify-center">

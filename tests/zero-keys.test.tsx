@@ -12,7 +12,7 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { parseHTML } from "linkedom";
 import { renderToStaticMarkup } from "react-dom/server";
-import { preSendRemedy, useZeroKeys, hasProviderKey, strongKeyless, ZeroKeysPill } from "../components/setup-cta.tsx";
+import { useZeroKeys, hasProviderKey, strongKeyless, ZeroKeysPill } from "../components/setup-cta.tsx";
 import { notifySettingsSaved } from "../components/settings-signal.ts";
 import type { ModelCatalogResponse } from "../src/core/index.ts";
 import { SetupKeysBody } from "../components/setup-dialog.tsx";
@@ -195,27 +195,4 @@ it("an available Claude Code catalog row suppresses the zero-keys pill without A
 		globalThis.fetch = originalFetch;
 		Object.assign(globalThis, previous);
 	}
-});
-
-
-describe("preSendRemedy", () => {
-	it("a disabled Claude Code strong pin needs a notice even when no keys exist", () => {
-		assert.equal(preSendRemedy(false, catalog("claude-code")), "notice");
-		assert.equal(preSendRemedy(true, catalog("claude-code")), "notice");
-	});
-
-	it("an available Claude Code pin can proceed", () => {
-		assert.equal(preSendRemedy(false, catalog("claude-code", "claude-code")), null);
-	});
-
-	it("other missing keys still need setup", () => {
-		assert.equal(preSendRemedy(false, catalog("openrouter")), "setup");
-		assert.equal(preSendRemedy(true, catalog("openrouter", "openrouter")), "setup");
-	});
-
-	it("an unknown catalog follows keys truth and available providers can proceed", () => {
-		assert.equal(preSendRemedy(true, undefined), "setup");
-		assert.equal(preSendRemedy(false, undefined), null);
-		assert.equal(preSendRemedy(false, catalog("openrouter", "openrouter")), null);
-	});
 });

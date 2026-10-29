@@ -2,7 +2,7 @@ import type { PiEngine } from "../models.ts";
 import type { ModelRole } from "../../../config.ts";
 import { AUTH_PROVIDER_KEYS } from "../../core/auth-keys.ts";
 import { NATIVE_SUBSCRIPTIONS } from "../../core/contracts/subscriptions.ts";
-import type { ModelSlotName, ProviderKeyMissing } from "../../core/settings.ts";
+import type { ModelSlotName } from "../../core/settings.ts";
 
 /**
  * Provider auth failures in background work (LH-37): classify a model
@@ -108,7 +108,6 @@ export function retryRejectedText(fallback: PiEngine, error: ProviderAuthError):
 
 export interface FallbackDeps {
 	engineFor?: (role: ModelRole) => PiEngine | undefined;
-	providerKeyMissing?: (provider: string, tier: ModelSlotName) => ProviderKeyMissing | null;
 	/** Background-use consent for a subscription provider (true for plain
 	 *  API providers). Absent = allowed (engine-injecting tests). */
 	backgroundAllowed?: (provider: string) => boolean;
@@ -122,13 +121,12 @@ export function strongFallback(tier: ModelSlotName, failed: PiEngine, deps: Fall
 	try {
 		strong = deps.engineFor?.("teacher");
 	} catch {
-		return ""; // the strong slot names a model the catalog lacks
+		return ""; // the strong slot names a model the catalog lacks, or its key is gone
 	}
 	if (tier === "strong" || !strong) return "";
 	if (strong.model.provider === failed.model.provider && strong.model.id === failed.model.id) return "";
 	if (tier === "vision" && !strong.model.input.includes("image"))
 		return `Your Strong model (${modelLabel(strong)}) can't read images, so it can't take over.`;
-	if (deps.providerKeyMissing?.(strong.model.provider, "strong")) return "";
 	if (deps.backgroundAllowed && !deps.backgroundAllowed(strong.model.provider))
 		return `Your Strong model (${modelLabel(strong)}) could run this instead, but background use is off for that sign-in. Turn on background use for it in Settings → Providers, or pick another ${SLOT_LABEL[tier]} model.`;
 	return strong;
