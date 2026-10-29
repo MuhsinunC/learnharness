@@ -17,6 +17,8 @@ import { maxOutputTokens, reply, startStubProvider, type StubProvider, type Stub
 // answers past it with pi-ai's real context-length 400, stating LIMIT.
 // Its usage reports the input it counted (chars/4), so the threshold
 // compaction's usage anchor behaves as with a real provider.
+// (j) LH-54: a limit learned in one chat reaches the footer of another
+// chat's open page on the same model, with no reload.
 
 /** The real window, in tokens: between the sixth turn's request (about
  *  116k chars of messages, plus max_tokens 2,048) and the fifth's. Room
@@ -558,4 +560,26 @@ test("(i) the stated limit is learned: after one recovery, the threshold compact
 	const later = done.messages.slice(done.messages.indexOf(done.messages.find((m) => m.id === marker.id)!) + 1);
 	assert.ok(later.some((m) => m.customType === "compaction" && !m.details?.notice), "a threshold compaction fired");
 	assert.equal(recoveryMarkers(done).length, 1);
+});
+
+test("(j) a limit learned in another chat reaches the open page's footer without a reload (LH-54)", async () => {
+	// The open page shows a chat that changes nothing while another chat
+	// on the same model is rejected and teaches the limit: only the
+	// server's word that the catalog changed can update its footer.
+	const open = await newChat("Open in the tab");
+	await grow(open, 1);
+	const other = await newChat("Elsewhere");
+	await grow(other, 5);
+	const page = await openChat(open, '[data-testid="composer"] textarea');
+	try {
+		await footerReads(page, "1.5M");
+		await page.evaluate(() => { (window as { lh54?: boolean }).lh54 = true; });
+		await send(other, "Keep going, part 6.");
+		await settled(other, "the recovered reply elsewhere", replyAfterRecovery);
+		assert.equal(settingsOnDisk().learnedContextLimits?.[`${STUB}:stub-a`], LIMIT, "the rejection taught the limit");
+		await footerReads(page, "28.5k");
+		assert.equal(await page.evaluate(() => (window as { lh54?: boolean }).lh54), true, "the same page, never reloaded");
+	} finally {
+		await page.close();
+	}
 });

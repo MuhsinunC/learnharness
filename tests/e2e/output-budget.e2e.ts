@@ -211,9 +211,11 @@ test("a custom window above the real limit: one recovery, then on-time compactio
 test("one huge paste: the recovery's retry fits the window with the tool declarations and the reply's room", async () => {
 	const id = await newChat("One huge paste");
 	await turn(id, paste(1));
-	// ~22k tokens of pasted notes in one message, like the live 69k-char paste.
+	// The live 69k-char paste in one message (~20k tokens at pi-ai's
+	// chars/3.5). A bigger one would leave no room for a reply under
+	// OpenRouter's 1.18x count, and is held back (LH-54).
 	const start = stub.requests.length;
-	const c = await turn(id, `Part 2: all my notes at once. ${"A derivative measures how fast a quantity changes at an instant. ".repeat(1_400)}`);
+	const c = await turn(id, `Part 2: all my notes at once. ${"A derivative measures how fast a quantity changes at an instant. ".repeat(1_050)}`);
 	const requests = stub.requests.slice(start).filter(isTurnRequest);
 	assert.equal(rejections, 1, "only the first request is rejected");
 	assert.equal(requests.length, 2, "the rejected turn and one retry");

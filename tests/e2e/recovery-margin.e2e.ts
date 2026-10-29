@@ -271,7 +271,7 @@ test("(f) a learned limit and a provider that counts 1.18x: every request up to 
 	for (let part = 1; markers(c).length === 0; part++) {
 		assert.ok(part <= 40, "the threshold compaction lands within 40 turns");
 		c = await turn(id, paste(part));
-		assert.ok(isReply(c.messages.at(-1)), `part ${part} was answered`);
+		assert.ok(isReply(c.messages.filter((m) => m.role === "assistant").at(-1)), `part ${part} was answered`);
 	}
 	const sent = stub.requests.slice(start).filter((r) => r.model === "stub-q" && isTurn(r));
 	const band = sent.filter((r) => wireTokens(r) > FLAT_MARGIN_COVERS);
