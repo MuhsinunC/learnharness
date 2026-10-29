@@ -238,7 +238,7 @@ export function decideAccess(headers: Headers, env: Record<string, string | unde
 	return validSession(record, headers) ? "session" : null;
 }
 
-/** A state-changing request sent from this app's own pages, or by a
+/** A request sent from this app's own pages, or by a
  * non-browser client (no Origin, no Sec-Fetch-Site). `Origin: null`
  * (sandboxed frames, data: URLs) counts as cross-site. */
 export function sameOriginRequest(headers: Headers): boolean {

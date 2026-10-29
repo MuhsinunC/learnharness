@@ -116,9 +116,10 @@ Safe:
   websites don't get the cookie, but a page from another program serving
   on `127.0.0.1` (any port) counts as the same site and does, so
   LearnHarness refuses every change (and the login and logout forms) that
-  doesn't come from its own pages, and any request from another page to the
-  parts that act on the computer (the Claude Code check runs the program,
-  even just to read its status).
+  doesn't come from its own pages, and any other page's request to its API
+  at all, reads included: some reads act too (the Claude Code check runs
+  the program, and starting dictation creates a Deepgram token with your
+  key).
 - Wrong passwords are rate-limited: five failures lock that device out for
   15 minutes, and thirty failed logins in total lock every new login out
   for 15 minutes (devices already logged in keep working). A wrong current

@@ -22,12 +22,15 @@ export function proxy(request: NextRequest) {
 	const kind = api ? apiRouteClass(route) : null;
 	// CSRF, in both modes and for every kind of access: a page on another
 	// origin (another server on 127.0.0.1 is the same site, so the session
-	// cookie goes along) cannot change anything, nor reach a route that acts
-	// on the computer by any method (GET /api/claude-code runs the
-	// executable). Origin, else Sec-Fetch-Site decides; a client that sends
-	// neither (curl, the desktop main process) is not a browser page and
-	// passes as before.
-	if (api && (kind === "computer" || !["GET", "HEAD", "OPTIONS"].includes(request.method)) && !sameOriginRequest(request.headers)) {
+	// cookie goes along) reaches no API route by any method. Reads included
+	// (LH-60): no route sends CORS headers, so the answer stays unreadable,
+	// but the handler still runs, and GETs act too (GET /api/claude-code
+	// runs the executable, /api/stt/token mints a Deepgram token with the
+	// learner's key, /api/models asks the ChatGPT and subscription bridges).
+	// Origin, else Sec-Fetch-Site decides; a client that sends neither
+	// (curl, the desktop main process) is not a browser page and passes as
+	// before.
+	if (api && !sameOriginRequest(request.headers)) {
 		return NextResponse.json({ error: "Change LearnHarness only from its own pages." }, { status: 403, headers: { "Cache-Control": "no-store" } });
 	}
 	let access: Access | null;
