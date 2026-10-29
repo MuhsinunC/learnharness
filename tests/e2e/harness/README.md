@@ -10,7 +10,8 @@ time, because each file boots its own `next dev` in this checkout.
 - `stub-provider.ts`: `startStubProvider(responder)` starts an OpenAI-compatible
   `/v1/chat/completions` server on 127.0.0.1. The responder receives each
   request as `{ model, system, tools, messages, body }` and returns one of:
-  - `reply.text(s)`
+  - `reply.text(s, usage?)`: usage `{ prompt_tokens, completion_tokens }`
+    (default 100 / 20) drives the threshold compaction's usage anchor
   - `reply.tools([{ name, arguments }], text?)`
   - `reply.baseten403()`: HTTP 403 `{"error":"please check the api-key you provided"}`
   - `reply.contextLength(limit?)`: HTTP 400 `context_length_exceeded`

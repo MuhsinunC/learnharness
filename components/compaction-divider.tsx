@@ -18,11 +18,12 @@ export interface CompactionDividerData {
  *  exact classes), NO horizontal rule. The transcript's quiet note that
  *  history was just summarized; the cut divider below carries the seam.
  *  Inert since release polish 2026-10-06 — plain text, no affordance. */
-export function CompactionMomentDivider({ data: _data }: { data: CompactionDividerData }) {
+export function CompactionMomentDivider({ data }: { data: CompactionDividerData }) {
 	return (
 		<div className="flex w-full items-center justify-center py-1">
 			<span data-testid="compaction-divider" className="px-1.5 text-xs text-muted-foreground/70">
-				Context compacted
+				{/* Overflow recovery (LH-40) says what happened and why. */}
+				{data.details.notice ?? "Context compacted"}
 			</span>
 		</div>
 	);

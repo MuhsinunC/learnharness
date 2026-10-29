@@ -42,13 +42,14 @@ import {
 } from "../core/settings-resolution.ts";
 import { contextWindowKey } from "../core/context-windows.ts";
 import { ProviderKeyMissingError, ROLE_SLOT, modelsNotConfigured, providerKeyMissing as providerKeyMissingEnvelope, type ProviderKeyMissing } from "../core/settings.ts";
-import { beginTurn, endTurn } from "./turn-liveness.ts";
+import { beginTurn, endTurn, isTurnRunning } from "./turn-liveness.ts";
 import { applyParkedDismissal } from "./dismissal-park.ts";
 import { registerTurn, rememberTurnFailure, unregisterTurn } from "./turn-runs.ts";
 import { persistTurn, triggerExtraction, TurnPersistenceError } from "./turn-service.ts";
 import { hasProbeDone, danglingQuestionOf } from "../core/native-messages.ts";
-import { composeInstructions } from "../agent/teacher-agent.ts";
-import { ensureCompacted, kickCompaction, effectiveThresholdTokens } from "./compaction.ts";
+import { awaitCompaction, ensureCompacted, kickCompaction, effectiveThresholdTokens, holdCompactionGate, keepRecentTokensFor, sessionKind, systemPromptTokensFor } from "./compaction.ts";
+import { contextWindowFor, explainOverflow, learnStatedLimit, overflowExplanation, recoverContext, recoveryAttempted, recoveryDeps } from "./context-recovery.ts";
+import { contextOverflowState } from "../core/context-overflow.ts";
 import { refreshConnectionCatalog } from "./model-catalog.ts";
 import { emit } from "../core/events.ts";
 import { settledTurnResponse } from "./turn-runs.ts";
@@ -168,6 +169,86 @@ function withContextWindow(spec: ResolvedModelSpec, windows: Record<string, numb
 
 setJobRespawn((jobId) => void jobRunner.runJob(jobId));
 
+/**
+ * CONTEXT-OVERFLOW RECOVERY (LH-40, docs/context-recovery.md): the turn
+ * just persisted ended in a length rejection. Compact toward the window
+ * the provider enforces, under the compaction gate, then retry the turn
+ * ONCE as a continue. A retry that overflows again (the guard reads the
+ * record) or a record with nothing to drop gets a plain explanation.
+ */
+function recoverFromOverflow(
+	chatId: string,
+	conversation: NonNullable<ReturnType<typeof resolveConversationSpec>>,
+	buildAgent?: (opts: AgentBuildOptions & { teaching: boolean }) => TeachingAgent,
+): void {
+	const record = stores.chatStore.getChat(chatId);
+	if (!record || contextOverflowState(record.messages.at(-1)) !== "repairable") return;
+	// Every path ends in a learner-visible outcome: a recovered reply or a
+	// plain explanation (Repair stays offered unless nothing can help).
+	const explain = (text: (model: string) => string, model: string, unrecoverable = false) =>
+		explainOverflow(stores.chatStore, chatId, text(model), unrecoverable);
+	let engine: PiEngine;
+	try { engine = piEngineForSpec(conversation, true); } catch { return explain(overflowExplanation.notCondensed, conversation.id); }
+	const modelName = engine.model.name || engine.model.id;
+	learnStatedLimit(engine, record.messages);
+	if (recoveryAttempted(record.messages)) return explain(overflowExplanation.stillTooLong, modelName, true);
+	if (!connectionBackgroundAllowed(conversation.provider)) return explain(overflowExplanation.backgroundOff, modelName);
+	const deps = recoveryDeps(stores.chatStore, record, engine, `This chat had grown too long for ${modelName}; I condensed the older part and continued.`);
+	const recover = () => holdCompactionGate(chatId, () => recoverContext(deps, chatId));
+	void (async () => {
+		// A compaction already holding the gate: wait for it (bounded), once.
+		let run = recover();
+		if (!run) {
+			await Promise.race([awaitCompaction(chatId), new Promise((resolve) => setTimeout(resolve, GATE_WAIT_MS))]);
+			run = recover();
+		}
+		if (!run) return explain(overflowExplanation.notCondensed, modelName);
+		if ((await run) === "unchanged") return explain(overflowExplanation.stillTooLong, modelName, true);
+		const res = await handleChatInput(chatId, { type: "continue" }, buildAgent);
+		await res.arrayBuffer().catch(() => undefined);
+	})().catch((err) => {
+		console.error(`[chat ${chatId}] overflow recovery failed:`, err);
+		explain(overflowExplanation.notCondensed, modelName);
+	});
+}
+
+/** How long overflow recovery waits for a compaction already holding the gate. */
+const GATE_WAIT_MS = 30_000;
+
+/** POST /api/chats/[id]/repair — "Repair this chat": the same recovery,
+ *  on the learner's request, for a chat whose last reply failed for
+ *  length; saved, and the learner sends again. */
+export async function handleRepairRequest(chatId: string): Promise<Response> {
+	const record = stores.chatStore.getChat(chatId);
+	if (!record) return Response.json({ error: "Unknown chat" }, { status: 404 });
+	if (isTurnRunning(chatId)) return Response.json({ error: "A turn is running for this session. Try again when it ends." }, { status: 409 });
+	// Only a chat whose last reply was rejected for length: a healthy chat
+	// has no stated limit to aim at, and a repaired one ends in its marker.
+	const state = contextOverflowState(record.messages.at(-1));
+	if (state !== "repairable") {
+		const error = state === "unrecoverable"
+			? "This chat cannot be condensed any further. Start a new session, or pick a model with a larger context window."
+			: "This chat is not broken: its last reply did not fail for length.";
+		return Response.json({ error }, { status: 409 });
+	}
+	const effective = effectiveSettings();
+	const spec = resolveConversationSpec(record.settings, effective.models.strong);
+	if (!spec) return Response.json(modelsNotConfigured(["strong"]), { status: 503 });
+	let engine: PiEngine;
+	try { engine = piEngineForSpec(withContextWindow(spec, effective.contextWindows), false); }
+	catch { return Response.json({ error: "The selected model is unavailable." }, { status: 503 }); }
+	const modelName = engine.model.name || engine.model.id;
+	learnStatedLimit(engine, record.messages);
+	const notice = `This chat had grown too long for ${modelName}; I condensed the older part.`;
+	const run = holdCompactionGate(chatId, () => recoverContext(recoveryDeps(stores.chatStore, record, engine, notice), chatId));
+	if (!run) return Response.json({ error: "This session is already being condensed. Try again in a moment." }, { status: 409 });
+	if ((await run) === "unchanged") {
+		explainOverflow(stores.chatStore, chatId, overflowExplanation.stillTooLong(modelName), true);
+		return Response.json({ error: "Nothing older in this chat can be condensed." }, { status: 422 });
+	}
+	return Response.json({ ok: true });
+}
+
 /** The route-facing entry: parse {chatId, input} and run one turn. */
 export async function handleChatRequest(
 	req: Request,
@@ -277,18 +358,18 @@ export async function handleChatInput(
 	try { conversationEngine = piEngineForSpec(conversation, () => callPurpose.background, lifecycle); }
 	catch { return Response.json({ error: conversation.provider === "chatgpt" ? chatGPTStreamError("model catalog") : isSubscriptionProvider(conversation.provider) ? nativeSubscriptionError(conversation.provider, "model catalog") : "The selected model is unavailable." }, { status: 503 }); }
 	const modelIdForCompaction = `${conversationEngine.model.provider}:${conversationEngine.model.id}`;
+	// The window seam (LH-40): never above a limit the provider stated.
+	const compactionWindow = contextWindowFor(conversationEngine);
 	await ensureCompacted(
 		{
 			chatStore: stores.chatStore,
 			engine: piEngineForSpec(conversation, true),
 			canStart: () => connectionBackgroundAllowed(conversation.provider),
 			modelId: modelIdForCompaction,
-			kind: record.kind === "practice" ? "practice" : hasProbeDone(record.messages) ? "teach" : "probe",
-			thresholdTokens: effectiveThresholdTokens(
-				effective.compaction?.thresholdTokens,
-				conversationEngine.model.contextWindow,
-			),
-			systemPromptTokens: Math.ceil(composeInstructions(record.kind === "practice" ? "practice" : "teacher").length / 4),
+			kind: sessionKind(record),
+			thresholdTokens: effectiveThresholdTokens(effective.compaction?.thresholdTokens, compactionWindow),
+			keepRecentTokens: keepRecentTokensFor(compactionWindow),
+			systemPromptTokens: systemPromptTokensFor(sessionKind(record)),
 		},
 		chatId,
 	);
@@ -615,6 +696,9 @@ export async function handleChatInput(
 				// subsequent fetch reads the dismissal already in the record
 				// (the same ordering law as persistTurn itself).
 				applyParkedDismissal(stores.chatStore, chatId);
+				// OVERFLOW RECOVERY (LH-40): takes the compaction gate before
+				// endTurn, so nothing model-facing slips in ahead of the repair.
+				if (process.env.NODE_ENV !== "test" && !isAborted) recoverFromOverflow(chatId, conversation, buildAgent);
 				// LAST: a poller that sees not-in-flight must read an already-persisted
 				// record — endTurn only after persistTurn has done its job.
 				endTurn(chatId);
@@ -658,12 +742,10 @@ export async function handleChatInput(
 							engine: kickEngine,
 							canStart: () => connectionBackgroundAllowed(spec.provider),
 							modelId: kickModelId,
-							kind: freshRecord.kind === "practice" ? "practice" : hasProbeDone(freshRecord.messages) ? "teach" : "probe",
-							thresholdTokens: effectiveThresholdTokens(
-								fresh.compaction?.thresholdTokens,
-								kickEngine.model.contextWindow,
-							),
-							systemPromptTokens: Math.ceil(composeInstructions(freshRecord.kind === "practice" ? "practice" : "teacher").length / 4),
+							kind: sessionKind(freshRecord),
+							thresholdTokens: effectiveThresholdTokens(fresh.compaction?.thresholdTokens, contextWindowFor(kickEngine)),
+							keepRecentTokens: keepRecentTokensFor(contextWindowFor(kickEngine)),
+							systemPromptTokens: systemPromptTokensFor(sessionKind(freshRecord)),
 						};
 					}, chatId);
 			},

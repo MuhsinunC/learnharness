@@ -29,6 +29,7 @@
  */
 
 import type { QuestionAnswerData } from "./question-core.ts";
+import type { CompactionDetails } from "./compaction.ts";
 import type { LhMessage } from "./native-messages.ts";
 import {
 	activeProblemOf,
@@ -250,6 +251,8 @@ export function inputAppends(
 export function failedResponseAtEnd(messages: readonly LhMessage[]): Extract<LhMessage, { role: "assistant" }> | undefined {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const m = messages[i]!;
+		// A recovery marker (LH-40, Repair) answers the failure before it.
+		if (m.role === "custom" && m.customType === "compaction" && (m.details as Partial<CompactionDetails> | undefined)?.notice) return undefined;
 		if (m.role === "custom" && (m.customType === "plan-block" || m.customType === "compaction")) continue;
 		return m.role === "assistant" && m.stopReason === "error" ? m : undefined;
 	}
