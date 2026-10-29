@@ -11,7 +11,7 @@ scripts/build-fork-mac.sh 2     # next build of the same base version
 
 The script works from any working directory. It runs the production Next build, provider-runtime smoke, server packaging and server smoke before packaging the app. It prints the absolute DMG path and SHA-256; for base version 0.3.7 the default output is `dist/LearnHarness-0.3.7-fork.1-arm64.dmg`.
 
-The Windows x64 installer is built only on a GitHub-hosted Windows runner by `.github/workflows/fork-windows-build.yml`, which `Fork release` calls. It runs upstream's Windows release checks (native renderer tests, production build, provider-runtime and server smokes under host Node and Electron), then packages with `electron-builder --config electron-builder.fork.yml --win --x64`. Afterwards it checks that the packaged `app.asar` carries the fork version and that there is no `app-update.yml`, and runs the provider-runtime and demo-runtime smokes under the packaged `LearnHarness.exe`. The output is `LearnHarness-<version>-fork.<N>-x64-setup.exe`, kept as the `fork-windows-x64` workflow artifact for 7 days.
+The Windows x64 installer is built only on a GitHub-hosted Windows runner by `.github/workflows/fork-windows-build.yml`. `Fork release` calls it; it also runs on pull requests, pushes to `ai-reviewed` and manual dispatch, building `fork.1` (or the dispatched N) as a Windows check. It runs upstream's Windows release checks (native renderer tests, production build, provider-runtime and server smokes under host Node and Electron), then packages with `electron-builder --config electron-builder.fork.yml --win --x64`. Afterwards it checks that the packaged `app.asar` carries the fork version and that there is no `app-update.yml`, and runs the provider-runtime and demo-runtime smokes under the packaged `LearnHarness.exe`. The output is `LearnHarness-<version>-fork.<N>-x64-setup.exe`, kept as the `fork-windows-x64` workflow artifact for 7 days.
 
 ## Differences from upstream releases
 
@@ -23,7 +23,7 @@ Hardened runtime is disabled for the fork. With it enabled, the ad-hoc-signed ma
 
 The app keeps the same bundle identifier (`com.learnharness.LearnHarness`) and product name (`LearnHarness`), reusing `~/Library/Application Support/LearnHarness`.
 
-On Windows the fork uses upstream's NSIS settings unchanged: a one-click, per-user installer with the same app ID and product name, so it installs over the official app and uses the same `%APPDATA%\LearnHarness` data folder. Like upstream's, the installer and app are unsigned, and the build has no update feed.
+On Windows the fork uses upstream's NSIS settings unchanged: a one-click, per-user installer with the same app ID and product name, so it is expected to install over the official app and use the same `%APPDATA%\LearnHarness` data folder; no end-to-end check covers that yet. Like upstream's, the installer and app are unsigned, and the build has no update feed.
 
 ## Install or return to upstream
 
