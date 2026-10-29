@@ -46,7 +46,10 @@ export function NativeSubscriptionUIProvider({ children }: { children: React.Rea
 	}
 	useEffect(() => {
 		mounted.current = true; void refresh();
-		const off = bridge?.onChange(() => { void refresh(); notifySettingsSaved("keys"); });
+		// A resync only re-reads: the catalog revalidates on its own, and a
+		// "keys" save would clear it, unmounting every catalog reader and
+		// blinding its guards until the refetch lands (LH-54).
+		const off = bridge?.onChange((change) => { void refresh(); if (change !== "resync") notifySettingsSaved("keys"); });
 		return () => { mounted.current = false; generation.current++; off?.(); };
 		// The root-lifetime subscriber reads current state through refs.
 	}, [bridge]);

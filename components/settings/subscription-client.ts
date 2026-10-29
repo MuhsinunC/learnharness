@@ -19,9 +19,9 @@ async function control<T>(providerId: string, op: string, fields: Record<string,
 	if (!response.ok) throw new Error("The subscription connection could not be changed.");
 	return response.json() as Promise<Reply<T>>;
 }
-function onChange(hub: Hub, listener: () => void): () => void {
-	const offEvent = hub?.subscribe("subscriptions-changed", listener);
-	const offResync = hub?.onResync(listener);
+function onChange(hub: Hub, listener: (change?: "resync") => void): () => void {
+	const offEvent = hub?.subscribe("subscriptions-changed", () => listener());
+	const offResync = hub?.onResync(() => listener("resync"));
 	return () => { offEvent?.(); offResync?.(); };
 }
 /** Reserve the new tab synchronously in the click gesture. Only a one-use
