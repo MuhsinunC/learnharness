@@ -30,7 +30,9 @@ export function desktopAPIAuthorized(
 }
 
 /** The cookie electron/main.cjs sets for the window (HttpOnly, SameSite=Strict),
- * so its PAGE loads are trusted too once a remote-access password exists. An
+ * so its PAGE loads are trusted too: once a remote-access password exists,
+ * and before one (LH-45), where a page load without it is a browser that
+ * found this port and gets the login page (proxy.ts). An
  * HMAC of the secret: cookies ignore ports, so other local servers may see it,
  * and it must not unlock the API. API calls still need the header above. */
 function desktopPageKey(env: Record<string, string | undefined> = process.env): string | null {

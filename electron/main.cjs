@@ -694,8 +694,8 @@ async function main() {
 		session.defaultSession.webRequest.onBeforeSendHeaders({ urls: ["<all_urls>"] }, (details, callback) => {
 			callback({ requestHeaders: desktopAPIHeaders(details, ownedOrigin, desktopAPISecret, [...trustedAppWindows]) });
 		});
-		// Web login (LH-43): once a remote-access password exists, page loads
-		// need a per-launch value too (src/server/desktop-access.ts). Only this
+		// Web login (LH-43, LH-45): page loads need a per-launch value too
+		// (src/server/desktop-access.ts), with or without a password. Only this
 		// session holds it, HttpOnly and SameSite=Strict. Cookies ignore ports,
 		// so it is an HMAC of the secret, never the API secret itself.
 		const pageKey = createHmac("sha256", desktopAPISecret).update("lh-desktop-page").digest("hex");
