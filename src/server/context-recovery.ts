@@ -91,10 +91,13 @@ export function learnStatedLimit(model: { provider: string; id: string }, messag
 	const stated = reportedContextLimit(overflowProviderText(overflow));
 	if (!stated) return;
 	const modelId = `${model.provider}:${model.id}`;
-	updateSettings((record) =>
-		rejectionInForce(overflow, model, record.learnedLimitsClearedAt) && record.learnedContextLimits?.[modelId] !== stated
-			? { ...record, learnedContextLimits: { ...record.learnedContextLimits, [modelId]: stated } }
-			: record);
+	let learned = false;
+	updateSettings((record) => {
+		learned = rejectionInForce(overflow, model, record.learnedLimitsClearedAt) && record.learnedContextLimits?.[modelId] !== stated;
+		return learned ? { ...record, learnedContextLimits: { ...record.learnedContextLimits, [modelId]: stated } } : record;
+	});
+	// The catalog reports the learned limit: open windows refetch it (LH-54).
+	if (learned) emit("models-changed", {});
 }
 
 /** THE WINDOW SEAM: the window this app may trust for the engine's

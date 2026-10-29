@@ -40,6 +40,10 @@ export interface ServerEvents {
 	"chats-changed": Record<string, never>;
 	/** Web subscription state changed. No account or credential data on the bus. */
 	"subscriptions-changed": Record<string, never>;
+	/** What /api/models answers changed server-side: a provider stated a
+	 *  context limit (LH-54). Open windows refetch the catalog, so the
+	 *  footer's window follows without a reload. */
+	"models-changed": Record<string, never>;
 	/** A chat's record changed WITHOUT a turn (the silent dismissal write).
 	 *  Same notify-then-fetch contract as the turn events: open views of
 	 *  the chat refetch and adopt the durable record. */
@@ -64,6 +68,7 @@ export const SERVER_EVENT_TYPES = [
 	"activity-changed",
 	"chats-changed",
 	"subscriptions-changed",
+	"models-changed",
 	"record-changed",
 	"compaction-changed",
 ] as const satisfies readonly ServerEventType[];

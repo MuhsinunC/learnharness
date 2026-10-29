@@ -191,6 +191,10 @@ async function openChat(id: string, selector: string) {
 	return page;
 }
 
+/** The composer footer's context window, as the learner reads it. */
+const footerReads = (page: Page, denominator: string) =>
+	until(async () => (await page.$eval('[data-testid="stats-context"]', (el) => el.textContent ?? "").catch(() => "")).trim().endsWith(`/ ${denominator}`), `footer to read / ${denominator}`, 60_000);
+
 /** The sidebar row for a chat title, once the session list has loaded,
  *  React has hydrated it (a right-click before that opens nothing) and
  *  the sidebar's open slide has uncovered it (a click mid-slide lands on
@@ -286,9 +290,12 @@ test("(a, c) an over-window chat recovers on the next learner turn, and the lear
 
 	// The learner is in the tab when the chat breaks: part 6 goes through
 	// the composer, and the same page (no reload) must end on the
-	// recovered reply and the notice, with no error banner or bubble.
+	// recovered reply and the notice, with no error banner or bubble,
+	// and its footer on the learned window (LH-54).
 	const page = await openChat(id, '[data-testid="composer"] textarea');
 	try {
+		await footerReads(page, "1.5M");
+		await page.evaluate(() => { (window as { lh54?: boolean }).lh54 = true; });
 		await page.type('[data-testid="composer"] textarea', "Keep going, part 6.");
 		await page.keyboard.press("Enter");
 		await page.waitForFunction(
@@ -296,6 +303,8 @@ test("(a, c) an over-window chat recovers on the next learner turn, and the lear
 				[...document.querySelectorAll('[data-testid="compaction-divider"]')].some((el) => el.textContent?.includes("condensed the older part and continued")),
 			{ timeout: 120_000 },
 		);
+		await footerReads(page, "28.5k");
+		assert.equal(await page.evaluate(() => (window as { lh54?: boolean }).lh54), true, "the same page, never reloaded");
 		assert.equal(await page.$('[data-testid="chat-error"]'), null, "no stale error banner");
 		assert.ok(!(await page.evaluate(() => document.body.innerText)).includes("context_length_exceeded"), "the kept rejection renders nothing");
 	} finally {
