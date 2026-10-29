@@ -32,6 +32,7 @@ import { AUTH_PROVIDER_KEYS } from "./auth-keys.ts";
 import type { ModelRole } from "../../config.ts";
 import type { ChatSettings } from "./contracts/chat.ts";
 import type { SearchEngineId } from "./search.ts";
+import { isDictationLanguage, type DictationLanguage } from "./dictation.ts";
 
 /** The schema version this code understands. Bump ONLY for breaking shape
  *  changes (a field renamed/meaning changed); pure additions never bump. */
@@ -236,6 +237,11 @@ export interface GeneralSettings {
 	autoUpdate?: boolean;
 }
 
+/** One app-wide dictation preference, shared by every composer. */
+export interface DictationSettings {
+	language?: DictationLanguage;
+}
+
 /** Agent settings — everything about the non-conversation machinery. */
 export interface AgentSettings {
 	/** Background-role model/thinking overrides (absent role = config pin). */
@@ -362,6 +368,7 @@ export interface CompactionSettings {
 export interface UserSettings {
 	version: number;
 	general?: GeneralSettings;
+	dictation?: DictationSettings;
 	agent?: AgentSettings;
 	/** The strong/cheap/vision model slots (model slots wave, 2026-09-20). */
 	models?: ModelsSettings;
@@ -379,6 +386,7 @@ export interface UserSettings {
 export interface FactorySettings {
 	version: number;
 	general: Required<GeneralSettings>;
+	dictation: Required<DictationSettings>;
 	appearance: {
 		mode: "dark" | "light";
 		background: string | null;
@@ -398,6 +406,7 @@ export interface FactorySettings {
 export const FACTORY_SETTINGS: FactorySettings = {
 	version: CURRENT_SETTINGS_VERSION,
 	general: { autoUpdate: true },
+	dictation: { language: "en" },
 	appearance: {
 		mode: "dark",
 		background: null, // the dark default (#141414) lives in the mode's derivation curve
@@ -615,6 +624,13 @@ export function sanitizeUserSettings(raw: unknown): UserSettings | null {
 	};
 	if (r.general !== null && typeof r.general === "object" && !Array.isArray(r.general)) {
 		out.general = sanitizeGeneral(r.general as Record<string, unknown>);
+	}
+	if (r.dictation !== undefined) {
+		const raw = r.dictation;
+		out.dictation = raw !== null && typeof raw === "object" && !Array.isArray(raw) &&
+			isDictationLanguage((raw as Record<string, unknown>).language)
+			? { language: (raw as DictationSettings).language }
+			: {};
 	}
 	if (r.agent !== null && typeof r.agent === "object" && !Array.isArray(r.agent)) {
 		out.agent = sanitizeAgent(r.agent as Record<string, unknown>);
