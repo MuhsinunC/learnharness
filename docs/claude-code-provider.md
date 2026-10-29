@@ -19,7 +19,7 @@ Connection settings live in `<LH_DATA_DIR>/claude-code.json` (the default data d
 
 Discovery checks the saved path, PATH, standard user and system install directories, and nvm versions newest first. Symlinks deduplicate by target while retaining the first discovered path so neighboring node executables and automatic updates work.
 
-A non-empty real launch-env `LH_CLAUDE_CODE_EXECUTABLE` still wins over settings, reports `envOverride: true`, and makes PUT return 409. Its stat-only boot decision stays cached until restart, including rejections. A value supplied only by `auth.json` is ignored with one private warning; saved settings still apply. `LH_IGNORE_ENV_KEYS=1` rejects a real override as before. Saved local paths receive stat checks at boot without spawning any process; runtime validation requires `--version` to identify Claude Code.
+A non-empty real launch-env `LH_CLAUDE_CODE_EXECUTABLE` still wins over settings, reports `envOverride: true`, and makes PUT return 409. Its stat-only boot decision stays cached until restart, including rejections; the status GET names the reason in its `error` (for example `Claude Code executable was rejected (not an absolute path)`), which the Settings Claude card shows. A value supplied only by `auth.json` is ignored with one private warning; saved settings still apply. `LH_IGNORE_ENV_KEYS=1` rejects a real override as before. Saved local paths receive stat checks at boot without spawning any process; runtime validation requires `--version` to identify Claude Code. While the provider is off, a Claude Code selection shows the "Claude isn't turned on" notice where key setup would open, and sending opens the model picker when another provider is connected.
 
 ## Safety contracts
 

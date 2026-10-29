@@ -54,10 +54,12 @@ export function bootClaudeCodeProvider(env = process.env, platform: NodeJS.Platf
 	}
 	else disableClaudeCodeProvider();
 }
-export function claudeCodeEnvOverride(): { enabled: boolean; path?: string; rejected: boolean } {
+/** `reason` is why boot rejected the launch variable: a fixed phrase, never a path. */
+export function claudeCodeEnvOverride(): { enabled: boolean; path?: string; rejected: boolean; reason?: string } {
 	if (!bootState[BOOT_KEY]) bootClaudeCodeProvider();
 	const state = bootState[BOOT_KEY]!;
-	return { enabled: state.override, path: state.path, rejected: state.override && state.decision.kind !== "accepted" };
+	const reason = state.override && state.decision.kind === "rejected" ? state.decision.reason : undefined;
+	return { enabled: state.override, path: state.path, rejected: state.override && state.decision.kind !== "accepted", reason };
 }
 export function applyClaudeCodeSettings(): void {
 	if (claudeCodeEnvOverride().enabled) return;
