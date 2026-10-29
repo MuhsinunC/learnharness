@@ -23,6 +23,7 @@ import { AnsweredCard } from "@/components/answered-card";
 import { artifactRenderers } from "@/components/artifacts";
 import { SubagentSteerCard } from "@/components/artifacts/steer-card";
 import { Composer } from "@/components/composer";
+import { AttachmentChips, AttachmentImage, AttachmentNotice, useAttachments } from "@/components/attachments";
 import { useEnterSubmits } from "@/components/enter-submits";
 import { blurAfterPointerClick } from "@/components/focus-hygiene";
 import { dockStateKey } from "@/components/dock-state-key";
@@ -82,6 +83,7 @@ import {
 } from "@/src/core";
 import { ReadingThinkingField } from "@/components/reading-thinking";
 import { currentUserThinkingOpen, setAllUserThinkingOpen } from "@/components/thinking-block";
+import { IMAGES_UNSUPPORTED_CODE, type AttachmentRef } from "@/src/core";
 
 /** One width for everything: transcript, cards, and the bottom blob share this column. */
 /**
@@ -164,6 +166,18 @@ export function parseProviderKeyRefusal(message: string | undefined): boolean {
 	}
 }
 
+/** The image gate's send refusal (LH-39): the chat's model can't read
+ *  images. Its words, for the composer's notice; null for anything else. */
+function parseImagesRefusal(message: string | undefined): string | null {
+	if (!message) return null;
+	try {
+		const body = JSON.parse(message) as { code?: unknown; error?: unknown };
+		return body.code === IMAGES_UNSUPPORTED_CODE && typeof body.error === "string" ? body.error : null;
+	} catch {
+		return null;
+	}
+}
+
 /** Choose the remedy without sending a subscription provider to key setup. */
 export function providerRefusalAction(message: string | undefined): "setup" | "notice" | null {
 	if (!message || !parseProviderKeyRefusal(message)) return null;
@@ -179,9 +193,9 @@ export function refusalBannerText(message: string): string {
  * from an earlier, already-durable text send over today's unsent composer.
  * Retire that fallback synchronously, never when the async Retry settles:
  * a later ordinary send may own a new recovery draft by then. */
-export function retryFailedResponse(
+export function retryFailedResponse<T>(
 	send: (input: ChatInput) => void,
-	submittedDraft: { current: string | null },
+	submittedDraft: { current: T | null },
 ): void {
 	submittedDraft.current = null;
 	void send({ type: "retry" });
@@ -225,6 +239,7 @@ export function Chat({
 	initialMessages,
 	initialError,
 	initialPrompt,
+	initialAttachments = [],
 	initiallyInFlight,
 	initiallyCompacting = false,
 	initialConfigured = false,
@@ -240,6 +255,9 @@ export function Chat({
 	 *  tag rides the header instead. */
 	kind?: "teach" | "practice";
 	initialPrompt?: string;
+	/** Images attached on the new-session page (LH-39), already stored;
+	 *  they ride the first send with initialPrompt. */
+	initialAttachments?: AttachmentRef[];
 	/** A teacher turn is running server-side but attached to no client
 	 * (navigated away mid-turn, returned while in flight). */
 	initiallyInFlight?: boolean;
@@ -273,6 +291,11 @@ export function Chat({
 
 	// The reattach settled terminal → the sync-and-continue seam (below).
 	setReattachSettled(() => reattachSettledRef.current());
+
+	// Image attachments (LH-39): the server checks the chat's model on
+	// every intake, so a model that can't read images shows the notice.
+	const attach = useAttachments(chatId);
+	const { takePaths } = attach;
 
 	// A turn running server-side, attached to no live view of ours (navigate
 	// away mid-turn, or a wake turn discovered mid-session): the reattach
@@ -575,13 +598,19 @@ export function Chat({
 	const catalogRef = useRef(catalog);
 	catalogRef.current = catalog;
 	const [selectedModel, setSelectedModel] = useState<string | undefined>();
+	// The stats bar's model report also clears the image notice (LH-39).
+	const { modelChanged: attachModelChanged } = attach;
+	const modelChanged = useCallback((model: string | undefined) => {
+		setSelectedModel(model);
+		attachModelChanged(model);
+	}, [attachModelChanged]);
 	const [setupOpen, setSetupOpen] = useState(false);
 	/** The last explicitly-sent draft (composer send): the
 	 *  refusal flow restores it into the composer, where it waits for the
 	 *  learner to re-send (Save never auto-sends, owner 2026-10-09).
 	 *  Auto-continuations (probe answers) never set it — their refusal
 	 *  opens recovery with no replay. */
-	const draftRef = useRef<string | null>(null);
+	const draftRef = useRef<{ text: string; refs: AttachmentRef[] } | null>(null);
 	const openingDraftRef = useRef<string | null>(null);
 	const [openingError, setOpeningError] = useState(false);
 	const openingMountedRef = useRef(false);
@@ -600,18 +629,23 @@ export function Chat({
 			return;
 		}
 		setOpeningError(false);
-		draftRef.current = prompt; // The existing 503 flow must restore it too.
+		draftRef.current = { text: prompt, refs: initialAttachments }; // The existing 503 flow must restore it too.
 		applyText("");
-		void send({ type: "text", text: prompt }, () => {
-			clearOpeningPrompt(chatId);
-			openingDraftRef.current = null;
-			if (draftRef.current === prompt) draftRef.current = null;
+		// Images from the new-session page and image paths in the opening
+		// message attach like a composer send's (LH-39).
+		void takePaths(prompt).then(({ text, refs }) => {
+			const attachments = [...initialAttachments, ...refs];
+			return send({ type: "text", text, ...(attachments.length ? { attachments } : {}) }, () => {
+				clearOpeningPrompt(chatId);
+				openingDraftRef.current = null;
+				if (draftRef.current?.text === prompt) draftRef.current = null;
+			});
 		}).then(accepted => {
 			if (!accepted && openingMountedRef.current && openingDraftRef.current === prompt && !textRef.current) {
 				applyText(prompt);
 			}
 		});
-	}, [chatId, send, applyText]);
+	}, [chatId, send, applyText, takePaths, initialAttachments]);
 
 	const sentInitial = useRef(false);
 	useEffect(() => {
@@ -638,7 +672,7 @@ export function Chat({
 		// only the unchanged recovered draft, never the learner's newer work.
 		const opening = openingDraftRef.current;
 		if (opening !== null && textRef.current === opening) applyText("");
-		if (draftRef.current === opening) draftRef.current = null;
+		if (draftRef.current?.text === opening) draftRef.current = null;
 		openingDraftRef.current = null;
 		setOpeningError(false);
 	}, [chatId, hasConfirmedConversation, applyText]);
@@ -661,24 +695,37 @@ export function Chat({
 		// otherwise setup derives its exclusive provider/loading stage.
 		// Subscription refusals keep their banner and restart instructions.
 		const action = providerRefusalAction(error.message);
-		if (!missing && !action) return; // a real error keeps the honest banner
+		// A model that can't read images (LH-39): the draft and its chips
+		// come back with the refusal as the composer's notice (no banner,
+		// no setup — the remedy is another model or the override). A
+		// refused steer has no orphan to drop, and a refetch mid-turn
+		// would wipe the live stream.
+		const images = parseImagesRefusal(error.message);
+		if (!missing && !action && !images) return; // a real error keeps the honest banner
+		const refetch = !(images && busy);
 		// ORDER MATTERS: clearError() flips this effect's own dep (`error`)
 		// and would cancel the in-flight work below — so the banner dismiss,
 		// the draft restore, and the dialog open all land TOGETHER after the
 		// record refetch (the honest truth minus the refused send).
 		let cancelled = false;
 		void (async () => {
-			const res = await fetch(`/api/chats/${encodeURIComponent(chatId)}`);
-			if (!cancelled && res.ok) {
+			const res = refetch ? await fetch(`/api/chats/${encodeURIComponent(chatId)}`) : null;
+			if (!cancelled && res?.ok) {
 				const record = (await res.json().catch(() => null)) as { messages?: LhMessage[] } | null;
 				if (Array.isArray(record?.messages)) setMessages(record.messages);
 			}
 			if (cancelled) return;
 			if (draftRef.current !== null) {
-				applyText(draftRef.current);
+				applyText(draftRef.current.text);
+				attach.restore(draftRef.current.refs);
 				draftRef.current = null;
 			}
 			recoverFromError();
+			if (images) {
+				clearError();
+				attach.showNotice(images);
+				return;
+			}
 			if (action === "notice") return;
 			clearError();
 			if (action === "setup" && catalogRef.current?.providers.some((p) => p.keyPresent)) openModelPicker();
@@ -756,7 +803,7 @@ export function Chat({
 	const retryable = (status === "ready" || status === "error") && !busy && !compacting && endsInFailedTurn(nativeMessages);
 	const retryFailedTurn = () => retryFailedResponse(send, draftRef);
 	const canSend =
-		(text.trim().length > 0 || dictation.active) && !pending && !activeProblem && !compacting;
+		(text.trim().length > 0 || attach.items.length > 0 || dictation.active) && !pending && !activeProblem && !compacting;
 
 	/* THE PRACTICE PAUSE (owner round 16): between problems — practice
 	 * kind, nothing active, nothing in flight, and at least one problem
@@ -1226,15 +1273,14 @@ export function Chat({
 		 * let the last finals land in the composer, then send the REF value
 		 * (the flush lands via setState, invisible to this closure). */
 		if (!dictation.active) {
-			doSteerOrSend();
+			void doSteerOrSend();
 			return;
 		}
 		void dictation.finish().then(doSteerOrSend);
 	};
-	const doSend = () => {
+	const doSend = async () => {
 		if (busy || pending || compacting) return;
-		const t = textRef.current.trim();
-		if (!t) return;
+		if (!textRef.current.trim() && attach.items.length === 0) return;
 		// A Claude Code selection that is off still sends: the server's refusal
 		// keeps the draft and shows the restart instructions in the banner.
 		const claudeCodeOff = !!selectedModel?.startsWith("claude-code:") && selectedModelUnavailable(catalog, selectedModel);
@@ -1246,13 +1292,16 @@ export function Chat({
 			openModelPicker();
 			return; // No optimistic send and no change to the learner's draft.
 		}
-		if (openingDraftRef.current !== null) {
+		const { text: t, refs } = await attach.takePaths(textRef.current.trim());
+		if (!t && refs.length === 0) return;
+		if (openingDraftRef.current !== null && refs.length === 0) {
 			deliverOpeningPrompt(t);
 			return;
 		}
-		draftRef.current = t; // the refusal flow's preserve-and-replay seam
+		draftRef.current = { text: t, refs }; // the refusal flow's preserve-and-replay seam
 		applyText("");
-		void send({ type: "text", text: t });
+		attach.clear();
+		void send({ type: "text", text: t, ...(refs.length ? { attachments: refs } : {}) });
 	};
 
 	/* STEER VS SEND (owner arc 2026-10-03): a send while a turn runs steers
@@ -1264,16 +1313,18 @@ export function Chat({
 	 * own stream AND foreign/wake turns — both have a live agent by the
 	 * time the send's POST resolved, so the steer lands. Idle takes the
 	 * plain send; a raced settle 409s and falls back to exactly that. */
-	const doSteerOrSend = () => {
+	const doSteerOrSend = async () => {
 		if (pending || compacting) return;
-		const t = textRef.current.trim();
-		if (!t) return;
+		if (!textRef.current.trim() && attach.items.length === 0) return;
 		if (busy) {
+			const { text: t, refs } = await attach.takePaths(textRef.current.trim());
+			draftRef.current = { text: t, refs }; // an image refusal puts it back
 			applyText("");
-			void steer(t);
+			attach.clear();
+			void steer(t, refs);
 			return;
 		}
-		doSend();
+		void doSend();
 	};
 
 	return (
@@ -1543,6 +1594,9 @@ export function Chat({
 												<div className="lh-prose whitespace-pre-wrap text-foreground">
 													{m.parts.filter((p) => p.type === "text").map((p) => p.text).join("\n")}
 												</div>
+												{m.parts.filter((p) => p.type === "image").map((p) => (
+													<AttachmentImage key={p.id} attachment={p.data as AttachmentRef} />
+												))}
 											</div>
 									) : (
 									<Message from="assistant" className="max-w-full">
@@ -1730,7 +1784,7 @@ export function Chat({
 					compactionRunning={compacting}
 					onSubmitThinking={submitThinking}
 					chatId={chatId}
-					onModelChange={setSelectedModel}
+					onModelChange={modelChanged}
 					plan={hasPlan ? <PlanMarginalia messages={messages} /> : undefined}
 					onOpenPlan={() => setPlanOpen(true)}
 					requiresReveal={requiresReveal}
@@ -1782,7 +1836,14 @@ export function Chat({
 							nextProblem={nextReady}
 							onNext={sendNext}
 							placeholder={nextReady ? "Ask anything, or press Enter for the next one." : undefined}
+							onFiles={(files) => void attach.addFiles(files)}
 						/>
+					}
+					attachments={
+						<>
+							<AttachmentChips items={attach.items} onRemove={attach.remove} />
+							<AttachmentNotice notice={attach.notice} />
+						</>
 					}
 					onSubmitAnswer={(output) => {
 						if (!pending) return;
@@ -1977,6 +2038,7 @@ function DockOverlay({
 	dictationCancel,
 	setupCta,
 	queuedSteers,
+	attachments,
 }: {
 	pending: ReturnType<typeof findPendingToolCall>;
 	initialQuestionDraft?: QuestionFormDraft;
@@ -2027,6 +2089,9 @@ function DockOverlay({
 	/** The persistent setup CTA (BYOK, owner 2026-09-22): the same pill
 	 *  home and /chat/new carry, above the composer while slots are unset. */
 	setupCta?: React.ReactNode;
+	/** The composer's pending image chips + notice (LH-39), inside the
+	 *  shell above the text row; composer mode only. */
+	attachments?: React.ReactNode;
 }) {
 	const { isAtBottom, scrollToBottom, scrollRef } = useStickToBottomContext();
 	// Render-fresh bottom state (flicker round): the arrival block below reads
@@ -2444,7 +2509,10 @@ function DockOverlay({
 									compactionRunning={compactionRunning}
 								/>
 							) : (
-								composer
+								<>
+									{attachments}
+									{composer}
+								</>
 							)}
 						</div>
 					</div>

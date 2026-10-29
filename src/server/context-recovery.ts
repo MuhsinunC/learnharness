@@ -24,6 +24,7 @@
 
 import {
 	activeCompactionOf,
+	attachmentReferenceText,
 	buildCompactionPrompt,
 	COMPACTED_HISTORY_HEADER,
 	compactionCutIndex,
@@ -41,6 +42,7 @@ import {
 	type CompactionDetails,
 	type LhMarkerMessage,
 	type LhMessage,
+	type LhUserMessage,
 } from "../core/index.ts";
 import { emit } from "../core/events.ts";
 import type { ChatStore } from "../core/ports.ts";
@@ -145,7 +147,10 @@ function droppedSpanSummary(record: ChatRecord, previous: LhMarkerMessage | null
 		.filter((m) => m.role === "user")
 		.map((m) => {
 			const text = typeof m.content === "string" ? m.content : m.content.map((c) => (c.type === "text" ? c.text : "")).join(" ");
-			return `- ${text.length > FALLBACK_LINE_CHARS ? `${text.slice(0, FALLBACK_LINE_CHARS)}…` : text}`;
+			// Attached images keep their ids, so the model can still
+			// view_image them (LH-39).
+			const images = ((m as LhUserMessage).attachments ?? []).map((ref) => ` ${attachmentReferenceText(ref)}`).join("");
+			return `- ${text.length > FALLBACK_LINE_CHARS ? `${text.slice(0, FALLBACK_LINE_CHARS)}…` : text}${images}`;
 		});
 	const rest = [
 		"## The plan dependency tree",

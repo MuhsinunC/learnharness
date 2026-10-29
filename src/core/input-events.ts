@@ -43,10 +43,13 @@ import {
 	pendingProblemDismissalOf,
 } from "./native-messages.ts";
 import { QUESTION_TOOLS, toolQuestionKind } from "./pending.ts";
+import { parseAttachmentRefs, type AttachmentRef } from "./attachments.ts";
 
 /** One client-originated input event (the POST body's `input`). */
 export type ChatInput =
-	| { type: "text"; text: string }
+	/** `attachments` (LH-39): stored image references riding the message;
+	 *  with any attached, the text may be empty. */
+	| { type: "text"; text: string; attachments?: AttachmentRef[] }
 	| { type: "answer"; toolCallId: string; answer: QuestionAnswerData }
 	| { type: "continue" }
 	/** The failed-turn retry (issue #110): the banner's Retry button. */
@@ -116,7 +119,7 @@ export function parseDismissInput(input: unknown): DismissInput {
  *  (a send with no live turn is a plain text send, which already exists).
  *  The id is client-minted (steer_<localid>): the queued indicator keys on
  *  it, and the drain's message events upsert the real card by the same id. */
-export type UserSteerInput = { type: "steer"; id: string; text: string };
+export type UserSteerInput = { type: "steer"; id: string; text: string; attachments?: AttachmentRef[] };
 
 /** Parse and validate a steer event off a request body. */
 export function parseUserSteerInput(input: unknown): UserSteerInput {
@@ -126,10 +129,12 @@ export function parseUserSteerInput(input: unknown): UserSteerInput {
 	if (typeof i.id !== "string" || i.id.length === 0) {
 		throw new ChatInputError("steer input requires a client-minted id");
 	}
-	if (typeof i.text !== "string" || i.text.trim().length === 0) {
+	const attachments = parseAttachmentRefs(i.attachments);
+	if (!attachments) throw new ChatInputError("steer input has malformed attachments");
+	if (typeof i.text !== "string" || (i.text.trim().length === 0 && attachments.length === 0)) {
 		throw new ChatInputError("steer input requires non-empty text");
 	}
-	return { type: "steer", id: i.id, text: i.text };
+	return { type: "steer", id: i.id, text: i.text, ...(attachments.length ? { attachments } : {}) };
 }
 
 /** The native appends a dismissal makes (pure — same orphan discipline
@@ -161,11 +166,14 @@ export function parseChatInput(input: unknown): ChatInput {
 	if (typeof input !== "object" || input === null) throw new ChatInputError("input must be an object");
 	const i = input as Record<string, unknown>;
 	switch (i.type) {
-		case "text":
-			if (typeof i.text !== "string" || (i.text as string).trim().length === 0) {
+		case "text": {
+			const attachments = parseAttachmentRefs(i.attachments);
+			if (!attachments) throw new ChatInputError("text input has malformed attachments");
+			if (typeof i.text !== "string" || ((i.text as string).trim().length === 0 && attachments.length === 0)) {
 				throw new ChatInputError("text input requires non-empty text");
 			}
-			return { type: "text", text: i.text };
+			return { type: "text", text: i.text, ...(attachments.length ? { attachments } : {}) };
+		}
 		case "answer":
 			if (typeof i.toolCallId !== "string" || i.toolCallId.length === 0) {
 				throw new ChatInputError("answer input requires toolCallId");
@@ -208,7 +216,7 @@ export function inputAppends(
 ): LhMessage[] {
 	switch (input.type) {
 		case "text":
-			return [...dismissalConclusion(record), newUserMessage(input.text)];
+			return [...dismissalConclusion(record), newUserMessage(input.text, input.attachments)];
 		case "answer": {
 			const pending = danglingQuestionOf(record.messages);
 			if (!pending || pending.toolCallId !== input.toolCallId) {

@@ -28,6 +28,7 @@
  */
 
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import { sanitizeImageSupport, type ImageSupportSettings } from "./attachments.ts";
 import { AUTH_PROVIDER_KEYS } from "./auth-keys.ts";
 import type { ModelRole } from "../../config.ts";
 import type { ChatSettings } from "./contracts/chat.ts";
@@ -386,6 +387,9 @@ export interface UserSettings {
 	 *  `provider:id` (LH-40, server-written, never the user's value): the
 	 *  threshold compaction uses min(window, learned limit). */
 	learnedContextLimits?: Record<string, number>;
+	/** Per (provider, model) "supports images" overrides (LH-39); absent
+	 *  pairs resolve from the catalog's input metadata. */
+	imageSupport?: ImageSupportSettings;
 	[key: string]: unknown;
 }
 
@@ -675,6 +679,7 @@ export function sanitizeUserSettings(raw: unknown): UserSettings | null {
 	if (r.learnedContextLimits !== null && typeof r.learnedContextLimits === "object" && !Array.isArray(r.learnedContextLimits)) {
 		out.learnedContextLimits = sanitizeContextWindows(r.learnedContextLimits as Record<string, unknown>);
 	}
+	if (r.imageSupport !== undefined) out.imageSupport = sanitizeImageSupport(r.imageSupport);
 	// Unknown top-level keys ride along untouched (forward-compat). One
 	// known-DEAD key is stripped instead of riding: `chat` (the old
 	// default-settings section) died with per-session models (owner,

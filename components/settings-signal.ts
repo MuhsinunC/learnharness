@@ -22,7 +22,7 @@ export const SETTINGS_SAVED_EVENT = "lh:settings-saved";
 // the zero-keys pill and the setup dialog's auto-advance.
 // "contextWindows" (LH-38): a per-pair context-window write — catalog
 // readers re-fetch, since /api/models carries the effective window.
-export type SettingsSection = "general" | "keys" | "agent" | "models" | "appearance" | "graph" | "compaction" | "dictation" | "contextWindows";
+export type SettingsSection = "general" | "keys" | "agent" | "models" | "appearance" | "graph" | "compaction" | "dictation" | "contextWindows" | "imageSupport";
 
 /** Writers call this after the PUT resolves ok — never before (a failed
  *  write notifies nothing; the record is unchanged). */

@@ -17,6 +17,8 @@ import {
 import { practiceTools, type PracticeToolContext } from "./tools/practice.ts";
 import { healToolRecord, withArgumentHeal } from "./tools/heal.ts";
 import { sendToUserTool } from "./tools/send-to-user.ts";
+import { viewImageTool } from "./tools/view-image.ts";
+import type { AttachmentStore } from "../core/ports.ts";
 import { quizInputObject, quizInputProblems } from "../core/question-core.ts";
 import { QUESTION_TOOLS, type EnabledTools } from "../core/pending.ts";
 import { toLlmMessages, nativeInputCause, PRACTICE_PROBLEM_TOOL } from "../core/native-messages.ts";
@@ -128,6 +130,10 @@ export interface AgentBuildOptions {
 	 *  <chatId>.jsonl via providerEventObserver — the GLM-truncation /
 	 *  DeepSeek-id incident layer. Absent or env-off → no observer. */
 	chatId?: string;
+	/** The learner's image store (LH-39): arms the view_image tool and the
+	 *  wire hydration of attachment pixels. Absent (tests) = references
+	 *  only, no tool. */
+	attachments?: AttachmentStore;
 }
 
 /**
@@ -205,6 +211,7 @@ function baseAgentOptions(kind: AgentKind, opts: AgentBuildOptions, tools: Agent
 				...(opts.tools === undefined && engine.model.id.toLowerCase().includes("claude")
 					? [withArgumentHeal(sendToUserTool)]
 					: []),
+				...(opts.tools === undefined && opts.attachments ? [withArgumentHeal(viewImageTool(opts.attachments))] : []),
 			],
 			messages: opts.messages ?? [],
 		},
@@ -230,7 +237,7 @@ function baseAgentOptions(kind: AgentKind, opts: AgentBuildOptions, tools: Agent
 		// UI-only markers (plan-block) drop, the app's id fields strip, and
 		// an abort's dangling question call gets its INTERRUPTED result. It
 		// must never throw (pi's convertToLlm contract).
-		convertToLlm: toLlmMessages,
+		convertToLlm: (messages) => toLlmMessages(messages, opts.attachments ? (id) => opts.attachments!.load(id) : undefined),
 		prepareRequest: (request) => {
 			if (opts.callPurpose) {
 				let learner = false, automatic = false;

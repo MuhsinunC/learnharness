@@ -1,0 +1,194 @@
+/**
+ * IMAGE ATTACHMENTS (LH-39, 2026-10-27): the learner's pasted, dropped, or
+ * path-given images. The record never holds pixels — a user message
+ * carries `attachments` (references into the app's own content-addressed
+ * store, <data>/attachments/<sha256>.<ext>), and toLlmMessages hydrates
+ * the pixels at the wire only for messages newer than the active
+ * compaction marker. Older references reach the model as text naming the
+ * id; the view_image tool loads the pixels again on demand.
+ * See docs/image-attachments.md.
+ *
+ * Pure and browser-safe: the store itself is src/store/attachments.ts.
+ */
+
+/** One stored image as the record references it. `id` is the store
+ *  filename (sha256 of the bytes + the sniffed extension); `name` is the
+ *  learner-facing original filename, display only. */
+export interface AttachmentRef {
+	id: string;
+	mimeType: string;
+	name?: string;
+}
+
+/** The store's id shape — the ONLY way into the store (no path joins on
+ *  anything else, so traversal is unreachable by construction). */
+export const ATTACHMENT_ID_RE = /^[0-9a-f]{64}\.(png|jpg|gif|webp)$/;
+
+/** The formats every vision provider in the catalog accepts (Claude:
+ *  JPEG, PNG, GIF, WebP — no BMP). */
+export const ATTACHMENT_MIME: Readonly<Record<string, string>> = {
+	png: "image/png",
+	jpg: "image/jpeg",
+	gif: "image/gif",
+	webp: "image/webp",
+};
+
+/** Per-image byte cap: Claude's API takes 10 MB base64 per image (about
+ *  7.5 MB raw); nothing here resizes, so bigger images refuse up front. */
+export const MAX_ATTACHMENT_BYTES = 7 * 1024 * 1024;
+
+/** Longest edge an attachment keeps: past 20 images per request Claude
+ *  takes nothing above ~2000 px, and screenshots read fine at this size.
+ *  The composer downscales to it; a path image already within it (and
+ *  the byte cap) is stored by the server as is. */
+export const MAX_IMAGE_EDGE = 2000;
+
+/** The wire's pixel budget per request (Claude's limits): past 20 image
+ *  blocks every image must be under ~2000 px, and a request caps at 32 MB.
+ *  Every image block counts (attachments, view_image, and tool results'
+ *  inline images); newer ones win, older ones ride as text. */
+export const MAX_WIRE_IMAGES = 20;
+export const MAX_WIRE_IMAGE_BASE64 = 20 * 1024 * 1024;
+
+export function isAttachmentId(id: unknown): id is string {
+	return typeof id === "string" && ATTACHMENT_ID_RE.test(id);
+}
+
+/** The MIME type an id's extension names (the id regex pins the set). */
+export function attachmentMime(id: string): string {
+	return ATTACHMENT_MIME[id.slice(id.lastIndexOf(".") + 1)]!;
+}
+
+/** Sniff the image format from magic bytes — never the filename. */
+export function sniffImageExt(bytes: Uint8Array): keyof typeof ATTACHMENT_MIME | null {
+	const at = (i: number, ...sig: number[]) => sig.every((b, k) => bytes[i + k] === b);
+	if (at(0, 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) return "png";
+	if (at(0, 0xff, 0xd8, 0xff)) return "jpg";
+	if (at(0, 0x47, 0x49, 0x46, 0x38)) return "gif";
+	if (at(0, 0x52, 0x49, 0x46, 0x46) && at(8, 0x57, 0x45, 0x42, 0x50)) return "webp";
+	return null;
+}
+
+/** The pixel size from an accepted image's header (no decode), or null
+ *  when the header doesn't say — callers then treat it as unknown. */
+export function imageDimensions(bytes: Uint8Array): { width: number; height: number } | null {
+	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	const u16 = (i: number, le = false) => (i + 2 <= bytes.length ? view.getUint16(i, le) : -1);
+	const u32 = (i: number, le = false) => (i + 4 <= bytes.length ? view.getUint32(i, le) : -1);
+	const size = (width: number, height: number) => (width > 0 && height > 0 ? { width, height } : null);
+	switch (sniffImageExt(bytes)) {
+		case "png":
+			return size(u32(16), u32(20));
+		case "gif":
+			return size(u16(6, true), u16(8, true));
+		case "webp": {
+			const chunk = String.fromCharCode(...bytes.subarray(12, 16));
+			if (chunk === "VP8 ") return size(u16(26, true) & 0x3fff, u16(28, true) & 0x3fff);
+			if (chunk === "VP8L" && u32(21, true) !== -1) {
+				const bits = u32(21, true);
+				return size((bits & 0x3fff) + 1, ((bits >>> 14) & 0x3fff) + 1);
+			}
+			if (chunk === "VP8X" && bytes.length >= 30) {
+				return size((bytes[24]! | (bytes[25]! << 8) | (bytes[26]! << 16)) + 1, (bytes[27]! | (bytes[28]! << 8) | (bytes[29]! << 16)) + 1);
+			}
+			return null;
+		}
+		case "jpg":
+			// Walk the segments to the first start-of-frame (SOF0..SOF15,
+			// minus DHT/JPG/DAC, which share the range).
+			for (let i = 2; i + 9 <= bytes.length; ) {
+				if (bytes[i] !== 0xff) return null;
+				const marker = bytes[i + 1]!;
+				if (marker === 0xff) { i++; continue; }
+				if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+					return size(u16(i + 7), u16(i + 5));
+				}
+				i += 2 + u16(i + 2);
+			}
+			return null;
+		default:
+			return null;
+	}
+}
+
+/** The image-reading tool's name (single-sourced: the tool, the wire
+ *  hydration, and the reference text all name it). */
+export const VIEW_IMAGE_TOOL = "view_image";
+
+/** The model-facing reference text for one attachment — always present,
+ *  pixels or not, so the agent can name the image to view_image later. */
+export function attachmentReferenceText(ref: AttachmentRef): string {
+	return `[Image attached by the learner: ${ref.id}${ref.name ? ` (${ref.name})` : ""}. If it is not shown, call ${VIEW_IMAGE_TOOL} with this id to see it.]`;
+}
+
+/** The learner-facing words for a model that can't take images — the
+ *  composer's notice and the server's refusal share them. */
+export function imagesUnsupportedText(model: { name?: string; id: string }): string {
+	return `${model.name || model.id} can't read images. Pick a model that accepts images, or turn image input on for this model in Settings → Agent → Models.`;
+}
+
+/** The refusal when the chat's model cannot take images (POST /api/chat
+ *  and the steer route — never a silent downgrade). */
+export const IMAGES_UNSUPPORTED_CODE = "images_unsupported" as const;
+
+/** Effective image support for one (provider, model): the learner's
+ *  persisted override wins, else the catalog's `input` metadata. */
+export function supportsImages(
+	model: { provider: string; id: string; input: readonly string[] },
+	overrides: ImageSupportSettings | undefined,
+): boolean {
+	const override = overrides?.[model.provider]?.[model.id];
+	return typeof override === "boolean" ? override : model.input.includes("image");
+}
+
+/** The `imageSupport` settings section: provider → model id → override.
+ *  Absent pairs resolve from the catalog. */
+export type ImageSupportSettings = Record<string, Record<string, boolean>>;
+
+/** Clean an overrides map (disk or network): booleans only, nothing else. */
+export function sanitizeImageSupport(raw: unknown): ImageSupportSettings {
+	const out: ImageSupportSettings = {};
+	if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return out;
+	for (const [provider, models] of Object.entries(raw as Record<string, unknown>)) {
+		if (models === null || typeof models !== "object" || Array.isArray(models)) continue;
+		const kept: Record<string, boolean> = {};
+		for (const [id, value] of Object.entries(models as Record<string, unknown>)) {
+			if (typeof value === "boolean") kept[id] = value;
+		}
+		if (Object.keys(kept).length) out[provider] = kept;
+	}
+	return out;
+}
+
+/** Parse the attachments of a text/steer input event: an optional array
+ *  of refs with valid store ids (mimeType derives from the id; the name
+ *  is display-only and capped). Existence is the server's check. */
+export function parseAttachmentRefs(raw: unknown): AttachmentRef[] | null {
+	if (raw === undefined) return [];
+	if (!Array.isArray(raw)) return null;
+	const out: AttachmentRef[] = [];
+	for (const item of raw) {
+		const r = item as { id?: unknown; name?: unknown } | null;
+		if (!r || !isAttachmentId(r.id)) return null;
+		out.push({
+			id: r.id,
+			mimeType: attachmentMime(r.id),
+			...(typeof r.name === "string" && r.name ? { name: r.name.slice(0, 200) } : {}),
+		});
+	}
+	return out;
+}
+
+/** Image paths a learner typed or pasted into a message: absolute,
+ *  `~/`, or `file://` paths ending in an image extension, bare or quoted,
+ *  with terminal-style escaped spaces. Each match carries its exact span
+ *  so the composer can lift attached paths out of the text. */
+export function findImagePaths(text: string): { path: string; start: number; end: number }[] {
+	const out: { path: string; start: number; end: number }[] = [];
+	const token = /(?<=^|\s)(?:(['"])((?:file:\/\/|~\/|\/)[^'"\n]+?)\1|(?:file:\/\/|~\/|\/)(?:\\ |[^\s'"])+)/g;
+	for (const m of text.matchAll(token)) {
+		const path = m[2] ?? m[0];
+		if (/\.(png|jpe?g|gif|webp)$/i.test(path)) out.push({ path, start: m.index, end: m.index + m[0].length });
+	}
+	return out;
+}
