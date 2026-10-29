@@ -95,6 +95,10 @@ case "$name" in
         mode=$1
         if [ -f "$LH_TEST_ROOT/late-reopened" ]; then emit "$mode" 132 "$exe"; fi
         if [ -f "$LH_TEST_ROOT/shipit-process" ]; then emit "$mode" 133 "$LH_MIGRATE_APPS_DIR/LearnHarness.app/Contents/Frameworks/Squirrel.framework/Resources/ShipIt"; fi
+        # ShipIt runs from inside the updating app; only LearnHarness's own counts.
+        if [ -f "$LH_TEST_ROOT/shipit-other-app" ]; then emit "$mode" 135 /Applications/Claude.app/Contents/Frameworks/Squirrel.framework/Resources/ShipIt; fi
+        if [ -f "$LH_TEST_ROOT/shipit-home-apps" ]; then emit "$mode" 136 "$HOME/Applications/LearnHarness.app/Contents/Frameworks/Squirrel.framework/Resources/ShipIt"; fi
+        if [ -f "$LH_TEST_ROOT/shipit-renamed" ]; then emit "$mode" 137 "$LH_TEST_ROOT/Other Apps/LH Copy.app/Contents/Frameworks/Squirrel.framework/Versions/A/Resources/ShipIt"; fi
         if [ -f "$LH_TEST_ROOT/shipit-log-reader" ]; then emit "$mode" 134 /usr/bin/tail "-f $HOME/Library/Caches/com.learnharness.LearnHarness.ShipIt/x.log"; fi
         if [ -f "$LH_TEST_ROOT/stubborn" ] || [ -f "$LH_TEST_ROOT/launched" ]; then emit "$mode" 123 "$exe";
         elif [ -f "$LH_TEST_ROOT/running" ] && [ "$quits" -eq 0 ]; then emit "$mode" 123 "$exe"; fi
@@ -767,6 +771,15 @@ case_26() {
     grep -Fxq 'A LearnHarness update is still installing; try again in a minute. Nothing was changed.' "$case_root/output"
     no_backup; unchanged_app; unchanged_data
     rm "$case_root/shipit-process"
+    # Our own ShipIt outside /Applications, by bundle name or (renamed copy) by bundle id.
+    fixture_app "$case_root/Other Apps/LH Copy.app" 0.3.3
+    for flag in shipit-home-apps shipit-renamed; do
+        touch "$case_root/$flag"
+        expect_failure --dry-run
+        grep -Fxq 'A LearnHarness update is still installing; try again in a minute. Nothing was changed.' "$case_root/output"
+        no_backup; unchanged_app; unchanged_data
+        rm "$case_root/$flag"
+    done
     touch "$case_root/shipit-log-reader"
     migrate
     [ "$(tail -1 "$case_root/output")" = Done. ]
@@ -783,7 +796,17 @@ case_27() {
     done
     chmod 600 "$case_root/fork.dmg"
 }
-for number in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27; do
+case_28() {
+    # Another app's Squirrel ShipIt (the Claude desktop app's is always running) never blocks.
+    setup 28
+    touch "$case_root/shipit-other-app"
+    migrate --dry-run
+    grep -Fxq 'Waiting for updates to finish...' "$case_root/output"
+    if grep -Fq 'still installing' "$case_root/output"; then return 1; fi
+    [ "$(tail -1 "$case_root/output")" = Done. ]
+    unchanged_app; unchanged_data
+}
+for number in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28; do
     # Do not use `if case_N`: it disables errexit inside the entire case.
     set +e
     (set -e; "case_$number") > "$run_logs/case-$number.log" 2>&1
