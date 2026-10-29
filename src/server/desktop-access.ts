@@ -1,4 +1,7 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { timingSafeEqual } from "node:crypto";
+import { desktopPageKey } from "../../electron/desktop-api.cjs";
+
+export { desktopPageKey };
 
 /** The packaged desktop server (electron/main.cjs sets both). One predicate for
  * proxy.ts and the routes, so they never disagree about the mode. */
@@ -29,20 +32,18 @@ export function desktopAPIAuthorized(
 	return expected !== null && matches(headers.get("x-learnharness-desktop"), expected);
 }
 
-/** The cookie electron/main.cjs sets for the window (HttpOnly, SameSite=Strict),
- * so its PAGE loads are trusted too once a remote-access password exists. An
- * HMAC of the secret: cookies ignore ports, so other local servers may see it,
- * and it must not unlock the API. API calls still need the header above. */
-function desktopPageKey(env: Record<string, string | undefined> = process.env): string | null {
-	const value = secret(env);
-	return value && createHmac("sha256", value).update("lh-desktop-page").digest("hex");
-}
-
+/** The cookie electron/main.cjs sets for the window (HttpOnly, SameSite=Strict,
+ * desktopPageKey), so its PAGE loads are trusted too: once a remote-access
+ * password exists, and before one (LH-45), where a page load without it is
+ * a browser that found this port and gets the login page (proxy.ts). Other
+ * local servers may see it (cookies ignore ports), so it must not unlock
+ * the API. API calls still need the header above. */
 export function desktopPageAuthorized(
 	headers: Headers,
 	env: Record<string, string | undefined> = process.env,
 ): boolean {
-	const expected = isDesktopServer(env) ? desktopPageKey(env) : null;
+	const value = isDesktopServer(env) ? secret(env) : null;
+	const expected = value && desktopPageKey(value);
 	const cookie = (headers.get("cookie") ?? "").split(";").map((part) => part.trim()).find((part) => part.startsWith("lh_desktop="));
 	return expected !== null && matches(cookie?.slice("lh_desktop=".length), expected);
 }

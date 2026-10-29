@@ -7,7 +7,7 @@ import { after, before, test } from "node:test";
 import type { Page } from "puppeteer-core";
 import { imageDimensions, MAX_ATTACHMENT_BYTES } from "../../src/core/attachments.ts";
 import { bootServer, until, type BootOptions, type LhServer } from "./harness/server.ts";
-import { launchChrome, type HeadlessChrome } from "./harness/chrome.ts";
+import { hydrated, launchChrome, type HeadlessChrome } from "./harness/chrome.ts";
 import { calledTool, reply, startStubProvider, type StubProvider, type StubRequest, type StubResponder } from "./harness/stub-provider.ts";
 import { png } from "./harness/png.ts";
 
@@ -119,13 +119,7 @@ async function openChat(page: Page, id: string): Promise<void> {
 	// A desktop window: below 1024px the sessions sidebar (and its Settings entry) is a closed drawer (LH-44).
 	await page.setViewport({ width: 1280, height: 800 });
 	await page.goto(`${server.url}/chat/${id}`, { waitUntil: "domcontentloaded", timeout: 180_000 });
-	await page.waitForSelector("[data-testid=composer] textarea", { timeout: 180_000 });
-	// Hydrated: React's handlers are on the textarea (a paste before this
-	// lands on server-rendered markup with no listener).
-	await page.waitForFunction(
-		() => Object.keys(document.querySelector("[data-testid=composer] textarea")!).some((k) => k.startsWith("__reactProps")),
-		{ timeout: 180_000 },
-	);
+	await hydrated(page, "[data-testid=composer] textarea");
 	// The model control has reported the chat's model (the image gate keys on it).
 	await until(async () => {
 		const label = await page.$eval("[data-testid=stats-model]", (el) => el.textContent ?? "").catch(() => "");
@@ -416,10 +410,7 @@ test("a refused send puts its images back with the text", async () => {
 test("the new-session page takes a pasted image into the first message", async () => {
 	const page = await chrome.browser.newPage();
 	await page.goto(`${server.url}/chat/new`, { waitUntil: "domcontentloaded", timeout: 180_000 });
-	await page.waitForFunction(
-		() => Object.keys(document.querySelector("[data-testid=composer] textarea") ?? {}).some((k) => k.startsWith("__reactProps")),
-		{ timeout: 180_000 },
-	);
+	await hydrated(page, "[data-testid=composer] textarea");
 	const image = png(90, 90, 200);
 	await fileEvent(page, "paste", image, "first.png");
 	await page.waitForSelector("[data-testid=attachment-chip]", { timeout: 30_000 });
@@ -599,10 +590,7 @@ test("a new session's first message still sends when its path can't be attached"
 		else void r.continue();
 	});
 	await page.goto(`${server.url}/chat/new`, { waitUntil: "domcontentloaded", timeout: 180_000 });
-	await page.waitForFunction(
-		() => Object.keys(document.querySelector("[data-testid=composer] textarea") ?? {}).some((k) => k.startsWith("__reactProps")),
-		{ timeout: 180_000 },
-	);
+	await hydrated(page, "[data-testid=composer] textarea");
 	const prompt = "Teach me what /nowhere/lh39/diagram.png shows";
 	await sendFromComposer(page, prompt);
 	await page.waitForFunction(() => /\/chat\/(?!new)[^/?]+/.test(location.pathname), { timeout: 60_000 });

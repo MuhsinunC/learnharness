@@ -1,6 +1,15 @@
 "use strict";
 
+const { createHmac } = require("node:crypto");
+
 const HEADER = "x-learnharness-desktop";
+
+/** The window's lh_desktop cookie value (LH-43): an HMAC of the secret,
+ * since cookies ignore ports and must never carry the API secret itself.
+ * The one derivation: this shell sets it, src/server/desktop-access.ts checks it. */
+function desktopPageKey(secret) {
+	return createHmac("sha256", secret).update("lh-desktop-page").digest("hex");
+}
 
 /** Called for EVERY outgoing request, so redirects cannot carry the secret
  * to another origin. Never expose this function or its secret to preload. */
@@ -22,4 +31,4 @@ function desktopAPIHeaders(details, origin, secret, windows) {
 	} catch { /* Missing/destroyed/navigated frames fail closed. */ }
 	return headers;
 }
-module.exports = { desktopAPIHeaders, HEADER };
+module.exports = { desktopAPIHeaders, desktopPageKey, HEADER };

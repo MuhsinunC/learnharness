@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { computerOnlyMessage } from "./src/core/remote-access.ts";
+import { computerOnlyMessage, PATH_COMPUTER_ONLY } from "./src/core/remote-access.ts";
 import { apiRouteClass, computerOnlyRequest, desktopAPIAuthorized, desktopPageAuthorized, isDesktopServer, keyWriteRequest, routePath } from "./src/server/desktop-access.ts";
 import { ACCESS_HEADER, confirmCurrentPassword, CURRENT_PASSWORD_HEADER, decideAccess, sameOriginRequest, type Access } from "./src/server/web-login.ts";
 
@@ -36,10 +36,11 @@ export function proxy(request: NextRequest) {
 	let access: Access | null;
 	if (isDesktopServer()) {
 		// The window's per-launch secret: a header on its API calls, a cookie on
-		// its page loads. Without it an API call needs a session, never "local".
+		// its page loads. Without it a request needs a session (decideAccess
+		// never says "local" here), and a page goes to the login page.
 		if (api ? desktopAPIAuthorized(request.headers) : desktopPageAuthorized(request.headers)) access = "desktop";
 		else access = decideAccess(request.headers);
-		if (api && access !== "desktop" && access !== "session") {
+		if (api && !access) {
 			return NextResponse.json(
 				{ error: "Desktop API access requires the trusted LearnHarness window." },
 				{ status: 403, headers: { "Cache-Control": "no-store" } },
@@ -56,7 +57,9 @@ export function proxy(request: NextRequest) {
 		return NextResponse.json({ error: "No such API route." }, { status: 404, headers: { "Cache-Control": "no-store" } });
 	}
 	if (access === "session" && computerOnlyRequest(request.method, kind, isDesktopServer())) {
-		return NextResponse.json({ error: computerOnlyMessage(isDesktopServer()), computerOnly: true }, { status: 403, headers: { "Cache-Control": "no-store" } });
+		// A typed image path is not a setting to change: say what works instead (LH-45).
+		const error = route === "/api/attachments/file" ? PATH_COMPUTER_ONLY : computerOnlyMessage(isDesktopServer());
+		return NextResponse.json({ error, computerOnly: true }, { status: 403, headers: { "Cache-Control": "no-store" } });
 	}
 	if (access) headers.set(ACCESS_HEADER, access);
 	// Web mode, password set: a session swaps or deletes a key only with the

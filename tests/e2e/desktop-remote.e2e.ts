@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { createHmac, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { after, before, test } from "node:test";
 import { bootServer, freePort, until, type LhServer } from "./harness/server.ts";
 import { launchChrome } from "./harness/chrome.ts";
+import { PATH_COMPUTER_ONLY } from "../../src/core/remote-access.ts";
+import { desktopPageKey } from "../../src/server/desktop-access.ts";
 
 // LH-43, desktop app: remote access from a phone through the packaged
 // server. Electron cannot run here, so the harness's production build
@@ -20,7 +22,7 @@ const TICKET = "lh-43";
 const PASSWORD = "desktop phone password";
 const TS_HOST = "lh-test.example.ts.net";
 const SECRET = randomBytes(32).toString("hex");
-const PAGE_KEY = createHmac("sha256", SECRET).update("lh-desktop-page").digest("hex");
+const PAGE_KEY = desktopPageKey(SECRET);
 const WINDOW_API = { "x-learnharness-desktop": SECRET };
 const WINDOW_PAGE = { cookie: `lh_desktop=${PAGE_KEY}` };
 
@@ -105,7 +107,18 @@ after(async () => {
 });
 
 test("(desktop) before a password: the window works as before, and nothing remote gets in", async () => {
-	assert.equal((await raw("/")).status, 200, "the window's page loads need nothing yet");
+	assert.equal((await raw("/", { headers: WINDOW_PAGE })).status, 200, "the window's page loads carry its cookie");
+	// LH-45: without it, a browser that found this port would load pages
+	// whose every API call is refused; it gets the login page instead.
+	const browser = await raw("/chat/new");
+	assert.equal(browser.status, 303);
+	assert.equal(browser.headers.location, "/login?next=%2Fchat%2Fnew");
+	// The text fits where the browser is (LH-45): here, or a phone through serve.
+	const here = (await raw("/login")).body, phone = (await raw("/login", { headers: viaServe() })).body;
+	assert.match(here, /Remote access is off\. This is the LearnHarness desktop app: use it in its own window\./);
+	assert.match(phone, /Remote access is off\. On the computer, set a password in the LearnHarness desktop app .* the address to open on this device\./);
+	assert.doesNotMatch(phone, /own window/);
+	for (const body of [here, phone]) assert.doesNotMatch(body, /log in here/, "the port changes once a password exists and the app reopens");
 	assert.equal((await raw("/api/settings", { headers: WINDOW_API })).status, 200);
 	assert.equal((await raw("/api/settings")).status, 403, "loopback without the secret stays shut, as before");
 	const refusal = { error: "Desktop API access requires the trusted LearnHarness window." };
@@ -245,7 +258,8 @@ test("(desktop) keys, Claude Code, sign-ins and path reads go only through the w
 	] as const) {
 		const res = await send(pathname, method, phone, body);
 		assert.equal(res.status, 403, `${method} ${pathname}`);
-		assert.deepEqual(JSON.parse(res.body), { error: "Change this in the LearnHarness desktop app on the computer.", computerOnly: true });
+		const error = pathname === "/api/attachments/file" ? PATH_COMPUTER_ONLY : "Change this in the LearnHarness desktop app on the computer.";
+		assert.deepEqual(JSON.parse(res.body), { error, computerOnly: true }, `${method} ${pathname}`);
 	}
 	assert.equal((await send("/api/chats", "POST", phone, { title: "From the phone" })).status, 200, "chats still work");
 	assert.equal((await send("/api/settings/general", "PUT", phone, { autoUpdate: true })).status, 200, "ordinary settings still save");
@@ -299,7 +313,7 @@ test("(desktop) the window changes and removes the password without the current 
 	assert.equal((await raw("/api/remote-access", { method: "DELETE", headers: { ...WINDOW_API, "content-type": "application/json" }, body: "{}" })).status, 200);
 	assert.equal((await remoteAccess()).enabled, false);
 	assert.equal((await raw("/api/settings", { headers: viaServe({ cookie: after }) })).status, 403, "off ends every session");
-	assert.equal((await raw("/")).status, 200, "and the window is back to needing nothing");
+	assert.equal((await raw("/", { headers: WINDOW_PAGE })).status, 200, "and the window is back to needing only its cookie");
 	assert.equal((await put(WINDOW_API, { password: PASSWORD })).status, 200);
 });
 

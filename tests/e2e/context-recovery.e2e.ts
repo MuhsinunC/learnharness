@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { after, before, test } from "node:test";
 import { bootServer, until, type LhServer } from "./harness/server.ts";
-import { launchChrome, type HeadlessChrome } from "./harness/chrome.ts";
+import { hydrated, launchChrome, type HeadlessChrome } from "./harness/chrome.ts";
 import type { Page } from "puppeteer-core";
 import { maxOutputTokens, reply, startStubProvider, type StubProvider, type StubRequest, type StubResponder } from "./harness/stub-provider.ts";
 
@@ -180,14 +180,7 @@ async function openChat(id: string, selector: string) {
 	const page = await chrome.browser.newPage();
 	await page.setViewport({ width: 1400, height: 900 });
 	await page.goto(`${server.url}/chat/${id}`, { waitUntil: "domcontentloaded", timeout: 180_000 });
-	await page.waitForFunction(
-		(sel) => {
-			const el = document.querySelector(sel);
-			return !!el && Object.keys(el).some((k) => k.startsWith("__reactProps"));
-		},
-		{ timeout: 120_000 },
-		selector,
-	);
+	await hydrated(page, selector, 120_000);
 	return page;
 }
 
