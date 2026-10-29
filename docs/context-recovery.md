@@ -2,7 +2,7 @@
 
 ## The problem
 
-The threshold compaction fires at `min(settings threshold, contextWindow − 16k)`
+The threshold compaction fires at `min(settings threshold, contextWindow − the reply's room)`
 (`src/server/compaction.ts`). If the window the app believes in is larger than
 the one the provider enforces, for example 1.5M left on for a 128k model, the
 chat grows past the real limit before the threshold is reached. Every turn after
@@ -59,15 +59,21 @@ Pi's shape, with Codex's clipping and option 2 as the fallback
   "input is too long" without pi's extra qualifiers. A rejection the server
   has rewritten carries a `contextOverflow` mark (the provider's own text,
   and `unrecoverable` once Repair can no longer help), and the mark rules.
+  A request the app held back (see "The reply's room") carries
+  `heldBack: true` instead of provider-shaped text: it is an overflow for
+  recovery, but it has no provider text, and no limit is learned from it.
 - **Target.** Use the limit the error states ("maximum context length is N",
-  Anthropic's "… > N maximum", and others). Otherwise use the window from
-  `contextWindowFor`, but never more than half the request that failed,
-  because that window is exactly what may be wrong. A recovered request may
-  fill 60% of the target. The rest is left for tool declarations, the reply's
-  `max_tokens`, and the error in the chars/4 estimate. Fit is chars/4 of the
-  system prompt, the new marker and the kept tail; the failed request is
-  measured once. The usage anchor is not used, because it describes the last
-  request that succeeded.
+  Anthropic's "… > N maximum", and others). After a held-back request, use
+  the window from `contextWindowFor`, which it was measured against.
+  Otherwise use that window, but never more than half the request that
+  failed, because that window is exactly what may be wrong. Fit is judged
+  as the wire request will be (LH-50): the system prompt and tool declarations, the
+  new marker and the kept tail, plus the reply's room (see "The reply's
+  room"), all at pi-ai's chars/3.5, must stay within the target. The prompt
+  and declarations are the chat's last turn's, noted when its agent is built
+  (in memory; with no turn since boot, the composed prompt alone). The
+  failed request is measured once. The usage anchor is not used, because it
+  describes the last request that succeeded.
 - **Compact.** First, one model summary: half the budget for the kept tail,
   half for the summary, which carries a word cap. The summarizer's input is
   clipped to the target: the prior summary always rides whole, and only the
@@ -82,10 +88,16 @@ Pi's shape, with Codex's clipping and option 2 as the fallback
 - **Retry once per episode.** The retry is a `continue` turn. The guard is
   read from the record: a recovery marker (`details.notice`) after the last
   successful reply means this episode already had its compact-and-retry,
-  whatever threshold markers landed since. A second overflow, or a chat with
-  nothing to drop, becomes "This chat is still too long for \<model\>…", built
-  from the provider's text every time (never nested), and marked
-  unrecoverable, so Repair is no longer offered.
+  whatever threshold markers landed since. A chat with nothing to drop
+  becomes "This chat is still too long for \<model\>…", built from the
+  provider's text every time (never nested), and marked unrecoverable, so
+  Repair is no longer offered. A second overflow is marked unrecoverable only
+  when nothing older is left to condense or the system prompt and tool
+  declarations alone would be held back (`condensable`, the held-back
+  floor; a recovery whose full reply room is gone fits under that floor
+  instead); otherwise it says "…after condensing its older
+  part once. Press Repair this chat…" and Repair stays offered (LH-50: the
+  failure may have come from an output budget, which a Repair can fix).
 - **Never silent.** When recovery cannot run, the rejection becomes a plain
   explanation that keeps Repair offered: background use off for the
   connection ("turn background use on, or press Repair this chat"), no
@@ -109,15 +121,23 @@ Pi's shape, with Codex's clipping and option 2 as the fallback
 
 ## The learned limit
 
-The limit a rejection states is saved per `provider:id` in settings, under
-`learnedContextLimits`, its own key: the user's `contextWindows` value and
-the context-window modal are untouched. `contextWindowFor` returns
-min(window, learned limit), and the threshold compaction reads it there, so
-after one recovery the threshold fires before the provider rejects again.
-For small windows the threshold's 16k reserve and 20k kept tail scale down
-to a quarter of the window, since both can exceed a learned 8k limit. The
+The limit a provider's rejection states is saved per `provider:id` in
+settings, under `learnedContextLimits`, its own key (a held-back request
+states none, so it never sets or overwrites one): the user's
+`contextWindows` value and the context-window modal are untouched. Every engine built after that runs
+at min(window, learned limit) (LH-50: the resolved spec's `contextLimit`), so
+pi-ai's max-tokens clamp uses the real limit, and `contextWindowFor` returns
+the same min, which the threshold compaction reads, so after one recovery
+the threshold fires before the provider rejects again. Recovery and Repair
+learn the limit before they build their engine, so the summarizer runs at it
+too. For small windows the 20k kept tail scales down to a quarter of the
+window, since it can exceed a learned 8k limit. The
 threshold also estimates each kind's own system prompt (the prober's is about 40%
-of the teacher's). The settings UI does not show the learned limit.
+of the teacher's). The footer's "/ N" and the model menus show the window
+that runs (`/api/models` `contextWindow` is capped at the learned limit,
+which it also returns as `learnedContextLimit`), and the context-window
+field's caption adds "Provider limit: N" when that limit is below the
+configured window; the field itself keeps the user's value.
 
 ## The window seam (LH-38)
 
@@ -126,5 +146,83 @@ Recovery and the threshold compaction read the window only through
 from `engine.model.contextWindow`, which carries LH-38's per-(provider,
 model) custom window (the resolved spec's `contextWindow`, set by
 chat-handler's `withContextWindow`; the user's value when set, else the
-catalog default), and caps it at the learned limit. The repair route
+catalog default), already capped at a learned limit (the spec's
+`contextLimit`), and caps it at one learned since. The repair route
 builds its engine the same way.
+
+## The reply's room (LH-50)
+
+Providers count the input plus the request's `max_tokens` against the
+window. pi-ai asks for the model's max output, clamped to
+`window − estimated context − 4096`, where the estimate covers the system
+prompt and tool declarations (its usage anchor, or chars/3.5). Once the
+engine's window is the real limit, that clamp keeps every request inside it,
+so the budgets' job is to keep room for the reply:
+`outputReserveTokens(window, maxTokens)` is the model's max output plus
+pi-ai's 4096, at least pi's 16,384 and at most a quarter of the window
+plus 4096. The threshold compaction fires at
+`min(settings threshold, window − that reserve)`, so a request at the
+threshold still gets that much output, and a recovery's whole request fits
+`window − reserve` (see Target).
+
+The threshold measures the next request the way pi-ai's clamp and the
+held-back floor below measure it (`projectedContextTokens`): the usage
+anchor plus the messages after it at chars/3.5, or, with no anchor, every
+message at chars/3.5 plus the noted system prompt and tool declarations.
+Measured at chars/4 without the declarations, a chat could be held back
+before the threshold fired (a 128k window with an 8,192 max output). The
+16,384 floor keeps a gap between the threshold and the held-back floor
+for the next learner message and the turn's tool round trips: with a max
+output of 1,024 or less, the reply's room alone leaves none. Thresholds
+(the default 150k setting):
+
+| Window, max output | Threshold | Held back above |
+| --- | --- | --- |
+| 128,000, 8,192 | 111,616 | 122,880 |
+| 200,000, 64,000 | 145,904 | 194,880 |
+| 32,000, 1,024 (e2e) | 19,904 | 26,880 |
+
+Before LH-50 a custom 1M window over a real
+40,960 one (OpenRouter qwen/qwen3-14b, 16,384 max output) made every request
+ask for 16,384: with gradual growth the first recovery fit, the next turns
+were rejected again, and the chat ended unrecoverable; one huge paste's
+recovery retry was rejected outright (`tests/e2e/output-budget.e2e.ts`
+reproduces both).
+
+A request whose reply room under pi-ai's own rule (window − its estimate −
+4096) would fall below min(1024, the model's max output) is never sent:
+`piEngineForSpec`'s stream function holds it back as a length rejection
+marked `heldBack` ("Not sent: the reply would have only R tokens of room in
+this chat's N-token context window."). It is a last-resort guard: normal
+growth reaches the threshold first. Overflow recovery then condenses the
+chat and retries once; if the system prompt and tool declarations alone
+leave no room, the chat says plainly that it is too long for the model.
+The held-back text is the app's, never the provider's: it is not learned
+as a limit, the explanation that replaces it carries no provider text,
+and background jobs only show it as their failure. A request with
+max_tokens near 1 would otherwise end the reply silently (the old LH-40 e2e regime: an 11,548
+window, a 3.6k-token prompt and 3k of tool declarations).
+
+## Transports
+
+- **API-key providers (pi-ai APIs, OpenRouter, the e2e stub):** pi-ai's
+  clamp sets max_tokens against the engine model's window, which carries the
+  learned limit; length rejections pass through unchanged.
+- **Native subscriptions** (`src/agent/subscription-stream.ts`): the
+  transport model takes the engine model's window, so pi-ai's clamp uses the
+  learned limit. A length rejection used to be replaced by the generic
+  "request failed" line, so recovery never ran; it now keeps the provider's
+  text.
+- **ChatGPT** (`src/agent/chatgpt-stream.ts`): the payload carries no
+  max_output_tokens (`chatGPTPayload` keeps a fixed key list), so no output
+  clamp reaches the wire; the threshold reserve and the held-back floor still
+  apply. A length rejection (for example `context_length_exceeded`) used to
+  be masked the same way; it now keeps its text and recovery runs. Such a
+  rejection states no limit, so recovery aims at half the failed request.
+- **Claude Code** (`src/agent/claude-code/`): options.maxTokens has no SDK
+  surface; the CLI picks its own output budget and runs its model id at the
+  catalog window. The engine window (catalog, custom, or learned) still
+  drives the threshold and the held-back floor. A CLI error result passes
+  through as its own text: "prompt is too long" is recognised as a length
+  rejection (and "N tokens > M maximum", when present, is learned); any
+  other wording is a plain failure.

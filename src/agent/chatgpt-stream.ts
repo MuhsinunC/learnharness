@@ -4,6 +4,7 @@ import { AssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-s
 import { transformMessages } from "@earendil-works/pi-ai/api/transform-messages";
 import { chatGPTAbortController, chatGPTScope, chatGPTScopeCurrent, chatGPTLease, chatGPTDenial } from "./chatgpt-bridge.ts";
 import type { AdmissionScope, ChatGPTDispatchLifecycle } from "./chatgpt-request-cycle.ts";
+import { isContextOverflowText } from "../core/context-overflow.ts";
 
 const USAGE = "https://chatgpt.com/settings/usage";
 export function chatGPTStreamError(message: string): string {
@@ -109,7 +110,9 @@ export function chatGPTStream(background: () => boolean, lifecycle?: ChatGPTDisp
 			} catch (err) {
 				if (terminal) return;
 				if (!committed) lifecycle?.noDispatch(await chatGPTDenial(scope, controller, options?.signal?.aborted === true, purpose));
-				partial = { ...partial, stopReason: signal.aborted ? "aborted" : "error", errorMessage: chatGPTStreamError(err instanceof Error ? err.message : "") };
+				const message = err instanceof Error ? err.message : "";
+				// A length rejection keeps the provider's text: overflow recovery acts on it (LH-50).
+				partial = { ...partial, stopReason: signal.aborted ? "aborted" : "error", errorMessage: !signal.aborted && isContextOverflowText(message) ? message : chatGPTStreamError(message) };
 				output.push({ type: "error", reason: partial.stopReason as "error" | "aborted", error: partial });
 			} finally { release(); output.end(); }
 		})();

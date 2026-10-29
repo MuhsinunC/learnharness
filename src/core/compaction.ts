@@ -16,12 +16,16 @@
  * turn start awaits the gate. No mid-run surgery exists.
  *
  * Trigger threshold (owner ruling): effective = min(settings threshold,
- * model contextWindow − 16k reserve). Defaults: threshold 150k, kept
- * tail ~20k recent tokens (pi's defaults, owner-approved). Token
- * estimation follows pi's law (2026-10-05 incident fix): anchor on the
- * provider-reported usage of the last assistant message, chars/4 only
- * for messages appended after that anchor; the heuristic alone runs
- * only when no usage exists yet.
+ * model contextWindow − reserve); the reserve is the reply's room, the
+ * model's max output plus pi-ai's 4096, at least pi's 16k (LH-50,
+ * server/compaction.ts). Defaults: threshold 150k, kept tail ~20k
+ * recent tokens (pi's defaults, owner-approved). Token estimation
+ * follows pi's law (2026-10-05 incident fix): anchor on the
+ * provider-reported usage of the last assistant message, estimate only
+ * messages appended after that anchor; the heuristic alone runs only
+ * when no usage exists yet. The trigger measures at pi-ai's chars/3.5
+ * with the request prefix (LH-50, server/compaction.ts
+ * projectedContextTokens); the cut walk below at chars/4.
  *
  * Summary content (owner's three requirements + continuity): the
  * learner's understanding and its EVOLUTION (quiz outcomes, confidence,
@@ -159,7 +163,8 @@ export interface ContextTokenEstimate {
 	lastUsageIndex: number | null;
 }
 
-/** THE trigger estimator (pi's estimateContextTokens): anchor on the last
+/** The chars/4 trigger estimator before LH-50 (the trigger now measures
+ * with pi-ai's own, server/compaction.ts projectedContextTokens): anchor on the last
  * assistant usage the provider reported — prompt, tools, tokenizer
  * density and all — and chars/4-estimate ONLY what was appended after
  * it. The heuristic never re-estimates history the provider already

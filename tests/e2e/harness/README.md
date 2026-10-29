@@ -38,6 +38,10 @@ with fast refresh.
 
   Pick the reply from the request content, never from a global counter.
   The helpers `lastToolName(req)` and `calledTool(req, name)` help with that.
+  To enforce a context window as real providers do, compare
+  `requestTokens(req)` (`inputTokens(req)`, the messages and tool declarations
+  at chars/4, plus `maxOutputTokens(req)`, the request's max_tokens) with the
+  limit.
   `stub.requests` records every request and `stub.setResponder()` swaps the
   script mid-file.
 - `server.ts`: `bootServer({ ticket, providers, settings, env? })` returns

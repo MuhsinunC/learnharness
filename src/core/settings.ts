@@ -353,7 +353,7 @@ export interface GraphSettings {
 /**
  * COMPACTION (owner round 14, 2026-10-05): the context-fitting mechanic's
  * user-facing knob. One number — the trigger threshold in context tokens.
- * The effective trigger is min(this, model contextWindow − 16k reserve)
+ * The effective trigger is min(this, model contextWindow − the reply's room)
  * (owner ruling: on big models the setting rules; on small ones the
  * window rules before the provider overflows).
  *

@@ -28,13 +28,13 @@
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { Usage } from "@earendil-works/pi-ai";
+import type { Message, Usage } from "@earendil-works/pi-ai";
+import { estimateContextTokens as estimateWireTokens, estimateTextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import {
 	activeCompactionOf,
 	buildCompactionPrompt,
 	compactionCutIndex,
 	COMPACTION_RESERVE_TOKENS,
-	estimateContextTokens,
 	estimateTokens,
 	hasProbeDone,
 	KEEP_RECENT_TOKENS,
@@ -48,7 +48,7 @@ import {
 } from "../core/index.ts";
 import { emit } from "../core/events.ts";
 import type { ChatStore } from "../core/ports.ts";
-import type { PiEngine } from "../agent/models.ts";
+import { CONTEXT_SAFETY_TOKENS, type PiEngine } from "../agent/models.ts";
 import { runSubagent } from "../agent/subagents/pi-run.ts";
 import { composeInstructions } from "../agent/teacher-agent.ts";
 
@@ -115,7 +115,8 @@ export interface CompactionDeps {
 	/** The kept tail (keepRecentTokensFor the window); default pi's 20k. */
 	keepRecentTokens?: number;
 	/** The composed system prompt's token estimate (chars/4) — the
-	 *  projection the provider actually receives starts with it. */
+	 *  projection's prefix until a turn notes the real one
+	 *  (requestPrefixTokens). */
 	systemPromptTokens: number;
 	/** Injectable summarizer (tests); default = the sub-agent one-shot. */
 	summarize?: Summarizer;
@@ -126,7 +127,7 @@ export interface CompactionDeps {
 interface CompactionState {
 	inFlight: Map<string, Promise<void>>;
 }
-const g = globalThis as typeof globalThis & { __lhCompaction?: CompactionState };
+const g = globalThis as typeof globalThis & { __lhCompaction?: CompactionState; __lhRequestPrefix?: Map<string, number> };
 function state(): CompactionState {
 	return (g.__lhCompaction ??= { inFlight: new Map() });
 }
@@ -146,14 +147,31 @@ export async function awaitCompaction(chatId: string): Promise<void> {
 
 // ─── the effective threshold (owner ruling: min(setting, window − reserve)) ─
 
+/** The room a request keeps for its reply (LH-50): the model's max
+ *  output plus pi-ai's safety margin, never under pi's 16k reserve, and
+ *  at most a quarter of the window plus that margin (small windows).
+ *  Providers count input + max_tokens against the window, and pi-ai
+ *  shrinks max_tokens to what the input leaves, so an input budget that
+ *  ignores the reply starves it or gets rejected. The 16k floor is the
+ *  next turn's growth room: the gap between the threshold and the
+ *  held-back floor (window − 4096 − min(1024, max output)) must hold the
+ *  learner's next message and the turn's tool round trips, and a small
+ *  max output alone leaves no gap. */
+export function outputReserveTokens(contextWindowTokens: number, maxOutputTokens: number): number {
+	return Math.min(Math.max(maxOutputTokens + CONTEXT_SAFETY_TOKENS, COMPACTION_RESERVE_TOKENS), Math.floor(contextWindowTokens / 4) + CONTEXT_SAFETY_TOKENS);
+}
+
 /** Resolve the effective trigger. Unknown window → the setting alone
- *  (honest: no fake window — the catalog-index precedent). */
-export function effectiveThresholdTokens(settingTokens: number | undefined, contextWindowTokens: number | undefined): number {
+ *  (honest: no fake window — the catalog-index precedent). With the
+ *  engine's max output known, the reserve is the reply's room
+ *  (outputReserveTokens); without it, pi's 16k, a quarter of a small
+ *  window (LH-40: a learned 8k limit). */
+export function effectiveThresholdTokens(settingTokens: number | undefined, contextWindowTokens: number | undefined, maxOutputTokens?: number): number {
 	const setting = settingTokens ?? 150_000;
 	if (contextWindowTokens === undefined) return setting;
-	// Small windows (LH-40: a learned 8k limit) reserve a quarter instead
-	// of a 16k reserve that would exceed the whole window.
-	const reserve = Math.min(COMPACTION_RESERVE_TOKENS, Math.floor(contextWindowTokens / 4));
+	const reserve = maxOutputTokens === undefined
+		? Math.min(COMPACTION_RESERVE_TOKENS, Math.floor(contextWindowTokens / 4))
+		: outputReserveTokens(contextWindowTokens, maxOutputTokens);
 	return Math.min(setting, Math.max(contextWindowTokens - reserve, 1));
 }
 
@@ -175,20 +193,36 @@ export function systemPromptTokensFor(kind: CompactionDeps["kind"]): number {
 
 // ─── the estimate over the ACTIVE projection ────────────────────────────────
 
-/** The projected context estimate: what the next LLM call would carry.
+const requestPrefixes = () => (g.__lhRequestPrefix ??= new Map());
+
+/** Remember what every request of this chat carries before its messages:
+ *  the last turn's system prompt and tool declarations, in wire tokens.
+ *  In memory; a chat with no turn since boot falls back to its composed
+ *  prompt alone. */
+export function noteRequestPrefix(chatId: string, systemPrompt: string, tools: readonly unknown[]): void {
+	requestPrefixes().set(chatId, estimateTextTokens(systemPrompt) + estimateTextTokens(JSON.stringify(tools)));
+}
+
+/** The chat's request prefix in wire tokens (pi-ai's chars/3.5): the
+ *  noted one, else the composed prompt (`systemPromptTokens`, chars/4). */
+export function requestPrefixTokens(chatId: string, systemPromptTokens: number): number {
+	return requestPrefixes().get(chatId) ?? Math.ceil((systemPromptTokens * 4) / 3.5);
+}
+
+/** The projected context: what the next LLM call would carry, measured
+ *  the way pi-ai's max-tokens clamp and the held-back floor measure it
+ *  (LH-50), so the threshold fires before a request is held back.
  *  THE TRIGGER LAW (pi's, verified 2026-10-05): anchor on the last
  *  assistant message's provider-reported usage — it already counted
  *  the system prompt, tool declarations, and the provider's own
- *  tokenizer — and chars/4-estimate ONLY messages appended after it.
- *  estimateContextTokens refuses anchors that predate a compaction
- *  marker (that usage described context the next request will NOT
- *  carry), so the fallback path runs the plain heuristic over the
- *  CUT-HONORED projection (never the dropped span) plus the additive
- *  prompt term the anchor would have covered. */
-export function projectedContextTokens(messages: readonly LhMessage[], systemPromptTokens: number): number {
-	const est = estimateContextTokens(messages);
-	if (est.lastUsageIndex !== null) return est.tokens;
-	return heuristicContextTokens(messages, systemPromptTokens);
+ *  tokenizer — and estimate ONLY messages appended after it, at
+ *  chars/3.5. The estimate runs over the CUT-HONORED projection, whose
+ *  summary head postdates (and so refuses) every anchor before the
+ *  marker; unanchored, every message counts, plus `prefixTokens`
+ *  (requestPrefixTokens), the term the anchor would have covered. */
+export function projectedContextTokens(messages: readonly LhMessage[], prefixTokens: number): number {
+	const est = estimateWireTokens(toLlmMessages(messages as readonly AgentMessage[]) as Message[]);
+	return est.lastUsageIndex !== null ? est.tokens : est.tokens + prefixTokens;
 }
 
 /** chars/4 over the CUT-HONORED projection plus the system prompt — no
@@ -277,7 +311,7 @@ async function compact(deps: CompactionDeps, chatId: string): Promise<void> {
 	const record = deps.chatStore.getChat(chatId);
 	if (!record) return;
 	const messages = record.messages;
-	const tokensBefore = projectedContextTokens(messages, deps.systemPromptTokens);
+	const tokensBefore = projectedContextTokens(messages, requestPrefixTokens(chatId, deps.systemPromptTokens));
 	if (tokensBefore <= deps.thresholdTokens) return; // settled beneath while we waited
 
 	const cut = compactionCutIndex(messages, deps.keepRecentTokens);
@@ -346,7 +380,7 @@ export async function ensureCompacted(deps: CompactionDeps, chatId: string): Pro
 	if (deps.canStart?.() === false) return;
 	const record = deps.chatStore.getChat(chatId);
 	if (!record) return;
-	if (projectedContextTokens(record.messages, deps.systemPromptTokens) <= deps.thresholdTokens) return;
+	if (projectedContextTokens(record.messages, requestPrefixTokens(chatId, deps.systemPromptTokens)) <= deps.thresholdTokens) return;
 	if (state().inFlight.has(chatId)) return; // a concurrent caller started it while we awaited
 	const run = compact(deps, chatId);
 	state().inFlight.set(chatId, run);
@@ -371,7 +405,7 @@ export function kickCompaction(buildDeps: () => CompactionDeps | null, chatId: s
 	if (!deps || deps.canStart?.() === false) return;
 	const record = deps.chatStore.getChat(chatId);
 	if (!record) return;
-	if (projectedContextTokens(record.messages, deps.systemPromptTokens) <= deps.thresholdTokens) return;
+	if (projectedContextTokens(record.messages, requestPrefixTokens(chatId, deps.systemPromptTokens)) <= deps.thresholdTokens) return;
 	const run = compact(deps, chatId);
 	state().inFlight.set(chatId, run);
 	void run.finally(() => state().inFlight.delete(chatId));

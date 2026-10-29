@@ -99,6 +99,9 @@ export interface EffectiveSettings {
 	/** Custom context windows as stored, keyed `provider:id` (LH-38) —
 	 *  absent pair = the catalog default. */
 	contextWindows: Record<string, number>;
+	/** The limits providers stated, as stored, keyed `provider:id` (LH-40)
+	 *  — the engine's window never exceeds one (LH-50). */
+	learnedContextLimits: Record<string, number>;
 	/** Image-support overrides as stored (LH-39) — core/attachments.ts
 	 *  supportsImages resolves a pair against the catalog. */
 	imageSupport: ImageSupportSettings;
@@ -229,6 +232,7 @@ export function resolveSettings(record: UserSettings | null): EffectiveSettings 
 			thresholdTokens: record?.compaction?.thresholdTokens ?? FACTORY_SETTINGS.compaction.thresholdTokens,
 		},
 		contextWindows: record?.contextWindows ?? {},
+		learnedContextLimits: record?.learnedContextLimits ?? {},
 		imageSupport: record?.imageSupport ?? {},
 	};
 }

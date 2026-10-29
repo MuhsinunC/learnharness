@@ -196,7 +196,9 @@ describe("the compaction service", () => {
 			if (cycle > 1) messages.push(big(`growth-${cycle}`, 8));
 			// Controlled provider readings trigger compaction while the visible
 			// retained tail advances slowly enough to contain older markers.
-			messages.push({ id: `usage-${cycle}`, role: "assistant", content: [{ type: "text", text: "measured response" }], stopReason: "stop", usage: { input: 150_001, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 150_002 }, timestamp: cycle } as LhMessage);
+			// The wire estimate (LH-50) trusts a reading only when nothing
+			// stamped later precedes it, so it carries a real timestamp.
+			messages.push({ id: `usage-${cycle}`, role: "assistant", content: [{ type: "text", text: "measured response" }], stopReason: "stop", usage: { input: 150_001, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 150_002 }, timestamp: Date.now() } as LhMessage);
 			chatStore.saveMessages(chat.id, messages);
 			await ensureCompacted(deps, chat.id);
 			assert.equal(calls, cycle);
