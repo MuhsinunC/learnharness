@@ -54,7 +54,7 @@ describe("Claude Code query contract", () => {
 				extraArgs: { model: "claude-test", "strict-mcp-config": null, "thinking-display": "summarized" },
 				effort: "high", mcpServers: { "custom-tools": { type: "stdio", command: "x" } },
 				maxTurns: 1, persistSession: false,
-				env: { HOME: home, PATH: "/test/bin", TMPDIR: "/test/tmp", ...flags },
+				env: { HOME: home, PATH: "/abs/bin:/test/bin", TMPDIR: "/test/tmp", ...flags },
 				permissionMode: "dontAsk", settingSources: [], tools: [],
 				allowedTools: ["mcp__custom-tools__*"], strictMcpConfig: true,
 			});
@@ -70,7 +70,7 @@ describe("Claude Code query contract", () => {
 				settings: { autoMemoryEnabled: false, includeGitInstructions: false, claudeMdExcludes: ["**/CLAUDE.md", "**/.claude/rules/**"] },
 				extraArgs: { model: "claude-test", "strict-mcp-config": null },
 				maxTurns: 1, persistSession: false,
-				env: { HOME: home, ...flags }, permissionMode: "dontAsk", settingSources: [], tools: [],
+				env: { HOME: home, PATH: "/abs/bin:/usr/bin:/bin:/usr/sbin:/sbin", ...flags }, permissionMode: "dontAsk", settingSources: [], tools: [],
 				allowedTools: ["mcp__custom-tools__*"], strictMcpConfig: true,
 			});
 			assert.equal(buildQueryOptions(required).maxTurns, 1);
@@ -81,16 +81,20 @@ describe("Claude Code query contract", () => {
 	it("passes exactly allowlisted values and child-only flags from a poisoned environment", () => {
 		const poison = {
 			ANTHROPIC_API_KEY: "poison", ANTHROPIC_BASE_URL: "poison", CLAUDE_CONFIG_DIR: "poison",
+			DISPLAY: "poison", WAYLAND_DISPLAY: "poison", XDG_RUNTIME_DIR: "poison", DBUS_SESSION_BUS_ADDRESS: "poison",
 			HTTPS_PROXY: "poison", HTTP_PROXY: "poison", ALL_PROXY: "poison", NO_PROXY: "poison",
 			OPENROUTER_API_KEY: "poison", CLAUDE_CODE_OAUTH_TOKEN: "poison", LH_CLAUDE_CODE_EXECUTABLE: "poison",
 		};
 		const allowed = Object.fromEntries(CHILD_ENV_ALLOWLIST.map(key => [key, `/test/${key}`]));
 		const poisoned = { NODE_ENV: "test" as const, ...poison, ...allowed, ENABLE_CLAUDEAI_MCP_SERVERS: "1", DISABLE_AUTO_COMPACT: "0", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "0" };
 		assert.deepStrictEqual(buildChildEnv(poisoned), { ...allowed, ...flags });
+		const prepended = buildChildEnv({ ...poisoned, PATH: "/test/PATH:/example/bin::" }, null, "/example/bin/claude");
+		assert.equal(prepended.PATH, "/example/bin:/test/PATH");
+		for (const key of Object.keys(poison)) assert.equal(Object.hasOwn(prepended, key), false);
 		withEnv(poisoned, home => {
 			const env = buildQueryOptions(required).env;
-			assert.deepStrictEqual(env, { ...allowed, HOME: home, ...flags });
-			assert.deepStrictEqual(env, buildChildEnv(process.env));
+			assert.deepStrictEqual(env, { ...allowed, HOME: home, PATH: "/abs/bin:/test/PATH", ...flags });
+			assert.deepStrictEqual(env, buildChildEnv(process.env, null, required.executable));
 			for (const key of Object.keys(poison)) assert.equal(Object.hasOwn(env!, key), false, key);
 		});
 	});
@@ -105,6 +109,11 @@ describe("Claude Code query contract", () => {
 			assert.equal(childClaudeDir(), join(home, ".claude"));
 			assert.equal(childClaudeDir({ NODE_ENV: "test" }), join(homedir(), ".claude"));
 		});
+	});
+
+	it("supplies system search directories when PATH is absent", () => {
+		assert.equal(buildChildEnv({ NODE_ENV: "test" }, null, "/example/bin/claude").PATH,
+			"/example/bin:/usr/bin:/bin:/usr/sbin:/sbin");
 	});
 
 	it("requires an absolute executable path", () => {
