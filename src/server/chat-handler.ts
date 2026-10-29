@@ -48,7 +48,7 @@ import { applyParkedDismissal } from "./dismissal-park.ts";
 import { registerTurn, rememberTurnFailure, unregisterTurn } from "./turn-runs.ts";
 import { persistTurn, triggerExtraction, TurnPersistenceError } from "./turn-service.ts";
 import { hasProbeDone, danglingQuestionOf } from "../core/native-messages.ts";
-import { awaitCompaction, ensureCompacted, kickCompaction, effectiveThresholdTokens, holdCompactionGate, keepRecentTokensFor, noteRequestPrefix, sessionKind, systemPromptTokensFor } from "./compaction.ts";
+import { awaitCompaction, ensureCompacted, kickCompaction, effectiveThresholdTokens, holdCompactionGate, keepRecentTokensFor, noteRequestPrefix, sessionKind } from "./compaction.ts";
 import { condensable, contextWindowFor, explainOverflow, learnStatedLimit, overflowExplanation, recoverContext, recoveryAttempted, recoveryDeps } from "./context-recovery.ts";
 import { contextOverflowState } from "../core/context-overflow.ts";
 import { refreshConnectionCatalog } from "./model-catalog.ts";
@@ -198,13 +198,22 @@ function recoverFromOverflow(
 	// plain explanation (Repair stays offered unless nothing can help).
 	const explain = (text: (model: string) => string, model: string, unrecoverable = false) =>
 		explainOverflow(stores.chatStore, chatId, text(model), unrecoverable);
-	// Learn first: the summarizer's engine then runs at the stated limit.
+	// Learn first, for the model that was rejected: the summarizer's
+	// engine then runs at the stated limit.
 	learnStatedLimit(conversation, record.messages);
+	// The spec is resolved afresh, as Repair does (LH-55): a window or
+	// model changed during the turn applies to the recovery.
+	const fresh = effectiveSettings();
+	const spec = resolveConversationSpec(record.settings, fresh.models.strong);
+	if (!spec) return explain(overflowExplanation.notCondensed, conversation.id);
 	let engine: PiEngine;
-	try { engine = piEngineForSpec(withContextWindow(conversation, stores.settingsStore.readSettings()), true); }
-	catch { return explain(overflowExplanation.notCondensed, conversation.id); }
+	try { engine = piEngineForSpec(withContextWindow(spec, fresh), true); }
+	catch { return explain(overflowExplanation.notCondensed, spec.id); }
 	const modelName = engine.model.name || engine.model.id;
 	const deps = recoveryDeps(stores.chatStore, record, engine, `This chat had grown too long for ${modelName}; I condensed the older part and continued.`);
+	// The prompt and tool declarations alone leave no room (LH-55): no
+	// condensing can help, so the history stays as it is.
+	if (deps.floorFitTokens <= 0) return explain(overflowExplanation.stillTooLong, modelName, true);
 	// The retry failed too: unrecoverable only when nothing is left to
 	// condense; otherwise Repair stays offered (LH-50).
 	if (recoveryAttempted(record.messages)) {
@@ -212,7 +221,7 @@ function recoverFromOverflow(
 			? explain(overflowExplanation.retryFailed, modelName)
 			: explain(overflowExplanation.stillTooLong, modelName, true);
 	}
-	if (!connectionBackgroundAllowed(conversation.provider)) return explain(overflowExplanation.backgroundOff, modelName);
+	if (!connectionBackgroundAllowed(spec.provider)) return explain(overflowExplanation.backgroundOff, modelName);
 	const recover = () => holdCompactionGate(chatId, () => recoverContext(deps, chatId));
 	void (async () => {
 		// A compaction already holding the gate: wait for it (bounded), once.
@@ -222,7 +231,9 @@ function recoverFromOverflow(
 			run = recover();
 		}
 		if (!run) return explain(overflowExplanation.notCondensed, modelName);
-		if ((await run) === "unchanged") return explain(overflowExplanation.stillTooLong, modelName, true);
+		// Nothing to drop for a rejection no longer in force (the chat moved
+		// to another model meanwhile): the retry may simply fit (LH-55).
+		if ((await run) === "unchanged" && deps.rejectionInForce) return explain(overflowExplanation.stillTooLong, modelName, true);
 		const res = await handleChatInput(chatId, { type: "continue" }, buildAgent);
 		await res.arrayBuffer().catch(() => undefined);
 	})().catch((err) => {
@@ -258,10 +269,17 @@ export async function handleRepairRequest(chatId: string): Promise<Response> {
 	try { engine = piEngineForSpec(withContextWindow(spec, effectiveSettings()), false); }
 	catch { return Response.json({ error: "The selected model is unavailable." }, { status: 503 }); }
 	const modelName = engine.model.name || engine.model.id;
-	const notice = `This chat had grown too long for ${modelName}; I condensed the older part.`;
-	const run = holdCompactionGate(chatId, () => recoverContext(recoveryDeps(stores.chatStore, record, engine, notice), chatId));
+	const deps = recoveryDeps(stores.chatStore, record, engine, `This chat had grown too long for ${modelName}; I condensed the older part.`);
+	if (deps.floorFitTokens <= 0) {
+		explainOverflow(stores.chatStore, chatId, overflowExplanation.stillTooLong(modelName), true);
+		return Response.json({ error: "Condensing cannot help: the instructions and tools alone fill this model's context window." }, { status: 422 });
+	}
+	const run = holdCompactionGate(chatId, () => recoverContext(deps, chatId));
 	if (!run) return Response.json({ error: "This session is already being condensed. Try again in a moment." }, { status: 409 });
 	if ((await run) === "unchanged") {
+		// The chat's rejection no longer speaks for this model or window
+		// (LH-55) and nothing needs dropping: it already fits, send again.
+		if (!deps.rejectionInForce) return Response.json({ ok: true });
 		explainOverflow(stores.chatStore, chatId, overflowExplanation.stillTooLong(modelName), true);
 		return Response.json({ error: "Nothing older in this chat can be condensed." }, { status: 422 });
 	}
@@ -394,7 +412,6 @@ export async function handleChatInput(
 			kind: sessionKind(record),
 			thresholdTokens: effectiveThresholdTokens(effective.compaction?.thresholdTokens, compactionWindow, conversationEngine.model.maxTokens),
 			keepRecentTokens: keepRecentTokensFor(compactionWindow),
-			systemPromptTokens: systemPromptTokensFor(sessionKind(record)),
 		},
 		chatId,
 	);
@@ -775,7 +792,6 @@ export async function handleChatInput(
 							kind: sessionKind(freshRecord),
 							thresholdTokens: effectiveThresholdTokens(fresh.compaction?.thresholdTokens, contextWindowFor(kickEngine), kickEngine.model.maxTokens),
 							keepRecentTokens: keepRecentTokensFor(contextWindowFor(kickEngine)),
-							systemPromptTokens: systemPromptTokensFor(sessionKind(freshRecord)),
 						};
 					}, chatId);
 			},

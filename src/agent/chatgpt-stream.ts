@@ -5,6 +5,7 @@ import { transformMessages } from "@earendil-works/pi-ai/api/transform-messages"
 import { chatGPTAbortController, chatGPTScope, chatGPTScopeCurrent, chatGPTLease, chatGPTDenial } from "./chatgpt-bridge.ts";
 import type { AdmissionScope, ChatGPTDispatchLifecycle } from "./chatgpt-request-cycle.ts";
 import { isContextOverflowText } from "../core/context-overflow.ts";
+import { e2eChatGPTBaseUrl } from "./e2e-providers.ts";
 
 const USAGE = "https://chatgpt.com/settings/usage";
 export function chatGPTStreamError(message: string): string {
@@ -67,7 +68,7 @@ export function chatGPTStream(background: () => boolean, lifecycle?: ChatGPTDisp
 				const credentials = await chatGPTLease(scope, purpose);
 				check();
 				// NEVER dispatch through Models under openai: that would expose ambient API-key fallback.
-				const transport: Model<"openai-responses"> = { ...logicalModel, api: "openai-responses", provider: "openai", baseUrl: "https://api.openai.com/v1", headers: undefined, samplingParams: undefined, compat: { ...logicalModel.compat, supportsDeveloperRole: true } };
+				const transport: Model<"openai-responses"> = { ...logicalModel, api: "openai-responses", provider: "openai", baseUrl: e2eChatGPTBaseUrl() ?? "https://api.openai.com/v1", headers: undefined, samplingParams: undefined, compat: { ...logicalModel.compat, supportsDeveloperRole: true } };
 				const delegate = options?.fetch ?? globalThis.fetch;
 				const source = streamSimple(transport, chatGPTHistory(context, logicalModel), {
 					...options,

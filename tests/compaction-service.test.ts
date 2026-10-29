@@ -62,7 +62,6 @@ const depsOf = (chatId: string, thresholdTokens: number): CompactionDeps => ({
 	modelId: "faux:test",
 	kind: "teach",
 	thresholdTokens,
-	systemPromptTokens: 100,
 	summarize: async (prompt) => {
 		summarizeCalls++;
 		assert.ok(prompt.includes("TRANSCRIPT") || prompt.length > 0);

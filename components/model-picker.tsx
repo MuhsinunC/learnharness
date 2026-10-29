@@ -363,7 +363,7 @@ export function ModelControl({ chatId, onModelChange }: { chatId?: string; onMod
 								<span className="block text-card-foreground">Context window</span>
 								<span className="block">{contextWindowCaption(entry)}</span>
 							</span>
-							<ContextWindowField key={`${entry.provider}:${entry.id}:${entry.contextWindow}`} entry={entry} />
+							<ContextWindowField key={`${entry.provider}:${entry.id}:${entry.customContextWindow ?? ""}`} entry={entry} />
 						</div>
 					)}
 				</MenuShell>

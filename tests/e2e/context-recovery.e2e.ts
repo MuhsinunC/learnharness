@@ -400,24 +400,19 @@ test("(d) recovery never loops: when even the smallest request is too big, the l
 		// Quiet window: nothing else may fire.
 		await new Promise((r) => setTimeout(r, 8_000));
 		const turnRequests = stub.requests.slice(start).filter(isTurnRequest);
-		// The retry would leave no room for a reply: it is held back, never sent (LH-50).
-		assert.equal(turnRequests.length, 1, "the rejected turn only; the one retry is held back, never more");
+		// The prompt and tool declarations alone leave no room for a reply
+		// under the stated limit, so nothing is condensed or retried (LH-55).
+		assert.equal(turnRequests.length, 1, "the rejected turn only; no retry");
 		assert.ok(turnRequests.every((r) => requestTokens(r) > tiny));
 		const final = await chat(id);
 		assert.equal(final.messages.length, done.messages.length, "nothing ran after the failure");
-		assert.equal(recoveryMarkers(final).length, 1);
-		assert.match(JSON.stringify(recoveryMarkers(final)[0]!.content), /no model summary could be written/, "the deterministic fallback landed");
+		assert.equal(final.messages.filter((m) => m.customType === "compaction").length, 0, "nothing was condensed");
 		const failed = final.messages.at(-1)!;
-		// The held-back retry reached no provider: the explanation stands alone.
-		assert.equal(
-			failed.errorMessage,
-			"This chat is still too long for stub-a, even after condensing its older part. Start a new session, or pick a model with a larger context window.",
-		);
+		assert.ok(failed.errorMessage!.startsWith(
+			"This chat is still too long for stub-a, even after condensing its older part. Start a new session, or pick a model with a larger context window. (400: ",
+		), failed.errorMessage);
 		// (7) Never nested, the provider text kept apart, and Repair no longer offered.
-		assert.equal(failed.contextOverflow!.providerText, undefined, "no provider text: the app held the retry back");
-		const rejected = final.messages.filter((m) => m.role === "assistant" && m.stopReason === "error").at(-2)!;
-		assert.match(rejected.errorMessage!, /^400: .*maximum context length is 2500 tokens.*context_length_exceeded/, "the provider's rejection keeps its own text");
-		assert.equal(rejected.contextOverflow, undefined);
+		assert.match(failed.contextOverflow!.providerText!, /^400: .*maximum context length is 2500 tokens.*context_length_exceeded/, "the provider's rejection keeps its own text");
 		const refused = await server.api(`/api/chats/${id}/repair`, { method: "POST" });
 		assert.equal(refused.status, 409);
 		assert.match(await refused.text(), /cannot be condensed any further/);

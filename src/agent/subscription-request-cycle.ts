@@ -3,7 +3,12 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { nativeInputCause, needsContinuation, type LhMessage } from "../core/native-messages.ts";
 
 export interface AdmissionScope { accountId: string; epoch: number; authorityRevision: number; selectedModelId: string }
-export type NoDispatchKind = "background" | "all" | "other";
+/** heldBack: the app never sent the request (LH-50); its length rejection
+ *  is the turn's reply, so it is kept where every other kind drops it,
+ *  unless the request's only new input was automatic and no foreground
+ *  work is owed: that input goes back to its queue, and a rejection
+ *  answering nothing is not kept. */
+export type NoDispatchKind = "background" | "all" | "other" | "heldBack";
 const USAGE_KEY = Symbol.for("lh.subscription.unadmittedUsage");
 const usageGlobal = globalThis as typeof globalThis & { [USAGE_KEY]?: WeakSet<object> };
 const unadmittedUsage = usageGlobal[USAGE_KEY] ??= new WeakSet<object>();
@@ -112,7 +117,18 @@ export class SubscriptionRequestCycle implements SubscriptionDispatchLifecycle {
   const retainedIds = new Set(messages.map(idOf).filter((id): id is string => !!id));
   this.options.restoreAutomatic(this.automatic, retainedIds);
   this.resolveFirst(false); // queue deferral is installed before initial fire cargo returns
-  this.held = this.held.filter((e) => (e.type === "turn_start") || ((e.type === "message_start" || e.type === "message_end") && e.message.role !== "assistant" && !this.automatic.has(idOf(e.message) ?? "")));
+  // Automatic-only input is deferred as by any denial (LH-55): keeping
+  // the rejection would answer nothing, and each redelivery would add one.
+  const heldBack = this.denied === "heldBack" && (this.foregroundOwed || this.automatic.size === 0);
+  this.held = this.held.filter((e) => (e.type === "turn_start") || ((e.type === "message_start" || e.type === "message_end") && (heldBack || e.message.role !== "assistant") && !this.automatic.has(idOf(e.message) ?? "")));
+  if (heldBack) {
+   // Undispatched for admission, usage and consent, but the view and the
+   // record keep the rejection, so overflow recovery runs (LH-55).
+   const events = this.held; this.held = [];
+   for (const event of events) this.release?.(event);
+   const rejection = events.flatMap((e) => e.type === "message_end" && e.message.role === "assistant" ? [e.message] : []);
+   return { action: "settle", messages: [...messages, ...rejection] };
+  }
   const retry = this.denied === "background" && !this.userAborted && !this.resumed && this.foregroundOwed && !!this.scope && this.options.scopeCurrent(this.scope);
   if (retry) {
    this.resumed = true; this.options.purpose.background = false;
