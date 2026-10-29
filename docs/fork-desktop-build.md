@@ -33,7 +33,13 @@ To return to the official build, quit the fork and install the official DMG over
 
 ## Release convention
 
-Publish manually as a GitHub **pre-release** on [MuhsinunC/learnharness](https://github.com/MuhsinunC/learnharness), with tag `lh-<version>` (for example `lh-0.3.7-fork.1`). Attach the DMG and include its SHA-256 in the release notes. Bump N for every new fork build of the same base version. Never use a `v*` tag: upstream's `.github/workflows/release.yml` runs on those tags. The build script never publishes, tags, or contacts GitHub.
+Releases are cut by dispatching the `Fork release` workflow (`.github/workflows/fork-release.yml`) on `ai-reviewed`; never build or publish a release DMG on your own Mac:
+
+```bash
+gh workflow run fork-release.yml --repo MuhsinunC/learnharness --ref ai-reviewed -f fork_build=1 -f notes="One-line summary"
+```
+
+It runs on a GitHub-hosted Apple Silicon runner at the current tip of `ai-reviewed`. It refuses any other ref, a tag that already exists, and a commit without a successful `Fork macOS E2E` run, so wait for that run after a stack move. It builds with `scripts/build-fork-mac.sh <N>`, checks the app's version and ad-hoc signature, and fails if `ai-reviewed` moved during the build. Then it pushes the annotated tag `lh-<version>-fork.<N>` (for example `lh-0.3.8-fork.1`) on the built commit and publishes a GitHub **pre-release**, never marked latest, on [MuhsinunC/learnharness](https://github.com/MuhsinunC/learnharness). The release starts as a draft with the DMG and `SHA256SUMS`, and is published only after the uploaded assets are downloaded back and their hashes match. Its notes give the DMG SHA-256 and the commits since the previous `lh-*` tag; replace them with fuller notes afterwards with `gh release edit <tag> --notes-file <file>`. If a run fails after pushing the tag, never delete it: finish the existing draft (or run `gh release create <tag> --verify-tag` for that tag), or dispatch N+1. Bump N for every new fork build of the same base version. Never use a `v*` tag: upstream's `.github/workflows/release.yml` runs on those tags. The build script itself never publishes, tags, or contacts GitHub.
 
 The script keeps your proxy environment. If a proxy in your shell blocks npm or Electron downloads, run it as `LH_BUILD_NO_PROXY=1 scripts/build-fork-mac.sh`. After packaging, it checks the app's signature and runs the provider runtime probe under the packaged executable, and under Electron's Node before packaging.
 
