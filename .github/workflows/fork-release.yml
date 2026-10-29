@@ -1,7 +1,7 @@
 name: Fork release
 
 # Cuts a fork pre-release from the current tip of ai-reviewed: builds the
-# ad-hoc-signed arm64 DMG, tags lh-<version>-fork.<N> on the built commit and
+# ad-hoc-signed arm64 DMG and the unsigned Windows x64 installer, tags lh-<version>-fork.<N> on the built commit and
 # publishes a draft-first GitHub pre-release. Never creates a v* tag, which
 # would start upstream's release.yml.
 on:
@@ -27,7 +27,27 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Checked before any build, so a wrong dispatch spends no runner time.
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      FORK_BUILD: ${{ inputs.fork_build }}
+    steps:
+      - name: Require ai-reviewed and a valid fork build
+        run: |
+          set -euo pipefail
+          [[ $GITHUB_REF == refs/heads/ai-reviewed ]] || { echo "dispatch on ai-reviewed, not $GITHUB_REF" >&2; exit 1; }
+          [[ $FORK_BUILD =~ ^[1-9][0-9]*$ ]] || { echo "fork_build must be a positive integer" >&2; exit 1; }
+
+  windows:
+    needs: preflight
+    uses: ./.github/workflows/fork-windows-build.yml
+    with:
+      fork_build: ${{ inputs.fork_build }}
+
   release:
+    needs: [preflight, windows]
     runs-on: macos-15
     timeout-minutes: 60
     defaults:
@@ -38,17 +58,14 @@ jobs:
       LH_FORK_ICON: icns
       GH_TOKEN: ${{ github.token }}
       FORK_BUILD: ${{ inputs.fork_build }}
+      EXE_NAME: ${{ needs.windows.outputs.exe_name }}
+      EXE_SHA256: ${{ needs.windows.outputs.exe_sha256 }}
     steps:
       - name: Require a GitHub-hosted Apple Silicon runner
         run: |
           set -euo pipefail
           [[ $GITHUB_ACTIONS == true && $RUNNER_ENVIRONMENT == github-hosted ]]
           [[ $RUNNER_OS == macOS && $RUNNER_ARCH == ARM64 ]]
-      - name: Require ai-reviewed and a valid fork build
-        run: |
-          set -euo pipefail
-          [[ $GITHUB_REF == refs/heads/ai-reviewed ]] || { echo "dispatch on ai-reviewed, not $GITHUB_REF" >&2; exit 1; }
-          [[ $FORK_BUILD =~ ^[1-9][0-9]*$ ]] || { echo "fork_build must be a positive integer" >&2; exit 1; }
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
@@ -101,6 +118,19 @@ jobs:
           if grep -E 'flags=.*runtime' "$RUNNER_TEMP/codesign.txt"; then exit 1; fi
           # The build must not have changed tracked files.
           git diff --quiet HEAD
+      - uses: actions/download-artifact@v8
+        with:
+          name: fork-windows-x64
+          path: ${{ runner.temp }}/windows
+      - name: Check the Windows installer
+        run: |
+          set -euo pipefail
+          [[ $EXE_NAME == "LearnHarness-$FORK_VERSION-x64-setup.exe" ]]
+          exe="$RUNNER_TEMP/windows/$EXE_NAME"
+          [[ $(shasum -a 256 "$exe" | cut -d ' ' -f 1) == "$EXE_SHA256" ]]
+          # SHA256SUMS lists both installers by bare name, so they share a folder.
+          cp "$exe" "$(dirname "$DMG")/"
+          echo "EXE=$(dirname "$DMG")/$EXE_NAME" >> "$GITHUB_ENV"
       - name: Write release notes
         env:
           NOTES_INPUT: ${{ inputs.notes }}
@@ -111,15 +141,17 @@ jobs:
           notes="$RUNNER_TEMP/notes.md"
           {
             echo '## Summary'
-            echo "LearnHarness fork build \`$FORK_VERSION\` for Apple Silicon Macs, built from \`ai-reviewed\` at \`$GITHUB_SHA\`. AI-reviewed pre-release; no human approval. Ad-hoc signed and not notarized: see \`docs/fork-desktop-build.md\` to install, and \`docs/migrate.md\` to move from the official app."
+            echo "LearnHarness fork build \`$FORK_VERSION\` for Apple Silicon Macs and Windows x64, built from \`ai-reviewed\` at \`$GITHUB_SHA\`. AI-reviewed pre-release; no human approval. The Mac app is ad-hoc signed and not notarized; the Windows installer is unsigned. See \`docs/fork-desktop-build.md\` to install, and \`docs/migrate.md\` to move from the official Mac app."
             if [[ -n $NOTES_INPUT ]]; then printf '\n%s\n' "$NOTES_INPUT"; fi
             echo
-            echo '## DMG SHA-256'
-            echo "\`$DMG_SHA256\`  \`$(basename "$DMG")\`"
+            echo '## SHA-256'
+            echo "- \`$DMG_SHA256\`  \`$(basename "$DMG")\`"
+            echo "- \`$EXE_SHA256\`  \`$EXE_NAME\`"
             echo
             echo '## Verification'
             echo "- Fork macOS E2E passed at this commit: $E2E_URL"
             echo "- Built by \`scripts/build-fork-mac.sh $FORK_BUILD\` in run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID: server and provider runtime smokes passed; the app's signature verifies (ad-hoc, no hardened runtime)."
+            echo "- Windows installer built by \`.github/workflows/fork-windows-build.yml\` in the same run: native renderer tests, server, provider runtime and demo runtime smokes passed under the packaged executable."
             echo
             echo "## Changes since ${prev:-the first commit}"
             echo '```'
@@ -141,16 +173,17 @@ jobs:
         run: |
           set -euo pipefail
           cd "$(dirname "$DMG")"
-          shasum -a 256 "$(basename "$DMG")" > SHA256SUMS
+          shasum -a 256 "$(basename "$DMG")" "$EXE_NAME" > SHA256SUMS
           latest_before=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || echo none)
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease --latest=false --draft \
-            --title "LearnHarness fork $TAG" --notes-file "$NOTES_FILE" "$DMG" SHA256SUMS
+            --title "LearnHarness fork $TAG" --notes-file "$NOTES_FILE" "$DMG" "$EXE" SHA256SUMS
           download=$(mktemp -d "$RUNNER_TEMP/download.XXXXXX")
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$download"
           assets=("$download"/*)
-          [[ ${#assets[@]} == 2 && -f $download/SHA256SUMS && -f $download/$(basename "$DMG") ]]
+          [[ ${#assets[@]} == 3 && -f $download/SHA256SUMS && -f $download/$(basename "$DMG") && -f $download/$EXE_NAME ]]
           (cd "$download" && shasum -a 256 -c SHA256SUMS)
           [[ $(shasum -a 256 "$download/$(basename "$DMG")" | cut -d ' ' -f 1) == "$DMG_SHA256" ]]
+          [[ $(shasum -a 256 "$download/$EXE_NAME" | cut -d ' ' -f 1) == "$EXE_SHA256" ]]
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false
           git fetch -q origin "refs/tags/$TAG:refs/tags/$TAG" --force
           [[ $(git rev-parse "$TAG^{commit}") == "$GITHUB_SHA" ]] || { echo "$TAG is mistargeted" >&2; exit 1; }
