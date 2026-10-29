@@ -1,6 +1,6 @@
 import type { ClaudeCodeEndpoint } from "../../core/claude-code-endpoint.ts";
 import type { query, Query, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import { createAssistantMessageEventStream, type AssistantMessageEventStream, type Model, type SimpleStreamOptions, type TranscriptContext } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, type AssistantMessageEventStream, type Message, type Model, type SimpleStreamOptions, type TranscriptContext } from "@earendil-works/pi-ai";
 import { redactSecrets } from "./redact.ts";
 import { convertPiMessages } from "./convert.ts";
 import { EventMapper, overageLatched, OVERAGE_REFUSAL, type EventMapperLogger } from "./events.ts";
@@ -10,16 +10,23 @@ import { createToolServer } from "./mcp-server.ts";
 import { buildQueryOptions, CONTINUE_TEXT, MCP_SERVER_NAME, MCP_TOOL_PREFIX, resolveEffort } from "./query-options.ts";
 import { claudeCodeWorkdir, deleteSessionFile, markSessionActive, markSessionDone, sweepStaleSessions, writeSessionFile } from "./session-file.ts";
 import { acquireClaudeCodeSlot } from "./slots.ts";
+import { evictIdleLiveChild, liveChildBusy, liveReuseKey, streamLive } from "./live.ts";
 
 const sweepKey = Symbol.for("lh.claudeCode.swept");
 const state = globalThis as typeof globalThis & { [sweepKey]?: Set<string> };
 export function resetClaudeCodeStreamForTests(): void { delete state[sweepKey]; }
 export const defaultLoadQuery = () => import("@anthropic-ai/claude-agent-sdk").then(m => m.query);
-type Deps = { registrationError?: () => string | null; endpoint?: () => ClaudeCodeEndpoint | null; executable: string; dataDir: string; claudeDir: string; loadQuery: () => Promise<typeof query>; logger: EventMapperLogger; parkQuietMs?: number; cleanupWaitMs?: number };
+export type Deps = { registrationError?: () => string | null; endpoint?: () => ClaudeCodeEndpoint | null; executable: string; dataDir: string; claudeDir: string; loadQuery: () => Promise<typeof query>; logger: EventMapperLogger; parkQuietMs?: number; cleanupWaitMs?: number };
 
 /** options.maxTokens and LH_MAX_OUTPUT_TOKENS do not apply to this provider (no verified SDK surface). */
 export function streamClaudeCode(model: Model<any>, transcript: TranscriptContext, options: SimpleStreamOptions | undefined, deps: Deps): AssistantMessageEventStream {
 	const stream = createAssistantMessageEventStream();
+	// LH-62: a conversation's calls share one long-lived child; a second call while it is busy runs one-shot.
+	const key = liveReuseKey(options);
+	if (key && !liveChildBusy(key)) {
+		void streamLive(key, model, transcript, options, deps, stream);
+		return stream;
+	}
 	const toolNameMap = new Map<string, string>();
 	void run();
 	return stream;
@@ -74,23 +81,12 @@ export function streamClaudeCode(model: Model<any>, transcript: TranscriptContex
 			const { systemPrompt, tools, history } = foldTranscript(transcript);
 			const split = splitPrompt(history);
 			if (split.kind === "invalid") throw new Error("claude-code: nothing to send");
-			release = await acquireClaudeCodeSlot(options?.signal);
+			release = await acquireClaudeCodeSlot(options?.signal, evictIdleLiveChild);
 			if (mapper.ended || options?.signal?.aborted) { abort(); return; }
 			if (overageLatched()) throw new Error(OVERAGE_REFUSAL);
 			for (const tool of tools) toolNameMap.set(MCP_TOOL_PREFIX + tool.name, tool.name);
-			const { anthropicMessages, dropped } = convertPiMessages(split.prior, new Map([...toolNameMap].map(([sdk, pi]) => [pi, sdk])));
-			if (dropped.thinking || dropped.abortedTurns || dropped.other.size) {
-				warn(`dropped history content: thinking=${dropped.thinking} providers=[${[...dropped.providers].join(",")}] abortedTurns=${dropped.abortedTurns}${[...dropped.other].map(([key, count]) => ` ${key}=${count}`).join("")}`);
-			}
 			const cliModel = claudeCodeModelId(model, CLAUDE_CODE_SETTINGS);
-			cwd = claudeCodeWorkdir(deps.dataDir);
-			const swept = state[sweepKey] ??= new Set<string>();
-			const pair = `${cwd}\0${deps.claudeDir}`;
-			if (!swept.has(pair)) { sweepStaleSessions(cwd, deps.claudeDir); swept.add(pair); }
-			try {
-				({ sessionId } = writeSessionFile({ messages: anthropicMessages, cwd, claudeDir: deps.claudeDir, model: cliModel }));
-				markSessionActive(sessionId);
-			} catch (error) { if (!(error instanceof Error && error.message === "claude-code: empty history")) throw error; }
+			({ cwd, sessionId } = importHistory(split.prior, toolNameMap, cliModel, deps, warn));
 			if (tools.length) server = createToolServer(tools, { timeoutMs: 3_600_000, onCall: checkParked });
 			endpoint = deps.endpoint?.();
 			if (deps.endpoint && !endpoint) throw new Error("claude-code: endpoint not configured");
@@ -129,35 +125,64 @@ export function streamClaudeCode(model: Model<any>, transcript: TranscriptContex
 			options?.signal?.removeEventListener("abort", abort);
 			stopChild(options?.signal?.aborted ? "aborted" : "turn ended");
 			server?.closeAll("turn ended");
-			if (pending && !settled) {
-				let timer: ReturnType<typeof setTimeout> | undefined;
-				await Promise.race([pending, new Promise<void>(resolve => {
-					timer = setTimeout(() => {
-						logger.warn("claude-code: iterator still pending 30s after close");
-						try { child?.close(); } catch (error) { warn(error); }
-						resolve();
-					}, 30_000);
-					timer.unref();
-				})]);
-				clearTimeout(timer);
-			}
-			// SDK close/return caps waitForExit at 2s; release after bounded cleanup to avoid
-			// a permanent stall rather than require proven termination. Keep the 30s watchdog.
-			if (child) {
-				let timer: ReturnType<typeof setTimeout> | undefined;
-				try {
-					const cleanup = child.return(undefined).catch(warn);
-					await Promise.race([cleanup, new Promise<void>(resolve => {
-						timer = setTimeout(() => { warn("child cleanup timed out"); resolve(); }, deps.cleanupWaitMs ?? 10_000);
-						timer.unref();
-					})]);
-				} catch (error) { warn(error); } finally { clearTimeout(timer); }
-			}
-			release?.();
-			if (sessionId) {
-				markSessionDone(sessionId);
-				try { deleteSessionFile(sessionId, cwd, deps.claudeDir); } catch (error) { warn(error); }
-			}
+			await reapChild({ child, pending: pending && !settled ? pending : undefined, release, sessionId, cwd, claudeDir: deps.claudeDir, logger, cleanupWaitMs: deps.cleanupWaitMs });
 		}
+	}
+}
+
+/** Writes the prior history as a fresh session file for the child to resume; empty history needs none. */
+export function importHistory(prior: Message[], toolNameMap: ReadonlyMap<string, string>, cliModel: string, deps: Deps, warn: (error: unknown) => void): { cwd: string; sessionId?: string } {
+	const { anthropicMessages, dropped } = convertPiMessages(prior, new Map([...toolNameMap].map(([sdk, pi]) => [pi, sdk])));
+	if (dropped.thinking || dropped.abortedTurns || dropped.other.size) {
+		warn(`dropped history content: thinking=${dropped.thinking} providers=[${[...dropped.providers].join(",")}] abortedTurns=${dropped.abortedTurns}${[...dropped.other].map(([key, count]) => ` ${key}=${count}`).join("")}`);
+	}
+	const cwd = claudeCodeWorkdir(deps.dataDir);
+	const swept = state[sweepKey] ??= new Set<string>();
+	const pair = `${cwd}\0${deps.claudeDir}`;
+	if (!swept.has(pair)) { sweepStaleSessions(cwd, deps.claudeDir); swept.add(pair); }
+	try {
+		const { sessionId } = writeSessionFile({ messages: anthropicMessages, cwd, claudeDir: deps.claudeDir, model: cliModel });
+		markSessionActive(sessionId);
+		return { cwd, sessionId };
+	} catch (error) {
+		if (!(error instanceof Error && error.message === "claude-code: empty history")) throw error;
+		return { cwd };
+	}
+}
+
+/** Waits a bounded time for a closed child to exit, then releases its slot and session file. */
+export async function reapChild({ child, pending, release, sessionId, cwd, claudeDir, logger, cleanupWaitMs }: {
+	child: Query | undefined; pending: Promise<unknown> | undefined; release: (() => void) | undefined;
+	sessionId: string | undefined; cwd: string; claudeDir: string; logger: EventMapperLogger; cleanupWaitMs: number | undefined;
+}): Promise<void> {
+	const warn = (error: unknown) => logger.warn(`claude-code: ${String(error)}`);
+	if (pending) {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		await Promise.race([pending, new Promise<void>(resolve => {
+			timer = setTimeout(() => {
+				logger.warn("claude-code: iterator still pending 30s after close");
+				try { child?.close(); } catch (error) { warn(error); }
+				resolve();
+			}, 30_000);
+			timer.unref();
+		})]);
+		clearTimeout(timer);
+	}
+	// SDK close/return caps waitForExit at 2s; release after bounded cleanup to avoid
+	// a permanent stall rather than require proven termination. Keep the 30s watchdog.
+	if (child) {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			const cleanup = child.return(undefined).catch(warn);
+			await Promise.race([cleanup, new Promise<void>(resolve => {
+				timer = setTimeout(() => { warn("child cleanup timed out"); resolve(); }, cleanupWaitMs ?? 10_000);
+				timer.unref();
+			})]);
+		} catch (error) { warn(error); } finally { clearTimeout(timer); }
+	}
+	release?.();
+	if (sessionId) {
+		markSessionDone(sessionId);
+		try { deleteSessionFile(sessionId, cwd, claudeDir); } catch (error) { warn(error); }
 	}
 }

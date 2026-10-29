@@ -3,12 +3,17 @@ type Ticket = { grant(): void };
 const state = globalThis as typeof globalThis & { [key]?: { active: number; queue: Ticket[] } };
 export function resetClaudeCodeSlotsForTests(): void { delete state[key]; }
 
-export async function acquireClaudeCodeSlot(signal?: AbortSignal): Promise<() => void> {
+/** Callers waiting for a slot; a live child that goes idle while any wait closes (LH-62). */
+export function claudeCodeSlotWaiters(): number { return state[key]?.queue.length ?? 0; }
+
+/** onFull runs once when every slot is taken, before this caller queues: it may close an idle live child (LH-62). */
+export async function acquireClaudeCodeSlot(signal?: AbortSignal, onFull?: () => void): Promise<() => void> {
 	const pool = state[key] ??= { active: 0, queue: [] };
 	const value = Number(process.env.LH_CLAUDE_CODE_MAX_CHILDREN ?? 4);
 	const cap = Number.isFinite(value) ? Math.max(1, Math.floor(value)) : 4;
 	const aborted = () => new Error("aborted");
 	if (signal?.aborted) throw aborted();
+	if (pool.active >= cap) onFull?.();
 	if (pool.active < cap && !pool.queue.length) pool.active++;
 	else await new Promise<void>((resolve, reject) => {
 		const die = () => { pool.queue.splice(pool.queue.indexOf(ticket), 1); signal?.removeEventListener("abort", die); reject(aborted()); };

@@ -51,6 +51,17 @@ A non-empty real launch-env `LH_CLAUDE_CODE_EXECUTABLE` still wins over settings
 
 Server tools execute in the harness and resume in a fresh child with tool results plus `CONTINUE_TEXT`; client tools such as quiz end the run with a placeholder, then the later answer resumes the same way.
 
+## Live sessions (LH-62, opt-in)
+
+The lifecycle above starts a child per model call, so the prompt cache never covers the history: Claude Code ends every request with its own context (a synthetic assistant turn, a system-reminder and the environment block that holds the only message cache breakpoint), which the next call's imported history does not hold, and each call's new session id lets a relay route consecutive calls to different accounts. `LH_CLAUDE_CODE_REUSE=1` keeps one child per conversation instead (`src/agent/claude-code/live.ts`):
+
+- The key is pi's `sessionId`: the chat id for the prober, teacher and practice agents, one id per run for a sub-agent. A call without one runs one-shot as above, and so does a second call while the conversation's child is busy.
+- A call continues the child when the child is idle, the model, effort, system prompt and tools are unchanged, and the transcript extends exactly what the child has seen. Results for the tool calls it is parked on answer those MCP calls in-process; a new learner run goes into its streaming input. The child runs without `maxTurns`, and its trailing frames from an earlier call are dropped by message id.
+- Anything else closes the child and starts a new one from an import of the record, which costs one cache rebuild: an edited or compacted history, an over-context recovery (LH-40), a model, effort, prompt or tool change, an error or aborted call (an abort after the input was delivered always closes the child), a tool result over 80,000 characters or an error result with images, a child that exits, and a server restart.
+- A live child holds its slot until it closes. `LH_CLAUDE_CODE_IDLE_MS` (default 600000, 10 minutes) closes an idle child, including one parked on a question the learner has not answered yet. When every slot is taken, a new conversation first evicts the least recently used idle child, and a child that goes idle while others wait for a slot yields it after 2 seconds. Server exit closes every child.
+- The server log says `claude-code: live session started (new|replaced)` and `claude-code: live session closed (<reason>)`.
+- No SDK contract covers the in-process tool-result path (toolUseId pairing, ack ordering, the post-tool drain). `tests/e2e/claude-code-session-reuse.e2e.ts` proves LearnHarness's side against a stub binary; the real binary needs the live re-measure.
+
 The SDK platform binary is never shipped in the desktop payload; the build fails if it is present. The launcher is supplied by the owner.
 
 `LH_MAX_OUTPUT_TOKENS` and `maxTokens` do not cap this provider: Claude Code sets its own output limit. An invalid `LH_MAX_OUTPUT_TOKENS` still fails every engine build, this one included, because it is validated for all providers: set it to an integer >= 1024 or leave it unset. Thinking `off` sends no effort, so Claude Code's default thinking applies. Usage cost shows as unpriced ("—").

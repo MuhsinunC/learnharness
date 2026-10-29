@@ -62,6 +62,8 @@ export class EventMapper {
 	private lastRateLimitWarnStep: number | null = null;
 	private lastRateLimitWarnThreshold: number | undefined;
 	redact: ((text: string) => string) | undefined;
+	/** A live child's result sums every request since its last input, so streamed usage wins (LH-62). */
+	resultUsageSpansCalls = false;
 	onToolTurnEnded: (() => void) | undefined;
 	constructor(private stream: AssistantMessageEventStream, model: Model<any>,
 		private toolNameMap: ReadonlyMap<string, string>, private logger: EventMapperLogger) {
@@ -106,7 +108,7 @@ export class EventMapper {
 			if (result.usage) {
 				const aggregate = { usage: emptyUsage() };
 				this.updateUsage(aggregate, result.usage);
-				if (!this.requests.some(r => r.finalUsage) || aggregate.usage.totalTokens > this.output.usage.totalTokens)
+				if (!this.requests.some(r => r.finalUsage) || (!this.resultUsageSpansCalls && aggregate.usage.totalTokens > this.output.usage.totalTokens))
 					this.output.usage = aggregate.usage;
 			}
 			if (result.stop_reason != null && (!this.currentRequest?.stopReason || result.stop_reason === "max_tokens"))
