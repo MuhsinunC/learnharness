@@ -4,6 +4,7 @@ name: Fork Windows build
 # (<package version>-fork.<N>) at the calling workflow's commit and keeps it
 # as the workflow artifact fork-windows-x64. It never tags, uploads to a
 # release or publishes; Fork release calls it and attaches the installer.
+# Pull requests and ai-reviewed pushes build fork.1 as a Windows check.
 on:
   workflow_call:
     inputs:
@@ -18,6 +19,16 @@ on:
       exe_sha256:
         description: "Installer SHA-256"
         value: ${{ jobs.build.outputs.exe_sha256 }}
+  pull_request:
+  push:
+    branches: [ai-reviewed]
+  workflow_dispatch:
+    inputs:
+      fork_build:
+        description: "N in <package version>-fork.<N>"
+        required: true
+        type: string
+        default: "1"
 
 permissions:
   contents: read
@@ -31,7 +42,7 @@ jobs:
         shell: bash
     env:
       NEXT_TELEMETRY_DISABLED: "1"
-      FORK_BUILD: ${{ inputs.fork_build }}
+      FORK_BUILD: ${{ inputs.fork_build || '1' }}
     outputs:
       exe_name: ${{ steps.package.outputs.exe_name }}
       exe_sha256: ${{ steps.package.outputs.exe_sha256 }}
