@@ -70,7 +70,6 @@ import { persistTurn } from "../src/server/turn-service.ts";
 import { chatStore } from "../src/store/chats.ts";
 import { jobStore } from "../src/store/jobs.ts";
 import { createJobRunner, pdfModelOverride, researchModelOverride } from "../src/agent/subagents/runner.ts";
-import { providerKeyMissing, type ModelSlotName } from "../src/core/settings.ts";
 import type { PiEngine } from "../src/agent/models.ts";
 import type { SearchProvider } from "../src/core/search.ts";
 import { PATHS } from "../config.ts";
@@ -1800,51 +1799,6 @@ describe("BYOK job refusal (no factory floor)", () => {
 		assert.equal(delivery.steers.length, 1, "the refusal STEERED — the teacher is not stranded");
 		assert.ok(
 			delivery.steers[0]!.content.includes("Research failed: No model configured"),
-			"the steer carries the kind's failure shape",
-		);
-		const result = done.result as ResearchResult;
-		assert.equal(result.sources.length, 0, "the failure result matches the research convention");
-	});
-});
-
-// ─── provider-key: the key-presence job refusal (owner, 2026-09-25) ─────────
-
-describe("provider-key job refusal (key-presence interlude)", () => {
-	it("an engine whose provider key is gone refuses the spawn — envelope wording, no phantom run", async () => {
-		const chat = chatStore.createChat("Test: keyless spawn");
-		trackChat(chat.id);
-		chatStore.saveMessages(chat.id, nativeToolMessages("hi", "research", "call-km1", RESEARCH_INPUT));
-
-		const job = jobStore.createJob({ kind: "research", chatId: chat.id, toolCallId: "call-km1" });
-		trackJob(job.id);
-
-		const delivery = fakeDeliver();
-		// The chain RESOLVES (an engine exists) — the KEY is what's missing.
-		// The injected check is the server seam's stand-in: it sees the
-		// engine's provider + the kind's slot tier, exactly as wired.
-		const engine = fauxEngine([]);
-		const seen: Array<[string, ModelSlotName]> = [];
-		const runner = createJobRunner({
-			chatStore,
-			jobStore,
-			deliver: delivery.deliver,
-			engineFor: () => engine,
-			providerKeyMissing: (provider, tier) => {
-				seen.push([provider, tier]);
-				return providerKeyMissing(provider, [tier]);
-			},
-		});
-		await runner.runJob(job.id);
-
-		// The refusal lands through the SAME convention as every failed job:
-		// honest record, kind failure shape steered, terminal flip after.
-		const done = jobStore.getJob(job.id)!;
-		assert.equal(done.status, "error", "the job lands error, never a phantom run");
-		assert.equal(done.error, providerKeyMissing(engine.model.provider, ["cheap"]).error, "the envelope's error line verbatim");
-		assert.deepEqual(seen, [[engine.model.provider, "cheap"]], "the check saw the engine's provider + the researcher's tier");
-		assert.equal(delivery.steers.length, 1, "the refusal STEERED — the teacher is not stranded");
-		assert.ok(
-			delivery.steers[0]!.content.includes(`Research failed: No ${engine.model.provider} key is set`),
 			"the steer carries the kind's failure shape",
 		);
 		const result = done.result as ResearchResult;

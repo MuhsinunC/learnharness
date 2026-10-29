@@ -25,7 +25,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ModelRole } from "../../../config.ts";
-import { ProviderKeyMissingError, ROLE_SLOT, modelsNotConfigured, type ModelSlotName, type ProviderKeyMissing } from "../../core/settings.ts";
+import { ProviderKeyMissingError, ROLE_SLOT, modelsNotConfigured, type ModelSlotName } from "../../core/settings.ts";
 import type { ChatStore, JobStore } from "../../core/ports.ts";
 import { runDemoBuilder } from "./demo-builder.ts";
 import { runPdfReaderAgent } from "./pdf-reader.ts";
@@ -87,12 +87,6 @@ export interface JobRunnerDeps {
 	 *  reports it as recoverable text). Absent seam (tests) reads the same;
 	 *  research dispatch and web_fetch do not require search credentials. */
 	searchProvider?: () => SearchProvider | null;
-	/** Key-presence gate (provider-key interlude, 2026-09-25): given the
-	 *  resolved engine's provider + the kind's slot tier, return the
-	 *  refusal envelope when the provider's key is missing (null = run).
-	 *  Injected because the agent layer may not read the key store; absent
-	 *  in tests that inject engines directly (test engines never owe a key). */
-	providerKeyMissing?: (provider: string, tier: ModelSlotName) => ProviderKeyMissing | null;
 	/** Background-use consent for a subscription provider (true for plain
 	 *  API providers). The auth fallback never runs a job on a sign-in whose
 	 *  background use is off. Absent = allowed (engine-injecting tests). */
@@ -288,16 +282,6 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 			const envelope = modelsNotConfigured([tier]);
 			console.info(`[job ${jobId}] refused — ${JSON.stringify(envelope)}`);
 			await refuse(`${envelope.error} (missing: ${tier})`, true);
-			return;
-		}
-		// Key presence (2026-09-25): the engine exists, but its provider's
-		// key may be gone — refuse the spawn BEFORE the loop, same
-		// convention (the injected check reads the key store; absent in
-		// engine-injecting tests).
-		const keyRefusal = deps.providerKeyMissing?.(engine.model.provider, tier) ?? null;
-		if (keyRefusal) {
-			console.info(`[job ${jobId}] refused — ${JSON.stringify(keyRefusal)}`);
-			await refuse(keyRefusal.error, true);
 			return;
 		}
 		// Real-kill wiring (2026-09 abort semantics): one controller spans the
