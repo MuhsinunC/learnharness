@@ -103,6 +103,8 @@ const jobRunner = createJobRunner({
 	// with the 503-envelope family instead of dying mid-run.
 	providerKeyMissing: (provider, tier) =>
 		providerKeyPresent(provider) ? null : providerKeyMissingEnvelope(provider, [tier]),
+	// The auth fallback (LH-37) honors a subscription's background consent.
+	backgroundAllowed: connectionBackgroundAllowed,
 	// Search port wave (2026-09-20): the researcher's web_search runs on the
 	// injected port — resolved FRESH per job (key rotations land immediately).
 	// null = honestly unavailable; the dispatch-level drop (below) uses the
@@ -125,6 +127,8 @@ export const extraction = createExtractionPipeline({
 	// refuses BEFORE any batch runs (the typed throw), never mid-run.
 	providerKeyMissing: (provider, tier) =>
 		providerKeyPresent(provider) ? null : providerKeyMissingEnvelope(provider, [tier]),
+	// The auth fallback (LH-37), same consent gate as the job runner.
+	backgroundAllowed: connectionBackgroundAllowed,
 });
 
 

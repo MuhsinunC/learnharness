@@ -20,6 +20,7 @@ import {
 	type VisualToolInput,
 } from "../../core/contracts.ts";
 import { registerJobAbort, unregisterJobAbort } from "./aborts.ts";
+import { isKeyRejectedError, isProviderAuthError, modelLabel, withStrongFallback } from "./auth-fallback.ts";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -92,6 +93,10 @@ export interface JobRunnerDeps {
 	 *  Injected because the agent layer may not read the key store; absent
 	 *  in tests that inject engines directly (test engines never owe a key). */
 	providerKeyMissing?: (provider: string, tier: ModelSlotName) => ProviderKeyMissing | null;
+	/** Background-use consent for a subscription provider (true for plain
+	 *  API providers). The auth fallback never runs a job on a sign-in whose
+	 *  background use is off. Absent = allowed (engine-injecting tests). */
+	backgroundAllowed?: (provider: string) => boolean;
 }
 
 export interface JobRunner {
@@ -106,14 +111,17 @@ export interface JobRunner {
  * semantics) and the usage tap (money channel — every model call folds into
  * JobRecord.usage as it completes). */
 interface LoopContext {
-	/** Fires when abortJob kills the run; abortSignal is passed into every
-	 * model call so the spend stops mid-call, not at the next loop check. */
+	/** Fires when abortJob kills the run (or a job limit passes);
+	 * abortSignal is passed into every model call so the spend stops
+	 * mid-call, not at the next loop check. */
 	abortSignal: AbortSignal;
 	/** The job's chat (debug: raw provider-event recording under
 	 * LH_PROVIDER_EVENTS=1 — forwarded into every subagent run). */
 	chatId?: string;
 	/** Fold one model call's usage into the job record (progress write). */
 	onUsage: (step: UsageStepLike) => void;
+	/** Set the job's activity line; a no-op once the job left running. */
+	onActivity: (line: string) => void;
 }
 
 /** The kind→role table (model slots wave, 2026-09-20): which ModelRole's
@@ -125,6 +133,20 @@ const KIND_ROLE: Record<JobKind, ModelRole> = {
 	pdf: "pdfReader",
 };
 
+/** Job limits (LH-37): a job that starts or finishes no model call for
+ *  JOB_IDLE_LIMIT_MS, or runs past JOB_TIME_CAP_MS, is stopped and fails
+ *  visibly, so no card or Background agents row spins forever. */
+const JOB_IDLE_LIMIT_MS = 10 * 60_000;
+const JOB_TIME_CAP_MS = 60 * 60_000;
+
+/** e2e runs (LH_E2E=1) may shorten either limit to prove the stop path. */
+function jobLimitMs(fallback: number, override: string | undefined): number {
+	const ms = process.env.LH_E2E === "1" ? Number(override) : NaN;
+	return ms > 0 ? ms : fallback;
+}
+
+type JobResult = ResearchResult | DemoResult | VisualResult | PdfResult;
+
 export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 	const { chatStore, jobStore, deliver } = deps;
 
@@ -132,23 +154,22 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 	 * then writes through the job store so the poll sees progress). */
 	const usageTotals = new Map<string, JobUsage>();
 
-	function makeLoopContext(jobId: string, engine: PiEngine): LoopContext {
+	function makeLoopContext(jobId: string, engine: PiEngine, abortSignal: AbortSignal, progress: () => void): LoopContext {
 		const chatId = jobStore.getJob(jobId)?.chatId;
 		// Provider-qualified stamp: the engine's actual model — the only
 		// thing that ran (BYOK: no config-pin fallback stamps exist).
 		const model = `${engine.model.provider}:${engine.model.id}`;
-		// Real-kill wiring (2026-09 abort semantics): the controller is what
-		// the abort endpoint fires (agent/subagents/aborts.ts registry); the
-		// signal rides into every model call of the loop.
-		const controller = new AbortController();
-		registerJobAbort(jobId, controller);
 		return {
-			abortSignal: controller.signal,
+			abortSignal,
 			chatId,
 			onUsage: (step) => {
+				progress();
 				const next = accumulateJobUsage(usageTotals.get(jobId), model, step);
 				usageTotals.set(jobId, next);
 				jobStore.updateJob(jobId, { usage: next }); // merge patch — status untouched
+			},
+			onActivity: (line) => {
+				if (stillRunning(jobId)) jobStore.updateJob(jobId, { activity: line });
 			},
 		};
 	}
@@ -180,7 +201,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 
 	const KIND_RUNNERS: Record<
 		JobKind,
-		(jobId: string, engine: PiEngine, input: JobToolInput | undefined, loop: LoopContext) => Promise<void>
+		(jobId: string, engine: PiEngine, input: JobToolInput | undefined, loop: LoopContext) => Promise<JobResult | undefined>
 	> = {
 		research: (jobId, engine, input, loop) => runResearchJob(jobId, engine, input, loop),
 		demo: (jobId, engine, input, loop) => runDemoJob(jobId, engine, input, loop),
@@ -209,7 +230,9 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 		// then steer the kind's failure shape through finishJob so the wake
 		// pipeline resumes the lesson and the teacher reads the refusal
 		// instead of waiting forever on a job it already dispatched.
-		const refuse = async (reason: string): Promise<void> => {
+		// LH-37: needsSettingsFix marks failures only a settings change can
+		// fix, so the steer tells the teacher not to re-dispatch.
+		const refuse = async (reason: string, needsSettingsFix = false): Promise<void> => {
 			registerJobAbort(jobId, new AbortController());
 			try {
 				if (stillRunning(jobId)) jobStore.updateJob(jobId, { error: reason });
@@ -220,24 +243,27 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 					| PdfToolInput
 					| undefined;
 				const pdf = resolved as PdfToolInput | undefined;
-				const failure: ResearchResult | DemoResult | VisualResult | PdfResult =
+				const flag = needsSettingsFix ? { needsSettingsFix: true as const } : {};
+				const failure: JobResult =
 					job.kind === "research"
-						? { brief: `Research failed: ${reason}`, sources: [] }
+						? { brief: `Research failed: ${reason}`, sources: [], ...flag }
 						: job.kind === "demo"
 							? {
 									title: typeof (resolved as DemoToolInput | undefined)?.title === "string" && (resolved as DemoToolInput).title.trim() ? (resolved as DemoToolInput).title : "Interactive demo",
 									html: "",
 									tested: true,
 									notes: `FAILED: ${reason}`,
+									...flag,
 								}
 							: job.kind === "visual"
-								? { svg: "", notes: `FAILED: ${reason}` }
+								? { svg: "", notes: `FAILED: ${reason}`, ...flag }
 								: {
 										path: typeof pdf?.path === "string" ? pdf.path : "",
 										question: typeof pdf?.question === "string" ? pdf.question : "",
 										brief: `PDF failed: ${reason}`,
 										pagesRead: [],
 										pagesConsulted: [],
+										...flag,
 									};
 				await finishJob(jobId, failure);
 			} finally {
@@ -250,34 +276,99 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 		} catch (err) {
 			if (err instanceof ProviderKeyMissingError) {
 				console.info(`[job ${jobId}] refused — ${JSON.stringify(err.envelope)}`);
-				await refuse(err.envelope.error);
+				await refuse(err.envelope.error, true);
 			} else {
 				console.error(`[job ${jobId}] engine resolution failed:`, err);
 				await refuse(err instanceof Error ? err.message : String(err));
 			}
 			return;
 		}
+		const tier = ROLE_SLOT[KIND_ROLE[job.kind]];
 		if (!engine) {
-			const tier = ROLE_SLOT[KIND_ROLE[job.kind]];
 			const envelope = modelsNotConfigured([tier]);
 			console.info(`[job ${jobId}] refused — ${JSON.stringify(envelope)}`);
-			await refuse(`${envelope.error} (missing: ${tier})`);
+			await refuse(`${envelope.error} (missing: ${tier})`, true);
 			return;
 		}
 		// Key presence (2026-09-25): the engine exists, but its provider's
 		// key may be gone — refuse the spawn BEFORE the loop, same
 		// convention (the injected check reads the key store; absent in
 		// engine-injecting tests).
-		const keyRefusal =
-			deps.providerKeyMissing?.(engine.model.provider, ROLE_SLOT[KIND_ROLE[job.kind]]) ?? null;
+		const keyRefusal = deps.providerKeyMissing?.(engine.model.provider, tier) ?? null;
 		if (keyRefusal) {
 			console.info(`[job ${jobId}] refused — ${JSON.stringify(keyRefusal)}`);
-			await refuse(keyRefusal.error);
+			await refuse(keyRefusal.error, true);
 			return;
 		}
+		// Real-kill wiring (2026-09 abort semantics): one controller spans the
+		// job's attempts. The abort endpoint fires it (aborts.ts registry), and
+		// so do the job limits; its signal rides into every model call.
+		const controller = new AbortController();
+		registerJobAbort(jobId, controller);
+		const idleMs = jobLimitMs(JOB_IDLE_LIMIT_MS, process.env.LH_E2E_JOB_IDLE_LIMIT_MS);
+		const capMs = jobLimitMs(JOB_TIME_CAP_MS, process.env.LH_E2E_JOB_TIME_CAP_MS);
+		const startedAt = Date.now();
+		let lastProgress = startedAt;
+		const progress = () => {
+			lastProgress = Date.now();
+		};
+		// The limits are terminal: the job fails the moment one passes, even
+		// while a step that ignores the abort signal (a hung headless run)
+		// keeps the loop alive. That loop unwinds in the background; the
+		// stillRunning guards drop whatever it produces late.
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const limitHit = new Promise<{ limit: string }>((resolve) => {
+			const check = () => {
+				const idleLeft = lastProgress + idleMs - Date.now();
+				const capLeft = startedAt + capMs - Date.now();
+				if (idleLeft > 0 && capLeft > 0) {
+					timer = setTimeout(check, Math.min(idleLeft, capLeft));
+					return;
+				}
+				controller.abort();
+				resolve({
+					limit:
+						idleLeft <= 0
+							? `The ${job.kind} job made no progress for ${formatLimit(idleMs)} and was stopped.`
+							: `The ${job.kind} job ran longer than ${formatLimit(capMs)} and was stopped.`,
+				});
+			};
+			check();
+		});
+		// Progress = a model call starting (here) or finishing (onUsage).
+		const tracked = (e: PiEngine): PiEngine => ({
+			...e,
+			streamFn: (...args) => {
+				progress();
+				return e.streamFn(...args);
+			},
+		});
+		// One run per engine; a rejected key reruns once on the Strong slot
+		// (auth-fallback.ts). The runners rethrow only auth failures.
+		const work = withStrongFallback(
+			tier,
+			engine,
+			deps,
+			(e) => run(jobId, tracked(e), input, makeLoopContext(jobId, e, controller.signal, progress)),
+			(fallback) => {
+				console.info(`[job ${jobId}] ${engine.model.provider}:${engine.model.id} rejected — retrying on ${fallback.model.provider}:${fallback.model.id}`);
+				if (stillRunning(jobId)) jobStore.updateJob(jobId, { activity: `retrying on ${modelLabel(fallback)}` });
+			},
+		).then(
+			(result) => ({ result }),
+			(err: unknown) => {
+				if (isKeyRejectedError(err)) return { keyRejected: err.message };
+				throw err;
+			},
+		);
 		try {
-			await run(jobId, engine, input, makeLoopContext(jobId, engine));
+			const outcome: { result?: JobResult; keyRejected?: string; limit?: string } = await Promise.race([work, limitHit]);
+			clearTimeout(timer);
+			if (outcome.limit) await refuse(outcome.limit);
+			else if (outcome.keyRejected) await refuse(outcome.keyRejected, true);
+			else if (outcome.result) await finishJob(jobId, outcome.result);
 		} finally {
+			clearTimeout(timer);
 			unregisterJobAbort(jobId);
 			// The last usage write may have been mid-flight when the loop died;
 			// persist what was folded (the abort path patches only status, so
@@ -357,7 +448,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 		model: PiEngine | undefined,
 		passedInput: JobToolInput | undefined,
 		loop: LoopContext,
-	): Promise<void> {
+	): Promise<JobResult | undefined> {
 		const ctx = jobContext(jobId);
 		if (!ctx) return;
 		const { job } = ctx;
@@ -365,8 +456,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 		const input = (passedInput ?? resolveInput(job, passedInput)) as ResearchToolInput | undefined;
 		if (!(typeof input?.question === "string" && input.question.trim())) {
 			jobStore.updateJob(jobId, { error: "research question unavailable" });
-			await finishJob(jobId, { brief: "Research failed: the research question is unavailable.", sources: [] });
-			return;
+			return { brief: "Research failed: the research question is unavailable.", sources: [] };
 		}
 		const question = input.question;
 		const context = typeof input?.context === "string" && input.context.trim() ? input.context : undefined;
@@ -401,20 +491,22 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 					if (typeof input?.url === "string" && (toolName === "web_fetch" || toolName === "web_fetch_pdf")) {
 						fetchedUrls.push(input.url);
 					}
-					jobStore.updateJob(jobId, { activity: activityLine(toolName, input) });
+					loop.onActivity(activityLine(toolName, input));
 				},
 			});
 			if (!brief.trim()) throw new Error("the researcher produced no text");
 			const research: ResearchResult = { brief: brief.trim(), sources: parseSources(brief.trim(), fetchedUrls) };
-			await finishJob(jobId, research);
+			return research;
 		} catch (err) {
 			// Real-kill abort (2026-09): the abort path flipped the record and
-			// queued the abort steer — unwind silently, keep the usage
-			// folded so far (flushed by runJob's finally).
+			// queued the abort steer (or a job limit passed and runJob failed
+			// the job itself) — unwind silently, keep the usage folded so
+			// far (flushed by runJob's finally).
 			if (loop.abortSignal.aborted) return;
+			if (isProviderAuthError(err)) throw err; // runJob's auth fallback decides
 			const reason = err instanceof Error ? err.message : String(err);
 			if (stillRunning(jobId)) jobStore.updateJob(jobId, { error: reason });
-			await finishJob(jobId, { brief: `Research failed: ${reason}`, sources: [] });
+			return { brief: `Research failed: ${reason}`, sources: [] };
 		} finally {
 			await fs.rm(pdfDir, { recursive: true, force: true });
 		}
@@ -427,7 +519,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 		model: PiEngine | undefined,
 		passedInput: JobToolInput | undefined,
 		loop: LoopContext,
-	): Promise<void> {
+	): Promise<JobResult | undefined> {
 		const ctx = jobContext(jobId);
 		if (!ctx) return;
 		const { job } = ctx;
@@ -445,17 +537,18 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 					abortSignal: loop.abortSignal,
 					chatId: loop.chatId,
 					onUsage: (usage) => loop.onUsage(piUsageToStep(usage)),
-					onActivity: (line) => jobStore.updateJob(jobId, { activity: line }),
+					onActivity: loop.onActivity,
 				},
 			);
 			if (isDemoFailure(result) && stillRunning(jobId))
 				jobStore.updateJob(jobId, { error: result.notes ?? "demo build failed" });
-			await finishJob(jobId, result);
+			return result;
 		} catch (err) {
 			if (loop.abortSignal.aborted) return;
+			if (isProviderAuthError(err)) throw err;
 			const reason = err instanceof Error ? err.message : String(err);
 			if (stillRunning(jobId)) jobStore.updateJob(jobId, { error: reason });
-			await finishJob(jobId, { title, html: "", tested: true, notes: `FAILED: ${reason}` });
+			return { title, html: "", tested: true, notes: `FAILED: ${reason}` };
 		}
 	}
 
@@ -464,7 +557,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 		model: PiEngine | undefined,
 		passedInput: JobToolInput | undefined,
 		loop: LoopContext,
-	): Promise<void> {
+	): Promise<JobResult | undefined> {
 		const ctx = jobContext(jobId);
 		if (!ctx) return;
 		const { job } = ctx;
@@ -481,17 +574,18 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 					abortSignal: loop.abortSignal,
 					chatId: loop.chatId,
 					onUsage: (usage) => loop.onUsage(piUsageToStep(usage)),
-					onActivity: (line) => jobStore.updateJob(jobId, { activity: line }),
+					onActivity: loop.onActivity,
 				},
 			);
 			if (isVisualFailure(result) && stillRunning(jobId))
 				jobStore.updateJob(jobId, { error: result.notes ?? "visual build failed" });
-			await finishJob(jobId, result);
+			return result;
 		} catch (err) {
 			if (loop.abortSignal.aborted) return;
+			if (isProviderAuthError(err)) throw err;
 			const reason = err instanceof Error ? err.message : String(err);
 			if (stillRunning(jobId)) jobStore.updateJob(jobId, { error: reason });
-			await finishJob(jobId, { svg: "", notes: `FAILED: ${reason}` });
+			return { svg: "", notes: `FAILED: ${reason}` };
 		}
 	}
 
@@ -502,7 +596,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 		model: PiEngine | undefined,
 		passedInput: JobToolInput | undefined,
 		loop: LoopContext,
-	): Promise<void> {
+	): Promise<JobResult | undefined> {
 		const ctx = jobContext(jobId);
 		if (!ctx) return;
 		const { job } = ctx;
@@ -520,17 +614,18 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 				abortSignal: loop.abortSignal,
 				chatId: loop.chatId,
 				onUsage: (usage) => loop.onUsage(piUsageToStep(usage)),
-				onActivity: (line) => jobStore.updateJob(jobId, { activity: line }),
+				onActivity: loop.onActivity,
 			},
 			);
 			if (isPdfFailure(result) && stillRunning(jobId))
 				jobStore.updateJob(jobId, { error: result.brief.replace(/^PDF failed:\s*/i, "") });
-			await finishJob(jobId, result);
+			return result;
 		} catch (err) {
 			if (loop.abortSignal.aborted) return;
+			if (isProviderAuthError(err)) throw err;
 			const reason = err instanceof Error ? err.message : String(err);
 			if (stillRunning(jobId)) jobStore.updateJob(jobId, { error: reason });
-			await finishJob(jobId, { path, question, brief: `PDF failed: ${reason}`, pagesRead: [], pagesConsulted: [] });
+			return { path, question, brief: `PDF failed: ${reason}`, pagesRead: [], pagesConsulted: [] };
 		}
 	}
 
@@ -551,6 +646,10 @@ function isVisualFailure(result: VisualResult): boolean {
 /** The pdf-reader's failure brief (mirrors the research failure shape). */
 function isPdfFailure(result: PdfResult): boolean {
 	return /^PDF failed:/i.test(result.brief);
+}
+
+function formatLimit(ms: number): string {
+	return ms % 60_000 === 0 ? `${ms / 60_000} minutes` : `${Math.round(ms / 1000)} seconds`;
 }
 
 /** The activity line shown in the UI: `web_search: "query"` / `web_fetch: host`. */

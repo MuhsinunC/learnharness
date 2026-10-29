@@ -15,6 +15,7 @@ import {
 import type { PiEngine } from "../models.ts";
 import { runSubagent } from "./pi-run.ts";
 import { withBgLlmSlot } from "./bg-llm-semaphore.ts";
+import { withStrongFallback } from "./auth-fallback.ts";
 import type {
 	AuditVerdicts,
 	CallUsage,
@@ -664,6 +665,10 @@ interface LhExtractionGlobal {
 	 *  process-wide. globalThis for the same module-instance reason as
 	 *  the run registries. */
 	__lhAuditLock?: { tail: Promise<void> };
+	/** The last failure per session (LH-37): a session's failed runs were
+	 *  only logged; the coverage block now shows this. A clean or no-op run
+	 *  and the session's deletion clear it. */
+	__lhExtractionFailures?: Map<string, string>;
 	/** The EXTRACT SEMAPHORE (owner, 2026-09-28): 3 concurrent extractor
 	 *  calls process-wide — the provider-facing rate stance (the import
 	 *  route's old 3-wide pool doctrine, now global). Per-chunk jobs fan
@@ -681,6 +686,21 @@ interface LhExtractionGlobal {
 function runs(): NonNullable<LhExtractionGlobal["__lhExtractionRuns"]> {
 	const g = globalThis as typeof globalThis & LhExtractionGlobal;
 	return (g.__lhExtractionRuns ??= { running: new Map(), inFlight: new Set(), lastStartedAt: 0 });
+}
+
+function failures(): Map<string, string> {
+	const g = globalThis as typeof globalThis & LhExtractionGlobal;
+	return (g.__lhExtractionFailures ??= new Map());
+}
+
+/** The session's last failed run, learner-readable; undefined after a clean run. */
+export function extractionFailure(chatId: string): string | undefined {
+	return failures().get(chatId);
+}
+
+/** Forget a deleted session's failure (deleteChatSession). */
+export function clearExtractionFailure(chatId: string): void {
+	failures().delete(chatId);
 }
 
 /** In-flight pipeline runs (oldest first) — the /api/graph/status payload. */
@@ -726,6 +746,10 @@ export interface ExtractionModels {
 	 *  inject engines directly (test engines never owe a key). A keyless
 	 *  stage refuses with ProviderKeyMissingError BEFORE any batch runs. */
 	providerKeyMissing?: (provider: string, tier: ModelSlotName) => ProviderKeyMissing | null;
+	/** Background-use consent for a subscription provider: the auth
+	 *  fallback (LH-37) never runs a stage on a sign-in whose background
+	 *  use is off. Absent = allowed. */
+	backgroundAllowed?: (provider: string) => boolean;
 }
 
 export interface ExtractionPipelineDeps extends GraphDeps, ExtractionModels {
@@ -797,6 +821,15 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 	// an honest refusal.
 	const stageEngine = (role: ModelRole, override?: PiEngine): PiEngine | undefined =>
 		override ?? deps.engineFor?.(role);
+	/** One stage call on its engine (LH-37): a rejected key reruns once on
+	 *  the Strong slot's engine, the job runner's policy (auth-fallback.ts). */
+	function withAuthFallback<T>(role: ModelRole, override: PiEngine | undefined, call: (engine: PiEngine | undefined) => Promise<T>): Promise<T> {
+		const engine = stageEngine(role, override);
+		if (!engine) return call(engine);
+		return withStrongFallback(ROLE_SLOT[role], engine, deps, call, (fallback) =>
+			console.info(`[extraction] ${role} ${engine.model.provider}:${engine.model.id} rejected — retrying on ${fallback.model.provider}:${fallback.model.id}`),
+		);
+	}
 	/** The per-need refusal guard: which slot tiers the pipeline's stages
 	 *  found unset (test values count as configured — they ARE engines),
 	 *  and whether a configured stage's provider key is gone (provider-key
@@ -933,17 +966,19 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 		);
 		const t0 = performance.now();
 
-		const findings = await runExtractor(
-			stageEngine("extractor", deps.extractor),
-			sourceId,
-			prompt,
-			new Set(graph.nodes.map((n) => n.id)),
-			batchIds,
-			signal,
-			(usage, model, step, finishReason, tools) => {
-				recordStep(jobKey, "extractor", callUsage(usage), model);
-				console.info(`[extraction] extractor step ${step}: ${finishReason}, tools: ${tools}`);
-			},
+		const findings = await withAuthFallback("extractor", deps.extractor, (engine) =>
+			runExtractor(
+				engine,
+				sourceId,
+				prompt,
+				new Set(graph.nodes.map((n) => n.id)),
+				batchIds,
+				signal,
+				(usage, model, step, finishReason, tools) => {
+					recordStep(jobKey, "extractor", callUsage(usage), model);
+					console.info(`[extraction] extractor step ${step}: ${finishReason}, tools: ${tools}`);
+				},
+			),
 		);
 		console.info(`[extraction ${jobKey}] extractor done in ${Math.round(performance.now() - t0)}ms`);
 		return findings;
@@ -965,29 +1000,31 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 		// projection omits messageId (2026-10-13): the auditor is
 		// IDENTITY-only and never sees the passages, so anchors are useless
 		// to it — they add cognitive load, not signal.
-		const auditResult = await runAuditor(
-			stageEngine("auditor", deps.auditor),
-			sourceId,
-			`Proposed findings from the extractor (the source itself is not available to you — the extractor is fully trusted; the propositions only — the reasoning chains are the merger's business, owner 2026-09-30):\n\n` +
-				`${JSON.stringify(
-					{
-						propositions: findings.propositions.map((p) => ({
-							id: p.id,
-							name: p.name,
-							statement: p.statement,
-							aliases: p.aliases,
-						})),
-					},
-					null,
-					2,
-				)}\n\n` +
-				`The current knowledge graph has ${graph.nodes.length} node(s). Explore it with your tools and link what links.`,
-			signal,
-			(usage, model, step, finishReason, tools) => {
-				recordStep(jobKey, "auditor", callUsage(usage), model);
-				console.info(`[extraction] auditor step ${step}: ${finishReason}, tools: ${tools}`);
-			},
-			auditorGraphTools({ chatStore, graphStore }),
+		const auditResult = await withAuthFallback("auditor", deps.auditor, (engine) =>
+			runAuditor(
+				engine,
+				sourceId,
+				`Proposed findings from the extractor (the source itself is not available to you — the extractor is fully trusted; the propositions only — the reasoning chains are the merger's business, owner 2026-09-30):\n\n` +
+					`${JSON.stringify(
+						{
+							propositions: findings.propositions.map((p) => ({
+								id: p.id,
+								name: p.name,
+								statement: p.statement,
+								aliases: p.aliases,
+							})),
+						},
+						null,
+						2,
+					)}\n\n` +
+					`The current knowledge graph has ${graph.nodes.length} node(s). Explore it with your tools and link what links.`,
+				signal,
+				(usage, model, step, finishReason, tools) => {
+					recordStep(jobKey, "auditor", callUsage(usage), model);
+					console.info(`[extraction] auditor step ${step}: ${finishReason}, tools: ${tools}`);
+				},
+				auditorGraphTools({ chatStore, graphStore }),
+			),
 		);
 		console.info(
 			`[extraction ${jobKey}] audit: ${findings.propositions.length} propositions through, ` +
@@ -1120,6 +1157,7 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 			const failedOutputCalls = failedOutputCallIds(record.messages);
 			if (covered.uncovered.length === 0) {
 				console.info(`[extraction ${chatId}] nothing uncovered — no-op`);
+				failures().delete(chatId);
 				return { nodes: 0, chains: 0 };
 			}
 			const chunkTokens = deps.getChunkTokens?.() ?? FACTORY_SETTINGS.graph.extractionChunkTokens;
@@ -1216,6 +1254,13 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 				}
 			}
 			const stats = aggregateJobs(chatId, settled);
+			// The coverage block's failure line: the first isolated failure;
+			// a clean run clears it, an aborted one leaves it.
+			const failure = settled.find(
+				(r): r is PromiseRejectedResult => r.status === "rejected" && !(r.reason instanceof Error && r.reason.name === "AbortError"),
+			);
+			if (failure) failures().set(chatId, failure.reason instanceof Error ? failure.reason.message : String(failure.reason));
+			else if (settled.every((r) => r.status === "fulfilled")) failures().delete(chatId);
 			console.info(
 				`[extraction ${chatId}] merged: ${stats.nodes} nodes, ${stats.chains ?? 0} chains ` +
 					`(${Math.round(performance.now() - t0)}ms total, ${batches.length} batch job(s))`,
@@ -1227,6 +1272,7 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 			// job — merged batches stay covered, partial usage persists per
 			// job, the aggregate returns what actually merged.
 			console.error(`[extraction ${chatId}] pipeline failed (${Math.round(performance.now() - t0)}ms):`, err);
+			if (!(err instanceof Error && err.name === "AbortError")) failures().set(chatId, err instanceof Error ? err.message : String(err));
 			throw err;
 		} finally {
 			inFlight.delete(chatId);
@@ -1285,16 +1331,18 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 				`${digest === "" ? "" : `, digest ${digest.split("\n").length} lines`})`,
 		);
 		const t0 = performance.now();
-		const findings = await runNotesExtractor(
-			stageEngine("extractor", deps.extractor),
-			input.id,
-			prompt,
-			new Set(graph.nodes.map((n) => n.id)),
-			signal,
-			(usage, model, step, finishReason, tools) => {
-				recordStep(jobKey, "extractor", callUsage(usage), model);
-				console.info(`[extraction] extractor step ${step}: ${finishReason}, tools: ${tools}`);
-			},
+		const findings = await withAuthFallback("extractor", deps.extractor, (engine) =>
+			runNotesExtractor(
+				engine,
+				input.id,
+				prompt,
+				new Set(graph.nodes.map((n) => n.id)),
+				signal,
+				(usage, model, step, finishReason, tools) => {
+					recordStep(jobKey, "extractor", callUsage(usage), model);
+					console.info(`[extraction] extractor step ${step}: ${finishReason}, tools: ${tools}`);
+				},
+			),
 		);
 		console.info(`[extraction ${jobKey}] notes extractor done in ${Math.round(performance.now() - t0)}ms`);
 		return findings;

@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { APP_IDENTITY, piEngineFor, type PiEngine } from "../models.ts";
 import { usageWasAdmitted } from "../subscription-request-cycle.ts";
 import { providerEventObserver } from "../provider-events.ts";
+import { modelCallError } from "./auth-fallback.ts";
 import type { ModelRole } from "../../../config.ts";
 
 /**
@@ -15,7 +16,8 @@ import type { ModelRole } from "../../../config.ts";
  * Error semantics mirror the old ToolLoopAgent.generate: provider/loop
  * failures THROW (pi encodes them in the stream; this helper surfaces
  * them), and an abort throws an AbortError so every existing
- * `signal.aborted` early-return keeps working unchanged.
+ * `signal.aborted` early-return keeps working unchanged. A credential
+ * refusal throws the typed ProviderAuthError (auth-fallback.ts).
  */
 
 export interface SubagentRunOptions {
@@ -135,7 +137,7 @@ export async function runSubagent(tools: AgentTool<any, any>[], opts: SubagentRu
 		err.name = "AbortError";
 		throw err;
 	}
-	if (errorMessage !== undefined) throw new Error(errorMessage);
+	if (errorMessage !== undefined) throw modelCallError(errorMessage);
 
 	// 0.87.1: drop the seeded leading SystemMessage (transcript rework —
 	// see ui-stream's settleWith) before slicing past the input count, or
