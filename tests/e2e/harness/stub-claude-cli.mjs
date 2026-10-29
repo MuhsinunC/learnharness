@@ -5,8 +5,9 @@
 // - answers `initialize`, then connects the SDK MCP server (`initialize`,
 //   `notifications/initialized`, `tools/list`) over `mcp_message`;
 // - loads `--resume` history from $HOME/.claude/projects/*/<id>.jsonl;
-// - per API request: stream events, then `message_stop`, then one trailing
-//   `assistant` frame per content block, as Claude Code does;
+// - per API request: stream events (signed thinking first when `--effort`
+//   is passed), then `message_stop`, then one trailing `assistant` frame per
+//   content block, as Claude Code does;
 // - runs tool calls one at a time as `tools/call` with
 //   `_meta["claudecode/toolUseId"]`, then emits the `user` tool_result echo
 //   before the next request; `claude/endTurn` or `--max-turns` end the turn;
@@ -98,12 +99,18 @@ async function turn() {
 		}
 		const id = `msg_stub_${process.pid}_${++ids}`;
 		const content = [];
+		// The real route always passes --effort, so every reply carries signed thinking.
+		if (flag("--effort")) content.push({ type: "thinking", thinking: `Thinking about request ${requests}.`, signature: `sig_${process.pid}_${ids}` });
 		if (reply.text) content.push({ type: "text", text: reply.text });
 		for (const call of reply.tools ?? []) content.push({ type: "tool_use", id: `toolu_stub_${process.pid}_${++ids}`, name: `mcp__${server}__${call.name}`, input: call.arguments });
 		const stop = content.some((b) => b.type === "tool_use") ? "tool_use" : "end_turn";
 		event({ type: "message_start", message: { id, role: "assistant", content: [], usage: { ...usage, output_tokens: 1 } } });
 		content.forEach((block, index) => {
-			if (block.type === "text") {
+			if (block.type === "thinking") {
+				event({ type: "content_block_start", index, content_block: { type: "thinking", thinking: "", signature: "" } });
+				event({ type: "content_block_delta", index, delta: { type: "thinking_delta", thinking: block.thinking } });
+				event({ type: "content_block_delta", index, delta: { type: "signature_delta", signature: block.signature } });
+			} else if (block.type === "text") {
 				event({ type: "content_block_start", index, content_block: { type: "text", text: "" } });
 				event({ type: "content_block_delta", index, delta: { type: "text_delta", text: block.text } });
 			} else {

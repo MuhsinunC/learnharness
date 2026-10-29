@@ -63,6 +63,12 @@ function liveChildren(): Map<string, LiveChild> {
 
 export function liveChildBusy(key: string): boolean { return liveChildren().get(key)?.busy === true; }
 
+/** A sub-agent run's session id is never used again: free its child as soon as the run ends. */
+export function closeLiveSession(sessionId: string): void {
+	const child = globalState[registryKey]?.get(sessionId);
+	if (child && !child.busy) child.close("run ended");
+}
+
 /** Closes the least recently used idle child so a caller waiting for a slot gets its slot. */
 export function evictIdleLiveChild(): void {
 	let oldest: LiveChild | undefined;

@@ -183,6 +183,7 @@ describe("one live child per conversation", () => {
 		assert(turns.length >= 4, `the teacher answered every message (${turns.length})`);
 		assert.match(t.spawned(turns[0]!.pid).argv.join(" "), /--resume/, "the teacher's child imported the prober's history");
 		for (let i = 1; i < turns.length; i++) assertExtends(turns[i]!, turns[i - 1]!, `teacher request ${i + 1}`);
+		assert(turns.at(-1)!.messages.some((m) => m.content.some((b) => b.type === "thinking")), "the continued history holds the signed thinking");
 		await until(() => !alive(probe[0]!.pid), "the prober's child to exit", 30_000);
 		assert(alive(turns[0]!.pid), "the teacher's child stays alive between turns");
 
@@ -327,6 +328,10 @@ describe("idle close, recovery and restart", () => {
 		assert.notEqual(retried.pid, failed.pid, "the failed call closed its child");
 		assert.match(JSON.stringify(retried.messages), /The learner asked for a walk through limits/, "the retry carries the summary");
 		assert(!learnerTexts(retried).includes("[j] [long] Part 1."), "and not the condensed messages");
+		const summarizer = t.h.claude.requests.filter((r) => r.system.startsWith(SUMMARIZER));
+		assert(summarizer.length > 0, "the recovery summarized on Claude Code");
+		await until(() => summarizer.every((r) => !alive(r.pid)), "the summarizer's child to close when its run ends", 30_000);
+		assert.match(t.h.server.log(), /live session closed \(run ended\)/);
 	});
 
 	test("after a restart the conversation continues in a new child from the record", async () => {

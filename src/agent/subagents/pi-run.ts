@@ -6,6 +6,7 @@ import { usageWasAdmitted } from "../subscription-request-cycle.ts";
 import { providerEventObserver } from "../provider-events.ts";
 import { modelCallError } from "./auth-fallback.ts";
 import type { ModelRole } from "../../../config.ts";
+import { closeLiveSession } from "../claude-code/live.ts";
 
 /**
  * The shared sub-agent runner (docs/pi-engine-swap.md §6): one helper every
@@ -65,12 +66,13 @@ export function subagentEngine(role: ModelRole, override?: PiEngine): PiEngine {
 export async function runSubagent(tools: AgentTool<any, any>[], opts: SubagentRunOptions): Promise<SubagentRunResult> {
 	const engine = subagentEngine(opts.role, opts.engine);
 	let turns = 0;
+	const sessionId = randomUUID();
 	// Debug recorder (owner, 2026-10-04): raw provider events per job run.
 	const providerEvents = opts.chatId ? providerEventObserver(opts.chatId, `job:${opts.role}`) : undefined;
 	const agent = new Agent({
 		identity: APP_IDENTITY,
 		// One unsaved conversation per invocation, stable through every turn.
-		sessionId: randomUUID(),
+		sessionId,
 		initialState: {
 			systemPrompt: opts.systemPrompt,
 			model: engine.model,
@@ -130,6 +132,7 @@ export async function runSubagent(tools: AgentTool<any, any>[], opts: SubagentRu
 		else await agent.continue();
 	} finally {
 		opts.abortSignal?.removeEventListener("abort", onAbort);
+		closeLiveSession(sessionId);
 	}
 
 	if (aborted || opts.abortSignal?.aborted) {
