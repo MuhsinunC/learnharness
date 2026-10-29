@@ -9,7 +9,7 @@ import { buildQueryOptions } from "../src/agent/claude-code/query-options.ts";
 const root = fs.mkdtempSync(join(tmpdir(), "lh-endpoint-"));
 const dir = join(root, "credentials");
 process.env.LH_AUTH_FILE = join(dir, "auth.json");
-const { endpointFile, isAllowedEndpointUrl, readEndpointConfig, writeEndpointConfig, clearEndpointConfig, endpointStatus } = await import("../src/server/claude-code-endpoint.ts");
+const { EndpointTokenRequiredError, endpointFile, isAllowedEndpointUrl, readEndpointConfig, writeEndpointConfig, clearEndpointConfig, endpointStatus } = await import("../src/server/claude-code-endpoint.ts");
 const SENTINEL = "lh27-SENTINEL-token-do-not-leak";
 const B1 = "https://relay.example/v1", B2 = "http://localhost:9000/x";
 const required = { executable: "/example/bin/claude", cwd: "/workspace", cliModel: "test-model", appendPrompt: "system" };
@@ -82,8 +82,10 @@ test("R2: missing, corrupt, invalid and unreadable files fail closed; writes are
 
 test("R3: omitted token preserves valid credentials or saves URL only; invalid tokens leave bytes unchanged", () => {
 	writeEndpointConfig({ baseUrl: B1, token: SENTINEL });
-	writeEndpointConfig({ baseUrl: B2 });
-	assert.deepEqual(readEndpointConfig(), { baseUrl: B2, token: SENTINEL });
+	const originalBytes = fs.readFileSync(endpointFile());
+	assert.throws(() => writeEndpointConfig({ baseUrl: B2 }), { message: "claude-code endpoint: a new endpoint address needs its token; enter the token again" });
+	assert.equal(readEndpointConfig()?.baseUrl, B1);
+	assert.ok(fs.readFileSync(endpointFile()).equals(originalBytes));
 	const bytes = fs.readFileSync(endpointFile());
 	for (const token of ["", " leading", "trailing ", "control\x7f", "control\n", "emoji😀", "inner space", 42, null]) {
 		assert.throws(() => writeEndpointConfig({ baseUrl: B1, token: token as string }), { message: "claude-code endpoint: invalid token" });
@@ -106,7 +108,7 @@ test("R4: URL validation rejects unsafe destinations without touching stored byt
 	}
 	for (const baseUrl of [B1, "http://127.0.0.1:9000", B2]) {
 		assert.equal(isAllowedEndpointUrl(baseUrl), true);
-		writeEndpointConfig({ baseUrl });
+		writeEndpointConfig({ baseUrl, token: SENTINEL });
 		assert.deepEqual(readEndpointConfig(), { baseUrl, token: SENTINEL });
 	}
 });
@@ -146,4 +148,31 @@ test("the server exports the shared pure endpoint predicate and normalization", 
 	assert.equal(isAllowedEndpointUrl, core.isAllowedEndpointUrl);
 	assert.equal(core.normalizeEndpointUrl(" https://Relay.example/Path/ "), "https://Relay.example/Path");
 	for (const value of [null, undefined, 42, "https://user:pass@relay.example", "https://relay.example/?", "https://relay.example/#"]) assert.equal(core.normalizeEndpointUrl(value), null);
+});
+
+test("stored tokens are bound to normalized origins", () => {
+	const message = "claude-code endpoint: a new endpoint address needs its token; enter the token again";
+	for (const [from, to, keeps] of [
+		[B1, "https://relay.example/other", true],
+		["https://relay.example:443/a", "https://relay.example/b", true],
+		["http://localhost:9000", "http://127.0.0.1:9000", false],
+		["https://localhost:9000", "http://localhost:9000", false],
+		["invalid", B1, false],
+	] as const) {
+		fs.writeFileSync(endpointFile(), JSON.stringify({ baseUrl: from, token: SENTINEL }));
+		const bytes = fs.readFileSync(endpointFile());
+		if (keeps) {
+			writeEndpointConfig({ baseUrl: to });
+			assert.ok(readEndpointConfig()?.token === SENTINEL);
+			assert.equal(readEndpointConfig()?.baseUrl, to);
+		} else {
+			assert.throws(() => writeEndpointConfig({ baseUrl: to }), error => {
+				assert.ok(error instanceof EndpointTokenRequiredError);
+				assert.equal(error.code, "ENDPOINT_TOKEN_REQUIRED");
+				assert.equal(error.message, message);
+				return true;
+			});
+			assert.ok(fs.readFileSync(endpointFile()).equals(bytes));
+		}
+	}
 });

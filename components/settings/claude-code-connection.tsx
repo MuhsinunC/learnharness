@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { notifySettingsSaved } from "@/components/settings-signal";
 import { Toggle } from "./controls";
-import { isAllowedEndpointUrl } from "@/src/core";
+import { endpointOrigin, normalizeEndpointUrl, isAllowedEndpointUrl } from "@/src/core";
 
 export const CLAUDE_LOGIN_POLL_MS = 2000;
 export const CLAUDE_LOGIN_POLL_LIMIT_MS = 600000;
@@ -49,6 +49,7 @@ function storeLoginMarker(started: number | null) {
 export function ClaudeCodeConnection({ labelClassName }: { labelClassName?: string } = {}) {
 	const [status, setStatus] = useState<Status | null>(null), [error, setError] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false), [baseUrl, setBaseUrl] = useState("");
+	const [tokenTyped, setTokenTyped] = useState(false);
 	const [backend, setBackend] = useState<"local" | "endpoint">("local");
 	const mounted = useRef(false), sequence = useRef(0), inFlight = useRef(false);
 	const current = useRef<Status | null>(null), tokenInput = useRef<HTMLInputElement>(null);
@@ -92,10 +93,11 @@ export function ClaudeCodeConnection({ labelClassName }: { labelClassName?: stri
 			}, CLAUDE_LOGIN_POLL_MS);
 		} else if (!next.found || next.envOverride) stopPolling();
 	}
-	async function request(method: "GET" | "PUT" | "POST", body?: Change, background = false, automatic = false) {
+	async function request(method: "GET" | "PUT" | "POST" | "DELETE", body?: Change, background = false, automatic = false) {
 		if (inFlight.current || (background && pollInFlight.current)) return;
 		const owner = ++sequence.current, fallback = method === "GET" ? READ_ERROR : CHANGE_ERROR;
 		const previous = current.current, sentToken = body?.token;
+		let endpointRemoved = false;
 		pollInFlight.current = background;
 		if (!background) { inFlight.current = true; setBusy(true); errorSource.current = null; setError(null); }
 		if (method === "POST") {
@@ -104,13 +106,14 @@ export function ClaudeCodeConnection({ labelClassName }: { labelClassName?: stri
 				const started = Date.now(); activation.current = { started, generation: modeGeneration.current }; storeLoginMarker(started);
 			}
 		}
-		if (method === "PUT" && !automatic) clearActivation();
+		if ((method === "PUT" && !automatic) || method === "DELETE") clearActivation();
 		try {
-			const response = await fetch(method === "POST" ? "/api/claude-code/login" : "/api/claude-code", method === "GET" ? { cache: "no-store" } : { method, headers: { "Content-Type": "application/json" }, ...(body ? { body: JSON.stringify(body) } : {}) });
+			const response = await fetch(method === "DELETE" ? "/api/claude-code/endpoint" : method === "POST" ? "/api/claude-code/login" : "/api/claude-code", method === "GET" ? { cache: "no-store" } : { method, headers: { "Content-Type": "application/json" }, ...(body ? { body: JSON.stringify(body) } : {}) });
 			const reply = await response.json();
 			// A 2xx write commits unless the reply says `ok: false`.
-			const committed = method === "PUT" && response.ok && (reply.ok === undefined || reply.ok === true);
+			const committed = (method === "PUT" || method === "DELETE") && response.ok && (reply.ok === undefined || reply.ok === true);
 			if (committed) {
+				endpointRemoved = method === "DELETE";
 				if (!automatic) { modeGeneration.current++; clearActivation(); }
 				notifySettingsSaved("keys");
 			}
@@ -122,22 +125,26 @@ export function ClaudeCodeConnection({ labelClassName }: { labelClassName?: stri
 				return;
 			}
 			if (background && errorSource.current === "background") { errorSource.current = null; setError(null); }
-			if (reply.error != null || (method === "PUT" && !committed)) {
-				if (typeof reply.found === "boolean") accept({ ...reply, error: safeError(reply.error, fallback, sentToken) }, sentToken, method === "PUT" && body?.mode === "endpoint");
+			if (reply.error != null || ((method === "PUT" || method === "DELETE") && !committed)) {
+				if (typeof reply.found === "boolean") accept({ ...reply, error: safeError(reply.error, fallback, sentToken) }, sentToken, method === "DELETE" || (method === "PUT" && body?.mode === "endpoint"));
 				showError(safeError(reply.error, fallback, sentToken), background); return;
 			}
 			if (method === "POST") {
 				if (current.current) accept({ ...current.current, login: reply.login });
 				if (reply.login?.state === "idle") queueMicrotask(() => { if (mounted.current) void request("GET"); });
 			} else {
-				accept(reply, sentToken, method === "PUT" && body?.mode === "endpoint");
+				accept(reply, sentToken, method === "DELETE" || (method === "PUT" && body?.mode === "endpoint"));
 				if (committed && body?.executable) queueMicrotask(() => { if (mounted.current) void request("GET"); });
 			}
 		} catch {
 			if (method === "POST") clearActivation();
 			if (mounted.current && owner === sequence.current) showError(fallback, background);
 		} finally {
-			if (sentToken && tokenInput.current) tokenInput.current.value = "";
+			if (sentToken || endpointRemoved) {
+				if (tokenInput.current) tokenInput.current.value = "";
+				setTokenTyped(false);
+			}
+			if (endpointRemoved) setBaseUrl("");
 			if (body) delete body.token;
 			if (mounted.current && owner === sequence.current) {
 				pollInFlight.current = false;
@@ -172,7 +179,10 @@ export function ClaudeCodeConnection({ labelClassName }: { labelClassName?: stri
 	const selectedBackend = endpointConfigured ? backend : "local";
 	const canEnable = selectedBackend === "endpoint" ? endpointConfigured : !!status?.loggedIn;
 	const repair = status?.discovered != null && (status.hint != null || !status.found);
+	const normalizedUrl = normalizeEndpointUrl(baseUrl);
+	const originChanged = !!status?.endpoint?.baseUrl && status.endpoint.tokenSet && normalizedUrl !== null && endpointOrigin(baseUrl) !== endpointOrigin(status.endpoint.baseUrl);
 	const help = "text-xs leading-relaxed text-muted-foreground";
+	const removeEndpoint = (status?.endpoint?.baseUrl != null || status?.endpoint?.tokenSet || status?.mode === "endpoint") && <Button type="button" className="self-start cursor-pointer disabled:cursor-not-allowed" size="xs" variant="outline" disabled={busy} onClick={() => void request("DELETE")}>Remove saved endpoint</Button>;
 	return <div data-testid="claude-code-connection" className="flex flex-col gap-2">
 		<span className={labelClassName ?? "font-ui text-xs text-foreground"}>Claude</span>
 		<p className={help}>Use your Claude subscription through Claude Code on this computer.</p>
@@ -182,6 +192,7 @@ export function ClaudeCodeConnection({ labelClassName }: { labelClassName?: stri
 			<p className={help}>Configured by the LH_CLAUDE_CODE_EXECUTABLE environment variable.</p>
 			{status.loggedIn && <p className={help}>{signedIn}</p>}
 			{status.executable && <p className="text-[11px] text-muted-foreground">{status.executable}</p>}
+			{removeEndpoint}
 		</> : repair || !status.found ? <>
 			{repair ? <>
 				<p className={help}>{status.hint ?? "The saved Claude Code path is missing."}</p>
@@ -192,6 +203,7 @@ export function ClaudeCodeConnection({ labelClassName }: { labelClassName?: stri
 			</>}
 			{status.mode !== "off" && <div className="flex items-center gap-3 text-xs text-foreground"><Toggle label="Use Claude in LearnHarness" checked disabled={busy} onChange={() => void request("PUT", { mode: "off" })} /><span>Use Claude in LearnHarness</span></div>}
 			<Button type="button" className="self-start cursor-pointer disabled:cursor-not-allowed" size="xs" variant="outline" disabled={busy} onClick={() => void request("GET")}>Refresh</Button>
+			{removeEndpoint}
 		</> : <>
 			{status.loggedIn ? <>
 				<p className={help}>{signedIn}</p>
@@ -210,8 +222,10 @@ export function ClaudeCodeConnection({ labelClassName }: { labelClassName?: stri
 				<summary className="cursor-pointer text-muted-foreground">Advanced: use a custom Claude Code endpoint</summary>
 				<div className="mt-2 space-y-2">
 					<label className="block">Base URL<input type="text" aria-label="Base URL" autoComplete="off" value={baseUrl} disabled={busy} onChange={(event) => setBaseUrl(event.currentTarget.value)} className="w-full rounded-sm border border-border bg-background px-2 py-1.5" /></label>
-					<label className="block">Token<input ref={tokenInput} aria-label="Token" type="password" autoComplete="off" disabled={busy} placeholder={status.endpoint?.tokenSet ? "Token saved — leave empty to keep it" : "Token"} className="w-full rounded-sm border border-border bg-background px-2 py-1.5" /></label>
-					<Button type="button" className="self-start cursor-pointer disabled:cursor-not-allowed" size="xs" variant="outline" disabled={busy} onClick={saveEndpoint}>Save</Button>
+					<label className="block">Token<input ref={tokenInput} aria-label="Token" type="password" autoComplete="off" disabled={busy} onInput={(event) => setTokenTyped(event.currentTarget.value !== "")} placeholder={originChanged ? "Enter the token for this address" : status.endpoint?.tokenSet ? "Token saved — leave empty to keep it" : "Token"} className="w-full rounded-sm border border-border bg-background px-2 py-1.5" /></label>
+					<Button type="button" className="self-start cursor-pointer disabled:cursor-not-allowed" size="xs" variant="outline" disabled={busy || (originChanged && !tokenTyped)} onClick={saveEndpoint}>Save</Button>
+					{normalizedUrl && new URL(normalizedUrl).protocol === "http:" && <p className={help}>This address isn't encrypted; anything else running on this computer could read the token.</p>}
+					{removeEndpoint}
 					{status.mode === "endpoint" && <Button type="button" className="self-start cursor-pointer disabled:cursor-not-allowed" size="xs" variant="ghost" disabled={busy} onClick={() => void request("PUT", { mode: status.loggedIn ? "local" : "off" })}>Stop using endpoint</Button>}
 				</div>
 			</details>

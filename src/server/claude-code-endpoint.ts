@@ -5,8 +5,16 @@
 import fs from "node:fs";
 import path from "node:path";
 import { AUTH_FILE } from "../../config.ts";
-import { normalizeEndpointUrl, type ClaudeCodeEndpoint } from "../core/claude-code-endpoint.ts";
+import { endpointOrigin, normalizeEndpointUrl, type ClaudeCodeEndpoint } from "../core/claude-code-endpoint.ts";
 export { isAllowedEndpointUrl } from "../core/claude-code-endpoint.ts";
+
+export class EndpointTokenRequiredError extends Error {
+	readonly code = "ENDPOINT_TOKEN_REQUIRED";
+	constructor() {
+		super("claude-code endpoint: a new endpoint address needs its token; enter the token again");
+		this.name = "EndpointTokenRequiredError";
+	}
+}
 
 export function endpointFile(): string {
 	return path.join(path.dirname(AUTH_FILE), "claude-endpoint.json");
@@ -50,6 +58,8 @@ export function writeEndpointConfig(cfg: { baseUrl: string; token?: string }): v
 	if (cfg.token !== undefined && !validToken(cfg.token)) throw new Error("claude-code endpoint: invalid token");
 	const stored = readStored();
 	if (cfg.token === undefined && stored.kind === "unreadable") throw new Error("claude-code endpoint: existing endpoint credentials could not be read; re-enter the token");
+	if (cfg.token === undefined && stored.kind === "ok" && stored.token !== undefined &&
+		(stored.url === null || endpointOrigin(stored.url) !== endpointOrigin(url))) throw new EndpointTokenRequiredError();
 	const token = cfg.token ?? (stored.kind === "ok" ? stored.token : undefined);
 	const file = endpointFile(), dir = path.dirname(file);
 	const tmp = path.join(dir, `.claude-endpoint.json.tmp-${process.pid}`);

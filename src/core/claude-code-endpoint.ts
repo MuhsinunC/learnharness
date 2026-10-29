@@ -16,3 +16,8 @@ export function normalizeEndpointUrl(value: unknown): string | null {
 export function isAllowedEndpointUrl(value: string): boolean {
 	return normalizeEndpointUrl(value) !== null;
 }
+
+export function endpointOrigin(value: unknown): string | null {
+	const url = normalizeEndpointUrl(value);
+	return url === null ? null : new URL(url).origin;
+}
