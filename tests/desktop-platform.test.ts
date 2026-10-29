@@ -170,19 +170,22 @@ describe("desktop packaging policy", () => {
 
 describe("workflow action versions", () => {
 	type Step = { uses?: string; with?: Record<string, unknown> };
-	type Workflow = { jobs: Record<string, { steps: Step[] }> };
+	type Workflow = { jobs: Record<string, { steps?: Step[] }> };
 	const yaml = require("js-yaml") as { load(source: string): Workflow };
 
-	for (const filename of ["ci.yml", "release.yml", "fork-release.yml"]) {
+	for (const filename of ["ci.yml", "release.yml", "fork-release.yml", "fork-windows-build.yml"]) {
 		it(`${filename} uses supported Action runtimes without changing the app's Node 26`, () => {
 			const workflow = yaml.load(readFileSync(new URL(`../.github/workflows/${filename}`, import.meta.url), "utf8"));
 			const expected = ["actions/checkout@v7", "actions/setup-node@v7"];
 			if (filename === "release.yml") {
 				expected.push("actions/github-script@v9", "actions/upload-artifact@v7", "maxim-lobanov/setup-xcode@v1");
 			}
+			if (filename === "fork-release.yml") expected.push("actions/download-artifact@v8");
+			if (filename === "fork-windows-build.yml") expected.push("actions/upload-artifact@v7");
 			const observed = new Set<string>();
 			for (const job of Object.values(workflow.jobs)) {
-				for (const step of job.steps) {
+				// A reusable-workflow job (fork-release.yml's windows) has no steps.
+				for (const step of job.steps ?? []) {
 					if (!step.uses) continue;
 					assert.ok(expected.includes(step.uses), `unexpected Action reference: ${step.uses}`);
 					observed.add(step.uses);
