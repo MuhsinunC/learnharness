@@ -2,7 +2,7 @@
 
 import { useCallback, useRef, useState } from "react";
 import { XIcon } from "lucide-react";
-import { findImagePaths, IMAGES_UNSUPPORTED_CODE, MAX_ATTACHMENT_BYTES, MAX_IMAGE_EDGE, sniffImageExt, type AttachmentRef } from "@/src/core";
+import { findImagePaths, IMAGES_UNSUPPORTED_CODE, MAX_ATTACHMENT_BYTES, MAX_IMAGE_EDGE, PATH_COMPUTER_ONLY, sniffImageExt, type AttachmentRef } from "@/src/core";
 import { useSettingsSaved } from "@/components/settings-signal";
 
 /**
@@ -71,7 +71,9 @@ type Intake = { ref?: AttachmentRef; error?: string; refused?: boolean };
 
 /** Read a JSON refusal off a failed response. */
 async function refusalOf(res: Response | null): Promise<Intake> {
-	const json = (await res?.json().catch(() => ({}))) as { error?: string; code?: string } | undefined;
+	const json = (await res?.json().catch(() => ({}))) as { error?: string; code?: string; computerOnly?: boolean } | undefined;
+	// Only a path read is computer-only; its generic text would say "change this".
+	if (json?.computerOnly) return { error: PATH_COMPUTER_ONLY, refused: true };
 	return { error: json?.error ?? "The image could not be attached.", refused: json?.code === IMAGES_UNSUPPORTED_CODE };
 }
 

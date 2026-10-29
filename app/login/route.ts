@@ -14,6 +14,7 @@ import {
 	chargeLoginAttempt,
 	clientKey,
 	createSession,
+	isDesktopServer,
 	loginRetryAfter,
 	passwordConfigured,
 	remoteAccessAvailable,
@@ -37,6 +38,8 @@ function page(status: number, next: string, message: string | null, extra: Recor
 <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
 <button type="submit">Log in</button>
 </form>`
+		: isDesktopServer() // a browser that found the desktop app's server (LH-45)
+		? `<p>Remote access is off. This is the LearnHarness desktop app: use it in its own window. To use it from a browser, set a password in the desktop app under Settings → General → Remote access, then log in here.</p>`
 		: `<p>Remote access is off. Set a password on the computer running LearnHarness: in the desktop app under Settings → General → Remote access, or with <code>npm run remote-access:set-password</code>.</p>`;
 	const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
