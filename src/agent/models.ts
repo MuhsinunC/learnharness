@@ -245,22 +245,27 @@ function replyRoom(model: Model<Api>, context: Context, overcount: number | unde
 
 /** The request's stream, with pi-ai's estimate stamped on a length
  *  rejection (core SentEstimate): the provider's own count in it then
- *  teaches the model's overcount (LH-54, context-recovery). Forwarded
- *  as pi-ai's own lazy streams forward theirs: the source's result is
- *  passed on, and a source that throws ends in an error event, never a
- *  stream that never settles. */
+ *  teaches the model's overcount (LH-54, context-recovery). It always
+ *  settles: the source's result is passed on (pi-ai's lazy streams end
+ *  with a result and no event), and a source that throws, or ends with
+ *  neither, ends in an error event. */
 function withSentEstimate(model: Model<Api>, source: AssistantMessageEventStream, estimate: number): AssistantMessageEventStream {
 	const output = new AssistantMessageEventStream();
+	const fail = (text: string) => { output.push({ type: "error", reason: "error", error: errorMessage(model, text) }); output.end(); };
 	void (async () => {
+		let terminal = false;
 		try {
 			for await (const event of source) {
 				if (event.type === "error" && contextOverflowState(event.error) !== null) Object.assign(event.error, { sentEstimate: estimate });
+				terminal ||= event.type === "done" || event.type === "error";
 				output.push(event);
 			}
-			output.end(await source.result());
+			// An ended source resolved its result already, if it has one.
+			const result = terminal ? await source.result() : await Promise.race([source.result(), Promise.resolve(undefined)]);
+			if (result) output.end(result);
+			else fail("The model's stream ended without a response.");
 		} catch (error) {
-			output.push({ type: "error", reason: "error", error: errorMessage(model, error instanceof Error ? error.message : String(error)) });
-			output.end();
+			fail(error instanceof Error ? error.message : String(error));
 		}
 	})();
 	return output;

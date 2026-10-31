@@ -12,7 +12,7 @@ const headers = { "Content-Type": "application/json", "x-learnharness-subscripti
 type Statuses = { chatgpt: ChatGPTStatus; native: NativeSubscriptionStatus[] };
 /** Which account each subscription is connected with: what the catalog
  *  and the key readers read from a status (LH-54). */
-const connectionsOf = (s: Statuses) => JSON.stringify([s.chatgpt.activeId, s.chatgpt.accounts.filter((a) => a.connected).map((a) => a.id), s.native.map((n) => n.connected ? n.connectionId : null)]);
+const connectionsOf = (s: Partial<Statuses>) => JSON.stringify([s.chatgpt?.activeId, s.chatgpt?.accounts?.filter((a) => a.connected).map((a) => a.id), Array.isArray(s.native) ? s.native.map((n) => n.connected ? n.connectionId : null) : null]);
 /** The connections the window's last status read showed. */
 let seenConnections: string | undefined;
 async function status() {
