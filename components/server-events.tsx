@@ -54,7 +54,8 @@ export function openEventsChannel(): NotifySource {
  *  dispatch is safe). */
 export function createNotifyHub() {
 	const byType = new Map<string, Set<(data: never) => void>>();
-	const resyncs = new Set<() => void>();
+	const resyncs = new Set<(reconnect: boolean) => void>();
+	let opens = 0;
 	return {
 		subscribe<K extends ServerEventType>(type: K, cb: (payload: ServerEvents[K]) => void) {
 			const set = byType.get(type) ?? new Set<(data: never) => void>();
@@ -66,8 +67,10 @@ export function createNotifyHub() {
 		/** Resync callbacks: fired on the source's every (re)open — "you may
 		 *  have missed events while disconnected; refetch". A consumer that
 		 *  mounts while ALREADY open gets no fire (it missed nothing by
-		 *  birth); its own mount fetch is its initial truth. */
-		onResync(cb: () => void) {
+		 *  birth); its own mount fetch is its initial truth. `reconnect` is
+		 *  false on the window's first open (LH-54): that one, at page load,
+		 *  follows the mount fetches by a moment and need not repeat them. */
+		onResync(cb: (reconnect: boolean) => void) {
 			resyncs.add(cb);
 			return () => resyncs.delete(cb);
 		},
@@ -93,9 +96,10 @@ export function createNotifyHub() {
 			}
 		},
 		fireOpen() {
+			const reconnect = opens++ > 0;
 			for (const cb of [...resyncs]) {
 				try {
-					cb();
+					cb(reconnect);
 				} catch (err) {
 					console.error("[events] resync handler failed:", err);
 				}

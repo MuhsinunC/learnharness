@@ -37,14 +37,15 @@ function fetchCatalog(revalidate = false): void {
 }
 
 /** Refetch on the server's word that the catalog changed (a provider
- *  stated a limit, a window was saved elsewhere), and on every reconnect,
- *  which may have missed that word, while any reader of this hub is
- *  mounted. */
+ *  stated a limit, a window was saved, here or elsewhere), and on every
+ *  reconnect, which may have missed that word, while any reader of this
+ *  hub is mounted. Not on the window's first open: it follows the mount
+ *  fetch by a moment, so a page load reads the catalog once (LH-54). */
 function holdHub(hub: Hub): () => void {
 	let held = hubSignals.get(hub);
 	if (!held) {
 		const offEvent = hub.subscribe("models-changed", () => fetchCatalog(true));
-		const offResync = hub.onResync(() => fetchCatalog(true));
+		const offResync = hub.onResync((reconnect) => { if (reconnect) fetchCatalog(true); });
 		held = { readers: 0, stop: () => { offEvent(); offResync(); } };
 		hubSignals.set(hub, held);
 	}
@@ -61,11 +62,14 @@ export function useModelCatalog(): { catalog: ModelCatalogResponse | undefined; 
 		const read = () => setSnapshot({ catalog: catalogCache, failed: catalogError });
 		catalogReaders.add(read);
 		if (first) {
+			// A window save's models-changed reaches every window with a
+			// channel, the saving one included: one refetch there, not two
+			// (LH-54).
 			stopCatalogSignals = onSettingsSaved((section) => {
 				if (section === "keys") {
 					catalogGeneration++; catalogInflight = undefined; catalogCache = undefined;
 					fetchCatalog();
-				} else if (section === "models" || section === "contextWindows" || section === "imageSupport") fetchCatalog(true);
+				} else if (section === "models" || section === "imageSupport" || (section === "contextWindows" && !hubSignals.size)) fetchCatalog(true);
 			});
 			fetchCatalog(true);
 		} else fetchCatalog();
