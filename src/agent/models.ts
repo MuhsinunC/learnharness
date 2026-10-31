@@ -209,6 +209,12 @@ function maxOutputTokens(): number | undefined {
  *  much free (api/simple-options.js CONTEXT_SAFETY_TOKENS). */
 export const CONTEXT_SAFETY_TOKENS = 4096;
 
+/** The APIs whose thinking budget pi-ai adds to the reply's max tokens
+ *  before clamping the sum to the window (api/anthropic-messages and
+ *  api/bedrock-converse-stream streamSimple): options.maxTokens does not
+ *  bound such a request. */
+const BUDGET_THINKING_APIS = new Set<string>(["anthropic-messages", "bedrock-converse-stream"]);
+
 /** The least reply room a request goes out with (LH-50): 1024 tokens,
  *  or the model's whole max output when that is smaller. */
 export const replyFloorTokens = (maxTokens: number) => Math.min(1024, maxTokens);
@@ -239,17 +245,31 @@ function replyRoom(model: Model<Api>, context: Context, overcount: number | unde
 
 /** The request's stream, with pi-ai's estimate stamped on a length
  *  rejection (core SentEstimate): the provider's own count in it then
- *  teaches the model's overcount (LH-54, context-recovery). */
-function withSentEstimate(source: AssistantMessageEventStream, estimate: number): AssistantMessageEventStream {
+ *  teaches the model's overcount (LH-54, context-recovery). Forwarded
+ *  as pi-ai's own lazy streams forward theirs: the source's result is
+ *  passed on, and a source that throws ends in an error event, never a
+ *  stream that never settles. */
+function withSentEstimate(model: Model<Api>, source: AssistantMessageEventStream, estimate: number): AssistantMessageEventStream {
 	const output = new AssistantMessageEventStream();
 	void (async () => {
-		for await (const event of source) {
-			if (event.type === "error" && contextOverflowState(event.error) !== null) Object.assign(event.error, { sentEstimate: estimate });
-			output.push(event);
+		try {
+			for await (const event of source) {
+				if (event.type === "error" && contextOverflowState(event.error) !== null) Object.assign(event.error, { sentEstimate: estimate });
+				output.push(event);
+			}
+			output.end(await source.result());
+		} catch (error) {
+			output.push({ type: "error", reason: "error", error: errorMessage(model, error instanceof Error ? error.message : String(error)) });
+			output.end();
 		}
-		output.end();
 	})();
 	return output;
+}
+
+/** An error reply of `model` that no provider answered. */
+function errorMessage(model: Model<Api>, text: string): AssistantMessage {
+	const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+	return { role: "assistant", api: model.api, provider: model.provider, model: model.id, content: [], usage, stopReason: "error", errorMessage: text, timestamp: Date.now() };
 }
 
 /** A request whose reply would be cut off silently is held back as a
@@ -258,14 +278,12 @@ function withSentEstimate(source: AssistantMessageEventStream, estimate: number)
  *  can (context-recovery). No provider saw it, so it states no limit. */
 function heldBackStream(model: Model<Api>, { room, estimate, margin }: ReturnType<typeof replyRoom>, lifecycle?: ChatGPTDispatchLifecycle) {
 	const output = new AssistantMessageEventStream();
-	const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
-	markUnadmittedUsage(usage);
-	lifecycle?.noDispatch("heldBack");
 	const error: AssistantMessage & HeldBack = {
-		role: "assistant", api: model.api, provider: model.provider, model: model.id, content: [], usage, stopReason: "error", timestamp: Date.now(),
-		errorMessage: `Not sent: the reply would have only ${Math.max(room, 0)} tokens of room in this chat's ${model.contextWindow}-token context window (about ${estimate} tokens of request and a ${margin}-token margin).`,
+		...errorMessage(model, `Not sent: the reply would have only ${Math.max(room, 0)} tokens of room in this chat's ${model.contextWindow}-token context window (about ${estimate} tokens of request and a ${margin}-token margin).`),
 		heldBack: true,
 	};
+	markUnadmittedUsage(error.usage);
+	lifecycle?.noDispatch("heldBack");
 	output.push({ type: "error", reason: "error", error });
 	output.end();
 	return output;
@@ -322,14 +340,21 @@ export function piEngineForSpec(spec: ResolvedModelSpec, background: boolean | (
 			const fit = replyRoom(streamModel, context, matches ? spec.overcount : undefined);
 			if (fit.room < replyFloorTokens(streamModel.maxTokens)) return heldBackStream(streamModel, fit, lifecycle);
 			const outputCeiling = cap === undefined ? undefined : Math.min(streamModel.maxTokens, cap);
-			// pi-ai's margin is fixed: every API's max-tokens clamp (thinking
-			// budgets included) reads the window, so a larger margin goes
-			// through a window that much smaller.
+			const asked = outputCeiling !== undefined && options?.maxTokens !== undefined && options.maxTokens > outputCeiling ? outputCeiling : options?.maxTokens;
+			// The margin past pi-ai's flat one reaches the request as the
+			// reply's max tokens: every API takes the smaller of those and its
+			// own clamp to the window, and the model keeps its real window.
+			// Anthropic's and Bedrock's budget thinking add the thinking
+			// budget to max tokens and clamp the sum to the window with the
+			// flat margin alone, so there the margin goes through a window
+			// that much smaller.
 			const extraMargin = fit.margin - CONTEXT_SAFETY_TOKENS;
-			const sentModel = extraMargin > 0 && streamModel.contextWindow > 0 ? { ...streamModel, contextWindow: streamModel.contextWindow - extraMargin } : streamModel;
-			return withSentEstimate(stream(sentModel, context, {
+			const budgetThinking = level !== "off" && BUDGET_THINKING_APIS.has(streamModel.api);
+			const sentModel = extraMargin > 0 && budgetThinking && streamModel.contextWindow > 0 ? { ...streamModel, contextWindow: streamModel.contextWindow - extraMargin } : streamModel;
+			const maxTokens = extraMargin > 0 && !budgetThinking ? Math.min(asked ?? streamModel.maxTokens, fit.room) : asked;
+			return withSentEstimate(streamModel, stream(sentModel, context, {
 				...options,
-				...(outputCeiling !== undefined && options?.maxTokens !== undefined && options.maxTokens > outputCeiling ? { maxTokens: outputCeiling } : {}),
+				...(maxTokens !== options?.maxTokens ? { maxTokens } : {}),
 				reasoning: level === "off" ? undefined : level,
 			}), fit.estimate);
 		},
