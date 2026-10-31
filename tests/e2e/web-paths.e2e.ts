@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 import { bootServer, REPO_ROOT, until, type LhServer } from "./harness/server.ts";
-import { hydrated, launchChrome, type HeadlessChrome } from "./harness/chrome.ts";
+import { DROPPABLE_CHANNEL, hydrated, launchChrome, type ChannelWindow, type HeadlessChrome } from "./harness/chrome.ts";
 import { reply, startStubProvider, type StubProvider } from "./harness/stub-provider.ts";
 import { png } from "./harness/png.ts";
 import { PATH_COMPUTER_ONLY } from "../../src/core/remote-access.ts";
