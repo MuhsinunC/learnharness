@@ -73,9 +73,13 @@ Pi's shape, with Codex's clipping and option 2 as the fallback
   prompt, declarations, marker and tail fill only 0.8 of what the reply's
   room leaves (LH-55): a provider may count 15-20% more than chars/3.5
   (the OB-0645 live check measured OpenRouter's pre-flight count at about
-  1.18x). That room already takes off an overcount the rejection stated
-  (see "The learned overcount"); the 0.8 covers a provider whose
-  rejection states no count of its own. When the margin
+  1.18x). With a learned overcount (see "The learned overcount") the room
+  already takes it off, and the 0.8 stays anyway: it is also the next
+  turn's growth room under the threshold compaction. With no overcount
+  the reply's room is the threshold; with a ratio r it sits (reserve −
+  4096 − reply floor) × (1 − 1/r) above it, so a retry filling the whole
+  room would be condensed again on the next turn (at 40,960 with a 16k
+  max output and 1.18x, 1,406 tokens over the 21,156 threshold). When the margin
   leaves no room but the held-back floor itself still does, the retry gets
   that whole room rather than none, so recovery never drops the whole
   history. A rejection's stated limit counts only while the rejection is
@@ -185,15 +189,26 @@ Some providers count more than pi-ai's chars/3.5 before they accept a
 request: OpenRouter's pre-flight counted about 1.18x the tokens it then
 billed, and the billed count matched pi-ai's estimate (OB-0645, qwen3-14b).
 Its rejection states its own count ("you requested about 41217 tokens
-(24953 of text input, 3331 of tool input, 12933 in the output)"), and the
-engine stamps every length rejection with pi-ai's estimate of the request
-it sent (`sentEstimate`). Their ratio, the stated input over that
-estimate, is saved per `provider:id` under `learnedOvercounts`, the larger
-of it and any earlier one, by the same rejection and under the same rules
-that teach the limit (in force, never from a held-back request; above 2 it
-is taken for a misread and ignored). A window save leaves it: it describes
-the provider's count, not the window. A provider that never showed one,
-or whose rejections state no count, keeps pi-ai's flat 4096. On the route
+(24953 of text input, 3331 of tool input, 12933 in the output)"; OpenAI's
+says "(8000 in the messages, 500 in the functions, and 1500 in the
+completion)"), and the engine stamps every length rejection with pi-ai's
+estimate of the request it sent (`sentEstimate`). Their ratio, the stated
+input (the text and tools, or the messages and functions, never the
+reply's share) over that estimate, is saved per `provider:id` under
+`learnedOvercounts`, by the same rejection and under the same rules that
+teach the limit (in force, never from a held-back request). The newest
+count replaces the ratio, down as well as up, as the newest stated limit
+replaces the limit: a ratio learned too high would hold requests back for
+good, while one too low costs one more rejection, which teaches it again.
+A count at or below the estimate clears the ratio; one above
+`MAX_OVERCOUNT` (2) is taken for a misread and changes nothing, nor does a
+rejection that states no count. A stored ratio is read as at most 2, so a
+hand-edited 50 cannot hold back every request. Saving the pair's window in
+Settings forgets its ratio with its learned limit, which the same
+rejection taught; that is also the way to reset a bad one
+(`tests/e2e/recovery-margin.e2e.ts` (l)-(o)). A provider that
+never showed one, or whose rejections state no count, keeps pi-ai's flat
+4096. On the route
 that reproduces the live case (a custom 1M window over a real 40,960), the
 rejection that teaches the limit teaches the overcount too, so the extra
 rejection the live re-check saw after the limit was learned (part 15,
@@ -258,8 +273,13 @@ overcount `r` (see "The learned overcount") keeps `4096 + (r − 1) ×
 estimate` free instead (`contextMarginTokens` in `src/agent/models.ts`):
 with the flat margin alone, every request between ~22.8k tokens and the
 threshold of a learned 40,960 window was rejected and condensed. pi-ai's
-margin is a constant, so the extra goes to pi-ai as a window that much
-smaller, which every API's max-tokens clamp reads. The held-back floor,
+margin is a constant, so the extra goes to pi-ai as the reply's
+`maxTokens`, the room this margin leaves: every pi-ai API sends the
+smaller of that and its own clamp to the window, and the model keeps its
+real window. The exception is Anthropic's and Bedrock's budget thinking,
+which adds the thinking budget to `maxTokens` and clamps the sum to the
+window with the flat margin alone; there the extra goes to pi-ai as a
+window that much smaller. The held-back floor,
 the threshold and recovery's rooms are all sized from that same margin
 (`inputBudgetTokens`, its inverse): the floor comes down to
 `(window − 4096 − min(1024, max output)) / r`, and the threshold keeps the
