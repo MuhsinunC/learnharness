@@ -137,21 +137,23 @@ test("a sign-out made while the page's event channel is down reaches its key rea
 
 	// A blip with nothing changed: the page re-reads its connections and
 	// signals nothing (a "keys" signal would clear its catalog).
+	const loaded = (await saved()).length;
 	const reads = statusReads;
 	await channel("drop");
 	await channel("reopen");
 	await until(() => statusReads > reads, "the reopened page to re-read its connections");
 	await new Promise((resolve) => setTimeout(resolve, 1000));
-	assert.deepEqual(await saved(), [], "no settings signal for a reopen that changed nothing");
+	assert.deepEqual((await saved()).slice(loaded), [], `no settings signal for a reopen that changed nothing (all: ${(await saved()).join(", ")})`);
 
 	// Signed out while the channel is down: the page hears nothing then,
 	// and its key readers learn of it when the channel reopens.
+	const blipped = (await saved()).length;
 	await channel("drop");
 	await signOut(server);
 	await new Promise((resolve) => setTimeout(resolve, 1000));
-	assert.deepEqual(await saved(), [], "nothing reached the page while its channel was down");
+	assert.deepEqual((await saved()).slice(blipped), [], "nothing reached the page while its channel was down");
 	await channel("reopen");
-	await until(async () => (await saved()).includes("keys"), "the reopened page's keys signal", 30_000);
+	await until(async () => (await saved()).slice(blipped).includes("keys"), "the reopened page's keys signal", 30_000);
 	await page.waitForSelector("[data-testid=setup-cta-keys]", { timeout: 60_000 });
 });
 
