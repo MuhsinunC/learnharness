@@ -860,12 +860,16 @@ export function Chat({
 		// Current model truth also guards retained/live failures: canonical
 		// sync must never automatically replace a reply that failed to save.
 		continueIfOwed(record.messages);
+		return record.messages;
 	}, [chatId, setMessages, continueIfOwed]);
 
 	// "Repair this chat" (LH-40): a context-length failure gets the
 	// overflow recovery's compaction on demand; the record sync drops the
 	// banner (the recovery marker now ends the record). A refusal shows
-	// the server's reason.
+	// the server's reason. A repair that changed nothing (the rejection no
+	// longer applies: the chat moved to another model or window) leaves
+	// the failure standing, and Retry is hidden for it, so Repair retries
+	// the turn itself (LH-63).
 	const [repairing, setRepairing] = useState(false);
 	// Keyed by the banner it answers, so a later failure never shows a stale reason.
 	const [repairError, setRepairError] = useState<{ banner: string; text: string } | null>(null);
@@ -873,10 +877,12 @@ export function Chat({
 		setRepairing(true);
 		setRepairError(null);
 		const refusal = await repairChatRequest(chatId);
-		if (refusal === null) await syncFromServer().catch(() => undefined);
-		else setRepairError({ banner, text: refusal });
+		if (refusal === null) {
+			const messages = await syncFromServer().catch(() => undefined);
+			if (messages && endsInFailedTurn(messages)) retryFailedResponse(send, draftRef);
+		} else setRepairError({ banner, text: refusal });
 		setRepairing(false);
-	}, [chatId, syncFromServer]);
+	}, [chatId, syncFromServer, send]);
 
 	// The settled terminal's other half (stream-reattach wave): the
 	// transport resolved turn-settled — no turn running, the record is
@@ -1335,7 +1341,7 @@ export function Chat({
 		<ChatActionsContext.Provider
 			value={{
 				chatId,
-				syncFromServer,
+				syncFromServer: async () => { await syncFromServer(); },
 				sendText: (t: string) => {
 					void send({ type: "text", text: t });
 				},
