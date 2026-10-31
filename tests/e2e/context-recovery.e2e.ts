@@ -113,7 +113,8 @@ before(async () => {
 		ticket: "lh-40",
 		// Catalog default 4,000 (the threshold would compact every turn);
 		// the custom 1.5M is what the engine runs (LH-38).
-		providers: [{ id: STUB, baseUrl: stub.baseUrl, models: [{ id: "stub-a", contextWindow: 4_000, maxTokens: 2_048 }] }],
+		// stub-wide: a model with room, for a chat moved off stub-a (LH-63).
+		providers: [{ id: STUB, baseUrl: stub.baseUrl, models: [{ id: "stub-a", contextWindow: 4_000, maxTokens: 2_048 }, { id: "stub-wide", contextWindow: 200_000, maxTokens: 2_048 }] }],
 		settings: {
 			version: 1,
 			models: { strong: slot, cheap: slot, vision: slot },
@@ -599,6 +600,30 @@ test("(k) a limit learned while the page's event channel is down reaches its foo
 		await page.evaluate(() => (window as unknown as ChannelWindow).lhChannel.reopen());
 		await footerReads(page, "28.5k");
 		assert.equal(reconnects.length, 1, "the page reconnected once, and the reconnect brought the limit");
+	} finally {
+		await page.close();
+	}
+});
+
+test("(l) a chat moved to a model with room: Repair has nothing to condense, so it retries the turn (LH-63)", async () => {
+	// The rejection was stub-a's; on stub-wide it no longer applies, the
+	// repair route answers ok with nothing changed, and the banner offers
+	// Repair alone (Retry is hidden for a length failure).
+	const id = await newChat("Moved to a wider model");
+	breakChat(id, false);
+	await server.json(`/api/chats/${id}/settings`, { method: "PUT", body: { model: { provider: STUB, id: "stub-wide" } } });
+	const page = await openChat(id, '[data-testid="repair-chat"]');
+	try {
+		assert.equal(await page.$('[data-testid="retry-failed-turn"]'), null, "a length failure offers Repair, not Retry");
+		const start = stub.requests.length;
+		const res = await clickForPost(page, '[data-testid="repair-chat"]', "/repair");
+		assert.equal(res.status(), 200, await res.text());
+		const done = await settled(id, "the retried reply", (c) => isReply(c.messages.at(-1)));
+		assert.equal(recoveryMarkers(done).length, 0, "nothing was condensed");
+		const turnRequests = stub.requests.slice(start).filter(isTurnRequest);
+		assert.deepEqual(turnRequests.map((r) => r.model), ["stub-wide"], "one retry, on the chat's new model");
+		assert.match(lastLearnerText(turnRequests[0]!), /Explain it all again in detail/, "the failed turn is what gets answered");
+		await until(async () => (await page.$('[data-testid="chat-error"]')) === null, "the banner to clear");
 	} finally {
 		await page.close();
 	}

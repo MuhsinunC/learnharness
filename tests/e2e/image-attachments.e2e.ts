@@ -643,3 +643,123 @@ test("an attached image survives an over-context recovery, and view_image still 
 		stub.setResponder(baseResponder);
 	}
 });
+
+// LH-63 (#107): Retry re-sends the failed turn's images. Once the chat
+// has moved to a model that can't read them, the retry refuses the way a
+// send does, and the banner says why (pi-ai would drop the picture).
+test("a retry to a model that can't read the turn's images refuses, and says why", async () => {
+	const { id } = await server.json<{ id: string }>("/api/chats", { body: { title: "Retry to text" } });
+	const sketch = png(120, 200, 60);
+	stub.setResponder(() => reply.http(400, { error: { message: "The provider had a hiccup." } }));
+	try {
+		const res = await server.api("/api/chat", { body: { chatId: id, input: { type: "text", text: "What does my sketch show?", attachments: [await store(id, sketch, "sketch.png")] } } });
+		assert.equal(res.status, 200, await res.clone().text());
+		await res.arrayBuffer();
+		await until(async () => {
+			const c = await server.json<{ messages: Array<{ role: string; stopReason?: string }>; turnInFlight: boolean }>(`/api/chats/${id}`);
+			return !c.turnInFlight && c.messages.at(-1)?.stopReason === "error";
+		}, "the turn to fail");
+	} finally {
+		stub.setResponder(baseResponder);
+	}
+	// plain-text, not text-only: (e) turned image input on for text-only.
+	await server.json(`/api/chats/${id}/settings`, { method: "PUT", body: { model: { provider: "e2e-stub", id: "plain-text" } } });
+	const page = await chrome.browser.newPage();
+	await openChat(page, id);
+	const before = stub.requests.length;
+	await page.waitForSelector("[data-testid=retry-failed-turn]", { timeout: 30_000 });
+	await page.click("[data-testid=retry-failed-turn]");
+	await until(async () => /plain-text can't read images/.test(await page.$eval("[data-testid=chat-error]", (el) => el.textContent ?? "").catch(() => "")), "the banner to say why");
+	assert.equal(stub.requests.length, before, "nothing reached the provider");
+	const refused = await server.api("/api/chat", { body: { chatId: id, input: { type: "retry" } } });
+	assert.equal(refused.status, 400);
+	assert.equal((await refused.json()).code, "images_unsupported");
+	assert.equal(stub.requests.length, before, "the API retry sent nothing either");
+	await page.close();
+});
+
+/** Open the new-session page, paste `image`, send `text`, and land on the chat. */
+async function startWithImage(page: Page, image: Buffer, text: string): Promise<string> {
+	await page.goto(`${server.url}/chat/new`, { waitUntil: "domcontentloaded", timeout: 180_000 });
+	await hydrated(page, "[data-testid=composer] textarea");
+	await fileEvent(page, "paste", image, "first.png");
+	await page.waitForSelector("[data-testid=attachment-chip]", { timeout: 30_000 });
+	await sendFromComposer(page, text);
+	await page.waitForFunction(() => /\/chat\/(?!new)[^/?]+/.test(location.pathname), { timeout: 60_000 });
+	return page.evaluate(() => location.pathname.split("/").pop()!);
+}
+
+const composerDraft = async (page: Page) => ({
+	text: await page.$eval("[data-testid=composer] textarea", (el) => (el as HTMLTextAreaElement).value),
+	chips: (await page.$$("[data-testid=attachment-chip]")).length,
+});
+
+// LH-63 (#107): a first message that fails comes back with its images as
+// chips, and only the chips still showing go with the resend.
+test("a failed first message comes back with its image chips, and a removed chip is not sent", async () => {
+	const page = await chrome.browser.newPage();
+	await page.setViewport({ width: 1280, height: 800 });
+	const sends: Array<string | undefined> = [];
+	let failNext = true;
+	await page.setRequestInterception(true);
+	page.on("request", (r) => {
+		if (r.method() === "POST" && new URL(r.url()).pathname === "/api/chat") {
+			sends.push(r.postData());
+			if (failNext) {
+				failNext = false;
+				void r.respond({ status: 500, contentType: "text/plain", body: "The server had a hiccup." });
+				return;
+			}
+		}
+		void r.continue();
+	});
+	const prompt = "Teach me what this picture shows";
+	const id = await startWithImage(page, png(70, 140, 210), prompt);
+	await until(async () => {
+		const draft = await composerDraft(page);
+		return draft.text === prompt && draft.chips === 1;
+	}, "the text and the image chip to come back");
+	await page.click("[data-testid=attachment-chip] button");
+	await until(async () => (await composerDraft(page)).chips === 0, "the chip to go");
+	await page.focus("[data-testid=composer] textarea");
+	await page.keyboard.press("Enter");
+	const chat = await settled(id, 1);
+	assert.equal(sends.length, 2);
+	assert.equal((JSON.parse(sends[1]!) as { input: { attachments?: unknown } }).input.attachments, undefined, "the resend carries no image");
+	assert.equal((chat.messages[0] as { content?: unknown }).content, prompt);
+	assert.equal(chat.messages[0]!.attachments, undefined, "the record holds no image");
+	await page.close();
+});
+
+test("a first message interrupted by a reload comes back with its image chip, and the resend carries it", async () => {
+	const page = await chrome.browser.newPage();
+	await page.setViewport({ width: 1280, height: 800 });
+	let hold = true;
+	let held = false;
+	await page.setRequestInterception(true);
+	page.on("request", (r) => {
+		// The first send never answers: the page reloads mid-start.
+		if (hold && r.method() === "POST" && new URL(r.url()).pathname === "/api/chat") {
+			held = true;
+			return;
+		}
+		void r.continue();
+	});
+	const image = png(210, 140, 70);
+	const prompt = "Explain the picture I pasted";
+	const id = await startWithImage(page, image, prompt);
+	await until(() => held, "the first send to be held");
+	hold = false;
+	await page.reload({ waitUntil: "domcontentloaded", timeout: 180_000 });
+	await hydrated(page, "[data-testid=composer] textarea");
+	await until(async () => {
+		const draft = await composerDraft(page);
+		return draft.text === prompt && draft.chips === 1;
+	}, "the text and the image chip to come back after the reload");
+	assert.equal((await server.json<{ messages: unknown[] }>(`/api/chats/${id}`)).messages.length, 0, "nothing reached the server");
+	await page.focus("[data-testid=composer] textarea");
+	await page.keyboard.press("Enter");
+	const chat = await settled(id, 1);
+	assert.deepEqual((chat.messages[0]!.attachments as Array<{ id: string }>).map((a) => a.id), [idOf(image)], "the visible chip went with the resend");
+	await page.close();
+});
