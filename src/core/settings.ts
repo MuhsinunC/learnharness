@@ -643,12 +643,18 @@ function sanitizeContextWindows(raw: Record<string, unknown>): Record<string, nu
 	return out;
 }
 
+/** The most a provider may count over pi-ai's estimate before the app
+ *  calls it a misread (LH-54): above it the estimate missed part of the
+ *  request, which is no tokenizer difference. */
+export const MAX_OVERCOUNT = 2;
+
 /** Ratios above 1 (a provider counting no more than pi-ai's estimate
- *  needs no extra margin), kept as stored: never floored like a window. */
+ *  needs no extra margin), never floored like a window, and at most
+ *  MAX_OVERCOUNT: a hand-edited 50 would hold back every request. */
 function sanitizeOvercounts(raw: Record<string, unknown>): Record<string, number> {
 	const out: Record<string, number> = {};
 	for (const [key, value] of Object.entries(raw)) {
-		if (typeof value === "number" && Number.isFinite(value) && value > 1) out[key] = value;
+		if (typeof value === "number" && Number.isFinite(value) && value > 1) out[key] = Math.min(value, MAX_OVERCOUNT);
 	}
 	return out;
 }

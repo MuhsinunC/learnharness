@@ -9,9 +9,12 @@
  * equal to the Default, clears the pair back to its catalog default; a
  * clear needs no catalog entry, so a pair whose model left the catalog
  * can still be cleared. Either save also forgets the limit a provider
- * stated for the pair (learnedContextLimits, LH-55): the user's word on
- * the window replaces it, and a real limit is learned again only from a
- * rejection newer than the save (learnedLimitsClearedAt). Every save
+ * stated for the pair (learnedContextLimits, LH-55) and the overcount
+ * its rejections showed (learnedOvercounts, LH-54, which the same
+ * rejections teach): the user's word on the window replaces them, and
+ * each is learned again only from a rejection newer than the save
+ * (learnedLimitsClearedAt). This is also the one way to reset a ratio
+ * that holds back too much. Every save
  * tells open windows the catalog changed (models-changed, LH-54), so
  * their footers follow the new window.
  *
@@ -52,7 +55,8 @@ export async function PUT(request: Request) {
 		if (pin === null) delete windows[key];
 		else windows[key] = pin;
 		const { [key]: _learned, ...learnedContextLimits } = record.learnedContextLimits ?? {};
-		return { ...record, contextWindows: windows, learnedContextLimits, learnedLimitsClearedAt: { ...record.learnedLimitsClearedAt, [key]: Date.now() } };
+		const { [key]: _overcount, ...learnedOvercounts } = record.learnedOvercounts ?? {};
+		return { ...record, contextWindows: windows, learnedContextLimits, learnedOvercounts, learnedLimitsClearedAt: { ...record.learnedLimitsClearedAt, [key]: Date.now() } };
 	});
 	emit("models-changed", {});
 	return Response.json({ settings: next });

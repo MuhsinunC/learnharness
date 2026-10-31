@@ -89,15 +89,18 @@ const tokenCount = (raw: string | undefined) => Number(raw?.replace(/,/g, ""));
 
 /** The INPUT a rejection says the provider counted, in tokens, or null
  *  (LH-54): OpenRouter sums its parts ("(24953 of text input, 3331 of
- *  tool input, 12933 in the output)"), OpenAI names the messages ("8500
- *  in the messages" or "your messages resulted in 9192 tokens"),
- *  Anthropic the prompt ("prompt is too long: 213462 tokens"). Never the
- *  reply's max tokens, which the provider adds on top. */
+ *  tool input, 12933 in the output)"), OpenAI names them ("(8000 in the
+ *  messages, 500 in the functions, and 1500 in the completion)", or
+ *  "your messages resulted in 9192 tokens"), Anthropic the prompt
+ *  ("prompt is too long: 213462 tokens"). The messages and the tool
+ *  declarations, as pi-ai's estimate counts them; never the reply's max
+ *  tokens (OpenAI's completion, OpenRouter's output), which the provider
+ *  adds on top. */
 export function reportedInputTokens(text: string | undefined): number | null {
 	if (!text) return null;
-	const parts = [...text.matchAll(/([\d,]+) of [a-z ]*?input/gi)].map((m) => tokenCount(m[1]));
+	const parts = [...text.matchAll(/([\d,]+) (?:of [a-z ]*?input|in the (?:messages|functions|tools))\b/gi)].map((m) => tokenCount(m[1]));
 	if (parts.length) return parts.every(Number.isFinite) ? parts.reduce((a, b) => a + b, 0) : null;
-	const n = tokenCount((/([\d,]+) in the messages/i.exec(text) ?? /messages resulted in ([\d,]+) tokens/i.exec(text) ?? /prompt is too long: ([\d,]+) tokens/i.exec(text))?.[1]);
+	const n = tokenCount((/messages resulted in ([\d,]+) tokens/i.exec(text) ?? /prompt is too long: ([\d,]+) tokens/i.exec(text))?.[1]);
 	return Number.isFinite(n) && n > 0 ? n : null;
 }
 

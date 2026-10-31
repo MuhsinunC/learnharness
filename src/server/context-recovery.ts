@@ -46,6 +46,7 @@ import {
 	reportedContextLimit,
 	reportedInputTokens,
 	sentEstimate,
+	MAX_OVERCOUNT,
 	type ChatRecord,
 	type CompactionDetails,
 	type LhMarkerMessage,
@@ -86,44 +87,47 @@ function rejectionInForce(overflow: LhMessage | undefined, model: { provider: st
 	return cleared === undefined || overflow.timestamp > cleared;
 }
 
-/** An overcount above this is no tokenizer difference: the estimate
- *  missed part of the request, and nothing is learned from it. */
-const MAX_OVERCOUNT = 2;
-
-/** How much more than pi-ai's estimate this rejection says the provider
- *  counted (LH-54): its stated input over the estimate the engine
- *  stamped when it sent the request. Undefined when either is missing
- *  or the provider counted no more. */
-function rejectionOvercount(overflow: LhMessage | undefined): number | undefined {
+/** What this rejection says of the model's overcount (LH-54): its stated
+ *  input over the estimate the engine stamped when it sent the request.
+ *  "none" when the provider counted no more than the estimate; undefined
+ *  when either count is missing, or for a ratio above MAX_OVERCOUNT (the
+ *  estimate missed part of the request: a misread, not a tokenizer). */
+function rejectionOvercount(overflow: LhMessage | undefined): number | "none" | undefined {
 	const counted = reportedInputTokens(overflowProviderText(overflow));
 	const estimate = sentEstimate(overflow);
 	if (!counted || !estimate) return undefined;
 	const ratio = counted / estimate;
-	return ratio > 1 && ratio <= MAX_OVERCOUNT ? ratio : undefined;
+	return ratio <= 1 ? "none" : ratio <= MAX_OVERCOUNT ? ratio : undefined;
 }
 
 /** Remember what the chat's newest rejection states for its model — its
  *  own settings keys, never the user's window: the limit, and how much
- *  more than pi-ai's estimate the provider counted (the larger of that
- *  and what an earlier rejection showed). A held-back request has no
- *  provider text, so it never teaches either, nor does a rejection no
- *  longer in force (rejectionInForce). */
+ *  more than pi-ai's estimate the provider counted. The newest count
+ *  replaces the learned ratio, down as well as up (LH-54 review), as the
+ *  newest stated limit replaces the limit: a ratio learned too high would
+ *  otherwise hold back requests for good, while one too low costs one
+ *  more rejection, which teaches it again. A rejection that states no
+ *  count, or a misread one, leaves the ratio as it was. A held-back
+ *  request has no provider text, so it never teaches either, nor does a
+ *  rejection no longer in force (rejectionInForce). */
 export function learnStatedLimit(model: { provider: string; id: string }, messages: readonly LhMessage[]): void {
 	const overflow = lastOverflow(messages);
 	const stated = reportedContextLimit(overflowProviderText(overflow));
 	const overcount = rejectionOvercount(overflow);
-	if (!stated && !overcount) return;
+	if (!stated && overcount === undefined) return;
 	const modelId = `${model.provider}:${model.id}`;
 	let learned = false;
 	updateSettings((record) => {
 		if (!rejectionInForce(overflow, model, record.learnedLimitsClearedAt)) return record;
 		learned = !!stated && record.learnedContextLimits?.[modelId] !== stated;
-		const higher = !!overcount && overcount > (record.learnedOvercounts?.[modelId] ?? 1);
-		return learned || higher
+		const { [modelId]: known, ...others } = record.learnedOvercounts ?? {};
+		const ratio = overcount === "none" ? undefined : overcount ?? known;
+		const changed = ratio !== known;
+		return learned || changed
 			? {
 				...record,
 				...(learned ? { learnedContextLimits: { ...record.learnedContextLimits, [modelId]: stated! } } : {}),
-				...(higher ? { learnedOvercounts: { ...record.learnedOvercounts, [modelId]: overcount } } : {}),
+				...(changed ? { learnedOvercounts: ratio === undefined ? others : { ...others, [modelId]: ratio } } : {}),
 			}
 			: record;
 	});
@@ -151,9 +155,14 @@ const WIRE_CHARS_PER_TOKEN = 3.5;
 /** The share of its room a recovery retry fills, the system prompt and
  *  tool declarations included (LH-55). The OB-0645 live check counted
  *  OpenRouter's pre-flight at about 1.18x the billed tokens: 1/1.18 ≈
- *  0.85, less some headroom. The room itself already takes off an
- *  overcount the rejection stated (LH-54, the engine's margin); the
- *  share covers a provider whose rejection states no count of its own. */
+ *  0.85, less some headroom, for a provider whose rejection states no
+ *  count. It stays when the overcount is known (LH-54 review), though
+ *  the room then takes the overcount off already: the share is also the
+ *  next turn's growth room under the threshold compaction. With no
+ *  overcount the reply's room is the threshold; with a ratio r it sits
+ *  (reserve − 4,096 − reply floor) × (1 − 1/r) above it. At 40,960 with
+ *  a 16k max output and 1.18x, a full room lands 1,406 tokens over the
+ *  21,156 threshold, and the next turn would condense again. */
 const RETRY_FIT_SHARE = 0.8;
 
 /** Per-line cap for the learner's dropped lines in the fallback marker. */
