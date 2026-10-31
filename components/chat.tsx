@@ -286,7 +286,7 @@ export function Chat({
 	// Image attachments (LH-39): the server checks the chat's model on
 	// every intake, so a model that can't read images shows the notice.
 	const attach = useAttachments(chatId);
-	const { takePaths } = attach;
+	const { takePaths, clear: clearChips, restore: restoreChips } = attach;
 
 	// A turn running server-side, attached to no live view of ours (navigate
 	// away mid-turn, or a wake turn discovered mid-session): the reattach
@@ -613,22 +613,26 @@ export function Chat({
 		return () => { openingMountedRef.current = false; };
 	}, []);
 
-	const deliverOpeningPrompt = useCallback((prompt: string) => {
+	/** `images` are the opening message's chips: the new-session page's
+	 *  on the first delivery, the visible ones on a resend. A failure puts
+	 *  them back with the text, and only they go (LH-63). */
+	const deliverOpeningPrompt = useCallback((prompt: string, images: AttachmentRef[]) => {
 		openingDraftRef.current = prompt;
 		// Persist uncertainty BEFORE the POST: another mount must restore,
 		// not race the still-arriving request. No storage means no auto-send.
 		if (!stashOpeningPrompt(chatId, prompt, true)) {
 			applyText(prompt);
+			restoreChips(images);
 			setOpeningError(true);
 			return;
 		}
 		setOpeningError(false);
-		draftRef.current = { text: prompt, refs: initialAttachments }; // The existing 503 flow must restore it too.
+		draftRef.current = { text: prompt, refs: images }; // The existing 503 flow must restore it too.
 		applyText("");
-		// Images from the new-session page and image paths in the opening
-		// message attach like a composer send's (LH-39).
+		clearChips();
+		// Image paths in the opening message attach like a composer send's (LH-39).
 		void takePaths(prompt).then(({ text, refs }) => {
-			const attachments = [...initialAttachments, ...refs];
+			const attachments = [...images, ...refs.filter((r) => !images.some((i) => i.id === r.id))];
 			return send({ type: "text", text, ...(attachments.length ? { attachments } : {}) }, () => {
 				clearOpeningPrompt(chatId);
 				openingDraftRef.current = null;
@@ -637,9 +641,10 @@ export function Chat({
 		}).then(accepted => {
 			if (!accepted && openingMountedRef.current && openingDraftRef.current === prompt && !textRef.current) {
 				applyText(prompt);
+				restoreChips(images);
 			}
 		});
-	}, [chatId, send, applyText, takePaths, initialAttachments]);
+	}, [chatId, send, applyText, takePaths, clearChips, restoreChips]);
 
 	const sentInitial = useRef(false);
 	useEffect(() => {
@@ -653,11 +658,13 @@ export function Chat({
 		}
 		openingDraftRef.current = prompt!;
 		if (entry?.attempted || initiallyInFlight) {
-			applyText(prompt!); // Interrupted start: the learner explicitly resends.
+			// Interrupted start: the learner explicitly resends.
+			applyText(prompt!);
+			restoreChips(initialAttachments);
 			return;
 		}
-		deliverOpeningPrompt(prompt!);
-	}, [chatId, initialPrompt, initialMessages, initiallyInFlight, deliverOpeningPrompt, applyText]);
+		deliverOpeningPrompt(prompt!, initialAttachments);
+	}, [chatId, initialPrompt, initialAttachments, initialMessages, initiallyInFlight, deliverOpeningPrompt, applyText, restoreChips]);
 
 	useEffect(() => {
 		if (!hasConfirmedConversation) return;
@@ -665,11 +672,14 @@ export function Chat({
 		// A later canonical read may confirm a lost acknowledgment. Clear
 		// only the unchanged recovered draft, never the learner's newer work.
 		const opening = openingDraftRef.current;
-		if (opening !== null && textRef.current === opening) applyText("");
+		if (opening !== null && textRef.current === opening) {
+			applyText("");
+			clearChips();
+		}
 		if (draftRef.current?.text === opening) draftRef.current = null;
 		openingDraftRef.current = null;
 		setOpeningError(false);
-	}, [chatId, hasConfirmedConversation, applyText]);
+	}, [chatId, hasConfirmedConversation, applyText, clearChips]);
 
 	// THE BYOK REFUSAL (owner, 2026-09-22): a send that lands the server's
 	// 503 models_not_configured envelope renders as the SETUP FLOW, never
@@ -1288,8 +1298,8 @@ export function Chat({
 		}
 		const { text: t, refs } = await attach.takePaths(textRef.current.trim());
 		if (!t && refs.length === 0) return;
-		if (openingDraftRef.current !== null && refs.length === 0) {
-			deliverOpeningPrompt(t);
+		if (openingDraftRef.current !== null) {
+			deliverOpeningPrompt(t, refs);
 			return;
 		}
 		draftRef.current = { text: t, refs }; // the refusal flow's preserve-and-replay seam
