@@ -392,7 +392,10 @@ export async function handleChatInput(
 	// (pi-ai keys image handling on model.input), and a send with images
 	// for a model that can't take them refuses before anything persists.
 	conversationEngine = withImageSupport(conversationEngine);
-	const imageRefusal = input.type === "text" ? imageInputRefusal(conversationEngine.model, input.attachments) : null;
+	// A retry re-sends the last learner message, its images included, to
+	// the model the chat runs now: the same gate (LH-63).
+	const retried = input.type === "retry" ? record.messages.findLast((m) => m.role === "user") : undefined;
+	const imageRefusal = imageInputRefusal(conversationEngine.model, input.type === "text" ? input.attachments : retried?.role === "user" ? retried.attachments : undefined);
 	if (imageRefusal) return imageRefusal;
 	const modelIdForCompaction = `${conversationEngine.model.provider}:${conversationEngine.model.id}`;
 	// The window seam (LH-40): never above a limit the provider stated.
