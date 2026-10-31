@@ -20,6 +20,9 @@ import { desktopPageKey } from "../../src/server/desktop-access.ts";
 //     the root that refreshes it is NativeSubscriptionUIProvider (the web
 //     bridge hears the server's subscriptions-changed for every provider,
 //     ChatGPT included); the sidebar's own refresh is the Electron one.
+//     LH-54: a change made while the page's event channel is down reaches
+//     the page's key readers (the "keys" signal) when it reopens; a reopen
+//     with nothing changed sends no such signal.
 //   - The desktop app's server, opened in a browser before any password:
 //     the login page says to use the desktop window, instead of an app
 //     whose every API call is refused.
@@ -47,8 +50,11 @@ async function boot(options: Parameters<typeof bootServer>[0]): Promise<LhServer
 
 const COMPOSER = "[data-testid=composer] textarea";
 
-test("a ChatGPT sign-out made through the server reaches the open page's models without a reload", async () => {
-	const MODEL = "gpt-5";
+const MODEL = "gpt-5";
+
+/** A server whose web owner holds a saved ChatGPT account, with every
+ *  slot on MODEL. */
+async function signedInChatGPT(): Promise<LhServer> {
 	const stub: StubProvider = await startStubProvider(() => reply.text("ok"), { chatgptModels: [{ slug: MODEL, display_name: "GPT-5", visibility: "list" }] });
 	cleanups.push(() => stub.close());
 	// A saved ChatGPT account with no refresh token: nothing ever reaches
@@ -69,13 +75,26 @@ test("a ChatGPT sign-out made through the server reaches the open page's models 
 		}],
 	}), { mode: 0o600 });
 	const slot = { model: { provider: "chatgpt", id: MODEL } };
-	const server = await boot({
+	return boot({
 		ticket: TICKET,
 		providers: [],
 		settings: { version: 1, models: { strong: slot, cheap: slot, vision: slot }, graph: { enabled: false } },
 		env: { LH_AUTH_FILE: path.join(authDir, "auth.json"), LH_E2E_CHATGPT_BASE_URL: stub.baseUrl },
 	});
+}
 
+/** Another tab (or device) signs the account out, through the server's controls. */
+async function signOut(server: LhServer): Promise<void> {
+	const res = await fetch(`${server.url}/api/subscriptions`, {
+		method: "POST",
+		headers: { "content-type": "application/json", "x-learnharness-subscriptions": "1", origin: server.url },
+		body: JSON.stringify({ providerId: "chatgpt", op: "logout", id: "e2e-account" }),
+	});
+	assert.equal(res.status, 200, await res.clone().text());
+}
+
+test("a ChatGPT sign-out made through the server reaches the open page's models without a reload", async () => {
+	const server = await signedInChatGPT();
 	const page = await (await chrome()).browser.newPage();
 	await page.setViewport({ width: 1280, height: 800 });
 	const catalogRead = page.waitForResponse(async (r) => new URL(r.url()).pathname === "/api/models" && r.ok() && (await r.text()).includes(`"${MODEL}"`), { timeout: 180_000 });
@@ -88,16 +107,52 @@ test("a ChatGPT sign-out made through the server reaches the open page's models 
 	assert.equal(await page.$("[data-testid=setup-cta-keys]"), null);
 	await page.evaluate(() => { (window as unknown as { lhNoReload: boolean }).lhNoReload = true; });
 
-	// Another tab (or device) signs out, through the server's controls.
-	const res = await fetch(`${server.url}/api/subscriptions`, {
-		method: "POST",
-		headers: { "content-type": "application/json", "x-learnharness-subscriptions": "1", origin: server.url },
-		body: JSON.stringify({ providerId: "chatgpt", op: "logout", id: "e2e-account" }),
-	});
-	assert.equal(res.status, 200, await res.clone().text());
+	await signOut(server);
 
 	await page.waitForSelector("[data-testid=setup-cta-keys]", { timeout: 60_000 });
 	assert.equal(await page.evaluate(() => (window as unknown as { lhNoReload?: boolean }).lhNoReload), true, "the same page, never reloaded");
+});
+
+/** Records every settings signal the page dispatches (window.lhSaved).
+ *  "keys" makes every key reader read again: the setup dialog's key
+ *  list, the catalog. */
+const RECORD_SAVED = `window.lhSaved = []; window.addEventListener("lh:settings-saved", (e) => window.lhSaved.push(e.detail.section));`;
+type SavedWindow = { lhSaved: string[] };
+
+test("a sign-out made while the page's event channel is down reaches its key readers when the channel reopens; a reopen with no change signals nothing (LH-54)", async () => {
+	const server = await signedInChatGPT();
+	const page = await (await chrome()).browser.newPage();
+	await page.setViewport({ width: 1280, height: 800 });
+	await page.evaluateOnNewDocument(DROPPABLE_CHANNEL);
+	await page.evaluateOnNewDocument(RECORD_SAVED);
+	let statusReads = 0;
+	page.on("response", (r) => { if (new URL(r.url()).pathname === "/api/subscriptions" && r.request().method() === "GET") statusReads++; });
+	const catalogRead = page.waitForResponse(async (r) => new URL(r.url()).pathname === "/api/models" && r.ok() && (await r.text()).includes(`"${MODEL}"`), { timeout: 180_000 });
+	await page.goto(`${server.url}/chat/new`, { waitUntil: "domcontentloaded", timeout: 180_000 });
+	await hydrated(page, COMPOSER);
+	await catalogRead;
+	await new Promise((resolve) => setTimeout(resolve, 1000));
+	const saved = () => page.evaluate(() => (window as unknown as SavedWindow).lhSaved);
+	const channel = (op: "drop" | "reopen") => page.evaluate((o) => (window as unknown as ChannelWindow).lhChannel[o](), op);
+
+	// A blip with nothing changed: the page re-reads its connections and
+	// signals nothing (a "keys" signal would clear its catalog).
+	const reads = statusReads;
+	await channel("drop");
+	await channel("reopen");
+	await until(() => statusReads > reads, "the reopened page to re-read its connections");
+	await new Promise((resolve) => setTimeout(resolve, 1000));
+	assert.deepEqual(await saved(), [], "no settings signal for a reopen that changed nothing");
+
+	// Signed out while the channel is down: the page hears nothing then,
+	// and its key readers learn of it when the channel reopens.
+	await channel("drop");
+	await signOut(server);
+	await new Promise((resolve) => setTimeout(resolve, 1000));
+	assert.deepEqual(await saved(), [], "nothing reached the page while its channel was down");
+	await channel("reopen");
+	await until(async () => (await saved()).includes("keys"), "the reopened page's keys signal", 30_000);
+	await page.waitForSelector("[data-testid=setup-cta-keys]", { timeout: 60_000 });
 });
 
 test("the desktop app's server in a plain browser gets the login page, which says to use the window; the window still opens the app", async () => {

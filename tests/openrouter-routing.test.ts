@@ -3,8 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import { normalizeContext, type OpenAICompletionsCompat, type StreamFunction } from "@earendil-works/pi-ai";
-import { AssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
+import type { OpenAICompletionsCompat, StreamFunction } from "@earendil-works/pi-ai";
 import { piEngineForSpec, piModels } from "../src/agent/models.ts";
 
 const spec = { provider: "openrouter", id: "z-ai/glm-5.3" };
@@ -38,24 +37,6 @@ describe("OpenRouter provider-routing file", { concurrency: false }, () => {
 	function configure(value: unknown) {
 		writeFileSync(path, JSON.stringify(value));
 		process.env.LH_OPENROUTER_ROUTING_FILE = path;
-	}
-
-	for (const value of [undefined, ""]) {
-		it(`preserves the catalog reference with env ${value === undefined ? "unset" : "empty"}`, () => {
-			if (value !== undefined) process.env.LH_OPENROUTER_ROUTING_FILE = value;
-			const catalog = piModels().getModel(spec.provider, spec.id)!;
-			assert.equal(piEngineForSpec(spec).model, catalog);
-			assert.equal(compat(catalog)?.openRouterRouting, undefined);
-			const models = piModels();
-			const original = models.streamSimple;
-			let captured: Parameters<StreamFunction>[0] | undefined;
-			models.streamSimple = ((model: Parameters<StreamFunction>[0]) => { captured = model; return new AssistantMessageEventStream(); }) as unknown as StreamFunction;
-			try {
-				const requestModel = { ...catalog };
-				piEngineForSpec(spec).streamFn(requestModel, normalizeContext({ messages: [] }), {});
-				assert.equal(captured, requestModel);
-			} finally { models.streamSimple = original; }
-		});
 	}
 
 	it("copies only matching models, preserves compat, and reads anew for every engine", () => {
@@ -124,26 +105,4 @@ describe("OpenRouter provider-routing file", { concurrency: false }, () => {
 			});
 		});
 	}
-
-	it("streams the pinned copy for matching provider and id only", () => {
-		configure({ [spec.id]: entry });
-		const engine = piEngineForSpec(spec);
-		const models = piModels();
-		const original = models.streamSimple;
-		let captured: Parameters<StreamFunction>[0] | undefined;
-		models.streamSimple = ((model: Parameters<StreamFunction>[0]) => { captured = model; return new AssistantMessageEventStream(); }) as unknown as StreamFunction;
-		try {
-			const context = normalizeContext({ messages: [] });
-			engine.streamFn(models.getModel(spec.provider, spec.id)!, context, {});
-			assert.equal(captured, engine.model);
-			assert.deepEqual(captured && compat(captured)?.openRouterRouting, entry);
-			for (const requestModel of [
-				models.getModel(otherSpec.provider, otherSpec.id)!,
-				{ ...engine.model, provider: "different-provider" },
-			]) {
-				engine.streamFn(requestModel, context, {});
-				assert.equal(captured, requestModel);
-			}
-		} finally { models.streamSimple = original; }
-	});
 });

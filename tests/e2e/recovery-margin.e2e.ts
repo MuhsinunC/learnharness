@@ -33,6 +33,16 @@ import { maxOutputTokens, reply, startStubProvider, type StubProvider, type Stub
 // turn is held back or rejected. Sized from the flat 4,096, it fired at
 // 143.4k (the window less the reserve, under the default 150k) while
 // requests were held back from ~135.7k.
+// (l) LH-54 review: a stored ratio above any real overcount (a hand-
+// edited 50) is read as the most the app believes, 2x: the turn is sent,
+// not held back.
+// (m) A later rejection's count replaces the learned ratio, down as well
+// as up: a 1.5 learned before is replaced by the 1.18 the provider counts.
+// (n) Saving the pair's window in Settings forgets its learned ratio, as
+// it forgets the learned limit.
+// (o) OpenAI's breakdown ("N in the messages, M in the functions, and K
+// in the completion"): the input is messages plus functions, the very
+// parts pi-ai's estimate covers, so the ratio comes out at 1.18 too.
 
 const LIMIT = 40_960;
 const MAX_OUTPUT = 16_384;
@@ -108,7 +118,7 @@ const responder: StubResponder = (req) => {
 	}
 	if (counted(req) > limitOf(req)) {
 		rejections++;
-		return reply.contextLength(limitOf(req), countedParts(req));
+		return reply.contextLength(limitOf(req), countedParts(req), req.model === "stub-p" ? "openai" : "openrouter");
 	}
 	if (!isTurn(req)) return reply.text(summaryOf(req));
 	if (req.model === "stub-x") return reply.text(REPLY);
@@ -123,11 +133,11 @@ before(async () => {
 	const slot = { model: { provider: STUB, id: "stub-q" } };
 	server = await bootServer({
 		ticket: "lh-55",
-		providers: [{ id: STUB, baseUrl: stub.baseUrl, models: [...["stub-q", "stub-x", "stub-y"].map((id) => ({ id, contextWindow: LIMIT, maxTokens: MAX_OUTPUT })), { id: "stub-w", contextWindow: WIDE, maxTokens: MAX_OUTPUT }] }],
+		providers: [{ id: STUB, baseUrl: stub.baseUrl, models: [...["stub-q", "stub-x", "stub-y", "stub-p"].map((id) => ({ id, contextWindow: LIMIT, maxTokens: MAX_OUTPUT })), { id: "stub-w", contextWindow: WIDE, maxTokens: MAX_OUTPUT }] }],
 		settings: {
 			version: 1,
 			models: { strong: slot, cheap: slot, vision: slot },
-			contextWindows: { [`${STUB}:stub-q`]: 1_000_000, [`${STUB}:stub-x`]: 1_000_000, [`${STUB}:stub-y`]: 1_000_000 },
+			contextWindows: { [`${STUB}:stub-q`]: 1_000_000, [`${STUB}:stub-x`]: 1_000_000, [`${STUB}:stub-y`]: 1_000_000, [`${STUB}:stub-p`]: 1_000_000 },
 			graph: { enabled: false },
 		},
 	});
@@ -304,6 +314,9 @@ test("(f) the rejection that teaches the limit teaches the 1.18x count too: no r
 	assert.ok(isReply(c.messages.filter((m) => m.role === "assistant").at(-1)), "the big paste is answered");
 	const band = sent().filter((r) => wireTokens(r) > FLAT_MARGIN_COVERS);
 	assert.ok(band.length > 0, `a request went out above ${FLAT_MARGIN_COVERS} tokens (largest ${Math.max(...sent().map(wireTokens))})`);
+	// The margin reaches the wire as the reply's max_tokens (LH-54 review):
+	// every such request asks for less than the model's 16,384.
+	assert.ok(band.every((r) => maxOutputTokens(r) < MAX_OUTPUT), `max_tokens ${band.map(maxOutputTokens).join(", ")} clamped under ${MAX_OUTPUT}`);
 	assert.equal(rejections, 1, `no request was rejected after the first (counted ${band.map(counted).join(", ")} against ${LIMIT})`);
 });
 
@@ -327,4 +340,52 @@ test("(h) a 163,840 window that counts 1.18x: the chat compacts on time, and no 
 	assert.equal(rejections, 0, "no request was rejected");
 	assert.deepEqual(c.messages.filter((m) => m.heldBack).map((m) => m.errorMessage), [], "no turn was held back");
 	assert.deepEqual(markers(c).map((m) => m.details?.notice), [undefined], "the threshold compaction, never a recovery");
+});
+
+/** Turns until the chat's first marker: the rejection's recovery. */
+async function untilRecovered(id: string): Promise<Chat> {
+	let c = await chat(id);
+	for (let part = 1; markers(c).length === 0; part++) {
+		assert.ok(part <= 30, "the chat outgrows the real window within 30 turns");
+		c = await turn(id, paste(part));
+	}
+	return c;
+}
+
+test("(l) a stored ratio above any real overcount (a hand-edited 50) is read as 2x: the turn is sent, not held back", async () => {
+	const id = await newChat("A hand-edited ratio");
+	writeSettings({ learnedContextLimits: { [`${STUB}:stub-q`]: LIMIT }, learnedOvercounts: { [`${STUB}:stub-q`]: 50 } });
+	const start = stub.requests.length;
+	const c = await turn(id, paste(1));
+	const last = c.messages.filter((m) => m.role === "assistant").at(-1);
+	assert.ok(isReply(last), `the turn is answered (${last?.errorMessage ?? ""})`);
+	assert.ok(stub.requests.slice(start).some((r) => r.model === "stub-q" && isTurn(r)), "the request reached the provider");
+	assert.equal(rejections, 0);
+});
+
+test("(m) a later rejection's count replaces the learned ratio, down as well as up", async () => {
+	const id = await newChat("A ratio learned too high");
+	writeSettings({ learnedOvercounts: { [`${STUB}:stub-q`]: 1.5 } });
+	await untilRecovered(id);
+	assert.equal(rejections, 1, "the custom 1M window is rejected once");
+	const overcount = readSettings().learnedOvercounts?.[`${STUB}:stub-q`];
+	assert.ok(overcount !== undefined && Math.abs(overcount - 1.18) < 0.02, `the 1.18x count replaced the 1.5 (${overcount})`);
+});
+
+test("(n) saving the pair's window in Settings forgets its learned ratio; another pair keeps its own", async () => {
+	await newChat("A ratio the learner resets");
+	writeSettings({ learnedOvercounts: { [`${STUB}:stub-q`]: 1.18, [`${STUB}:stub-w`]: 1.18 } });
+	await server.json("/api/settings/context-windows", { method: "PUT", body: { provider: STUB, id: "stub-q", tokens: 1_000_000, confirmAboveMax: true } });
+	assert.equal(readSettings().learnedOvercounts?.[`${STUB}:stub-q`], undefined, "the saved pair's ratio is forgotten");
+	assert.equal(readSettings().learnedOvercounts?.[`${STUB}:stub-w`], 1.18, "the other pair's stays");
+});
+
+test("(o) OpenAI's breakdown of messages, functions and completion teaches the same 1.18x", async () => {
+	const id = await newChat("Counted high, in OpenAI's words", "stub-p");
+	await untilRecovered(id);
+	assert.equal(rejections, 1, "the custom 1M window is rejected once");
+	const rejected = stub.requests.filter((r) => r.model === "stub-p" && isTurn(r) && counted(r) > LIMIT).at(0)!;
+	assert.ok(toolWire(rejected) > 1_000, `the functions are a real share of the request (${toolWire(rejected)} of ${wireTokens(rejected)})`);
+	const overcount = readSettings().learnedOvercounts?.[`${STUB}:stub-p`];
+	assert.ok(overcount !== undefined && Math.abs(overcount - 1.18) < 0.02, `messages plus functions over the estimate (${overcount})`);
 });

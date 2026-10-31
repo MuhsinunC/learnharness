@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { after, before, test } from "node:test";
 import { bootServer, until, type LhServer } from "./harness/server.ts";
-import { hydrated, launchChrome, type HeadlessChrome } from "./harness/chrome.ts";
+import { DROPPABLE_CHANNEL, hydrated, launchChrome, type ChannelWindow, type HeadlessChrome } from "./harness/chrome.ts";
 import type { Page } from "puppeteer-core";
 import { maxOutputTokens, reply, startStubProvider, type StubProvider, type StubRequest, type StubResponder } from "./harness/stub-provider.ts";
 
@@ -579,34 +579,6 @@ test("(j) a limit learned in another chat reaches the open page's footer without
 		await page.close();
 	}
 });
-
-/** The page's EventSource behind a switch (window.lhChannel): drop()
- *  closes the connection as a sleep or a network blip does, so what the
- *  server sends meanwhile never arrives; reopen() connects again, which
- *  fires the page's own open handler. A script, not a function: tsx
- *  would wrap a nested class in its __name helper, which the page lacks. */
-const DROPPABLE_CHANNEL = `(() => {
-	const Native = window.EventSource;
-	window.EventSource = function (url, init) {
-		const listeners = [];
-		const channel = { onopen: null };
-		const connect = () => {
-			const es = new Native(url, init);
-			es.onopen = (ev) => channel.onopen && channel.onopen(ev);
-			for (const [name, cb] of listeners) es.addEventListener(name, cb);
-			return es;
-		};
-		let es = connect();
-		channel.addEventListener = (name, cb) => { listeners.push([name, cb]); es.addEventListener(name, cb); };
-		channel.close = () => es.close();
-		channel.drop = () => es.close();
-		channel.reopen = () => { es = connect(); };
-		window.lhChannel = channel;
-		return channel;
-	};
-})();`;
-
-type ChannelWindow = { lhChannel: { drop(): void; reopen(): void } };
 
 test("(k) a limit learned while the page's event channel is down reaches its footer when the channel reopens (LH-54)", async () => {
 	const open = await newChat("Open, then disconnected");
