@@ -428,8 +428,12 @@ test("(d) on a phone-size screen the app's own live updates, images and export d
 	try {
 		const page = await chrome.browser.newPage();
 		await page.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true });
-		const shut: string[] = [];
-		page.on("response", (res) => { if (new URL(res.url()).pathname.startsWith("/api") && [401, 403].includes(res.status())) shut.push(`${res.status()} ${res.url()}`); });
+		// A session's 403 on the computer routes (the app asks /api/subscriptions) is by design.
+		const shut: Array<Promise<string | null>> = [];
+		page.on("response", (res) => {
+			if (!new URL(res.url()).pathname.startsWith("/api") || ![401, 403].includes(res.status())) return;
+			shut.push(res.text().then((body) => (res.status() === 401 || body.includes(CSRF_REFUSAL.error) ? `${res.status()} ${res.url()}` : null), () => null));
+		});
 		await page.goto(`${origin}/chat/${chatId}`, { waitUntil: "domcontentloaded", timeout: 120_000 });
 		await page.type("#password", PASSWORD);
 		await Promise.all([page.waitForNavigation({ timeout: 120_000 }), page.click("button[type=submit]")]);
@@ -443,12 +447,15 @@ test("(d) on a phone-size screen the app's own live updates, images and export d
 		assert.deepEqual(seen, { width: 4, live: true });
 		const cdp = await chrome.browser.target().createCDPSession();
 		await cdp.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: downloads, eventsEnabled: true });
-		const finished = new Promise<string>((resolve) => cdp.on("Browser.downloadProgress", (e) => { if (e.state !== "inProgress") resolve(e.state); }));
+		const finished = new Promise<string>((resolve) => {
+			cdp.on("Browser.downloadProgress", (e) => { if (e.state !== "inProgress") resolve(e.state); });
+			setTimeout(() => resolve("no download within 60 s"), 60_000);
+		});
 		// What Export as Markdown in the chat menu does (components/sidebar.tsx).
 		await page.evaluate((id) => { const a = document.createElement("a"); a.href = `/api/chats/${id}/markdown`; a.download = ""; document.body.appendChild(a); a.click(); a.remove(); }, chatId);
-		assert.equal(await finished, "completed");
+		assert.equal(await finished, "completed", `refused: ${(await Promise.all(shut)).filter(Boolean)}`);
 		assert.deepEqual(fs.readdirSync(downloads), ["remote.md"], "the route's file, not a refusal");
-		assert.deepEqual(shut, [], "no request of the app's own was refused");
+		assert.deepEqual((await Promise.all(shut)).filter(Boolean), [], "no request of the app's own was refused");
 	} finally {
 		await chrome.close();
 		fs.rmSync(downloads, { recursive: true, force: true });
