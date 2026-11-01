@@ -57,7 +57,7 @@ import {
 	NOTES_EXTRACTOR_INSTRUCTIONS,
 } from "../src/agent/subagents/extraction.ts";
 import { getGraph, simplifyChains } from "../src/core/graph.ts";
-import { ModelsNotConfiguredError, ProviderKeyMissingError, providerKeyMissing, type ModelSlotName } from "../src/core/settings.ts";
+import { ModelsNotConfiguredError, ProviderKeyMissingError } from "../src/core/settings.ts";
 import { coverageOf, coverageSlots, messageViewLines } from "../src/core/coverage.ts";
 import { chatStore } from "../src/store/chats.ts";
 import { subscribe } from "../src/core/events.ts";
@@ -541,54 +541,6 @@ describe("the extraction pipeline (extractor → auditor → merger)", () => {
 			return true;
 		});
 		// nothing ran: no phase residue, no usage, no coverage writes
-		assert.equal(ledgers.readCoverage().length, 0);
-	});
-
-	it("key-presence refusal: a stage engine whose provider key is gone throws before any batch (provider-key interlude, 2026-09-25)", async () => {
-		const { chatId } = fixtureChat();
-		const ledgers = memoryLedgers();
-		const extractor = fauxEngine([]);
-		const auditor = fauxEngine([]);
-		const seen: Array<[string, ModelSlotName]> = [];
-		const pipeline = createExtractionPipeline({
-			chatStore,
-			graphStore: ledgers,
-			extractor,
-			auditor,
-			providerKeyMissing: (provider, tier) => {
-				seen.push([provider, tier]);
-				return providerKeyMissing(provider, [tier]);
-			},
-		});
-		await assert.rejects(pipeline.runExtraction(chatId), (err: unknown) => {
-			assert.ok(err instanceof ProviderKeyMissingError);
-			assert.equal(err.envelope.code, "provider_key_missing");
-			assert.equal(err.envelope.provider, extractor.model.provider, "the provider of the keyless engine");
-			assert.deepEqual(err.envelope.slots, ["cheap"], "extractor + auditor are the cheap tier");
-			return true;
-		});
-		// FIRST offender surfaces (extractor before auditor) — and nothing
-		// ran: the refusal lands before any batch, no coverage writes.
-		assert.deepEqual(seen, [[extractor.model.provider, "cheap"]]);
-		assert.equal(ledgers.readCoverage().length, 0);
-	});
-
-	it("key-presence pass-through: null from the check lets a stage through — the NEXT keyless stage surfaces (first-offender discipline)", async () => {
-		const { chatId } = fixtureChat();
-		const ledgers = memoryLedgers();
-		let calls = 0;
-		const pipeline = createExtractionPipeline({
-			chatStore,
-			graphStore: ledgers,
-			extractor: fauxEngine([]),
-			auditor: fauxEngine([]),
-			providerKeyMissing: (provider, tier) => (calls++ < 1 ? null : providerKeyMissing(provider, [tier])),
-		});
-		await assert.rejects(pipeline.runExtraction(chatId), (err: unknown) => {
-			assert.ok(err instanceof ProviderKeyMissingError, "the auditor's refusal surfaces after the extractor passed");
-			return true;
-		});
-		assert.equal(calls, 2, "both stages were checked, in order");
 		assert.equal(ledgers.readCoverage().length, 0);
 	});
 
@@ -2360,7 +2312,7 @@ describe("notes import completion and retry reliability", () => {
 		assert.deepEqual(await make(ledgers, submitModel("submit_findings", { propositions: [], chains: [] })).importNotes(input), { nodes: 0, chains: 0 });
 		assert.deepEqual(await make(ledgers).importNotes({ ...input, text: " \n" }), { nodes: 0, chains: 0 });
 		await assert.rejects(createExtractionPipeline({ chatStore, graphStore: ledgers }).importNotes({ ...input, text: "" }), ModelsNotConfiguredError);
-		await assert.rejects(createExtractionPipeline({ chatStore, graphStore: ledgers, extractor: submitModel("submit_findings", NOTES_FINDINGS), auditor: submitModel("submit_review", NOTES_VERDICT), providerKeyMissing: () => providerKeyMissing("openai", ["cheap"]) }).importNotes(input), ProviderKeyMissingError);
+		await assert.rejects(createExtractionPipeline({ chatStore, graphStore: ledgers, engineFor: () => { throw new ProviderKeyMissingError("openai", ["cheap"]); } }).importNotes(input), ProviderKeyMissingError);
 	});
 
 	it("isolates an ordinary failed chunk, reports partial, and keeps earlier/later merges and usage", async () => {

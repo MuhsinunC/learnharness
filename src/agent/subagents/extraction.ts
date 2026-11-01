@@ -10,7 +10,6 @@ import {
 	ProviderKeyMissingError,
 	ROLE_SLOT,
 	type ModelSlotName,
-	type ProviderKeyMissing,
 } from "../../core/settings.ts";
 import type { PiEngine } from "../models.ts";
 import { runSubagent } from "./pi-run.ts";
@@ -738,14 +737,6 @@ export interface ExtractionModels {
 	 *  slot → NOTHING) may end EMPTY → undefined; the front doors refuse
 	 *  with ModelsNotConfiguredError before any stage runs. */
 	engineFor?: (role: ModelRole) => PiEngine | undefined;
-	/** Key-presence gate (provider-key interlude, 2026-09-25): given a
-	 *  stage engine's provider + the role's slot tier, the injected check
-	 *  returns the refusal envelope when the provider's key is missing
-	 *  (null = run). Same injection discipline as the job runner's seam
-	 *  (the agent layer may not read the key store); absent in tests that
-	 *  inject engines directly (test engines never owe a key). A keyless
-	 *  stage refuses with ProviderKeyMissingError BEFORE any batch runs. */
-	providerKeyMissing?: (provider: string, tier: ModelSlotName) => ProviderKeyMissing | null;
 	/** Background-use consent for a subscription provider: the auth
 	 *  fallback (LH-37) never runs a stage on a sign-in whose background
 	 *  use is off. Absent = allowed. */
@@ -835,12 +826,24 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 	 *  and whether a configured stage's provider key is gone (provider-key
 	 *  interlude, 2026-09-25) — both refuse BEFORE any batch runs. */
 	function refuseIfStagesUnready(): void {
-		const stages: readonly [ModelRole, PiEngine | undefined][] = [
-			["extractor", stageEngine("extractor", deps.extractor)],
-			["auditor", stageEngine("auditor", deps.auditor)],
+		// The resolver throws for a pinned provider whose key is gone; that
+		// waits until every unset slot is reported.
+		const keyless: ProviderKeyMissingError[] = [];
+		const resolve = (role: ModelRole, override?: PiEngine): PiEngine | undefined | null => {
+			try {
+				return stageEngine(role, override);
+			} catch (err) {
+				if (!(err instanceof ProviderKeyMissingError)) throw err;
+				keyless.push(err);
+				return null;
+			}
+		};
+		const stages: readonly [ModelRole, PiEngine | undefined | null][] = [
+			["extractor", resolve("extractor", deps.extractor)],
+			["auditor", resolve("auditor", deps.auditor)],
 		];
 		const missing = new Set<ModelSlotName>();
-		for (const [role, engine] of stages) if (!engine) missing.add(ROLE_SLOT[role]);
+		for (const [role, engine] of stages) if (engine === undefined) missing.add(ROLE_SLOT[role]);
 		if (missing.size > 0) {
 			console.info(`[extraction] refused — no model configured for: ${[...missing].join(", ")}`);
 			throw new ModelsNotConfiguredError([...missing]);
@@ -848,12 +851,9 @@ export function createExtractionPipeline(deps: ExtractionPipelineDeps): Extracti
 		// Key-presence parity: first offender surfaces (extractor before
 		// auditor); fixing that key re-gates and the next run surfaces the
 		// next offender, if any.
-		for (const [role, engine] of stages) {
-			const refusal = deps.providerKeyMissing?.(engine!.model.provider, ROLE_SLOT[role]);
-			if (refusal) {
-				console.info(`[extraction] refused — ${JSON.stringify(refusal)}`);
-				throw new ProviderKeyMissingError(refusal.provider, refusal.slots);
-			}
+		if (keyless[0]) {
+			console.info(`[extraction] refused — ${JSON.stringify(keyless[0].envelope)}`);
+			throw keyless[0];
 		}
 	}
 	// THE SHARED REGISTRIES (runs() above — globalThis): every pipeline

@@ -100,10 +100,12 @@ export function strongKeyless(catalog: ModelCatalogResponse | undefined): boolea
 	return !catalog.providers.some((p) => p.id === strong.model.provider && p.keyPresent);
 }
 
-export function preSendRemedy(zeroKeys: boolean, catalog: ModelCatalogResponse | undefined): "setup" | "notice" | null {
-	const missing = strongKeyless(catalog);
-	if (missing && catalog?.slots.strong?.model.provider === "claude-code") return "notice";
-	return zeroKeys || missing ? "setup" : null;
+/** A Claude Code selection ("claude-code" or "claude-code:<id>") while the
+ *  provider is off: absent from the loaded catalog. A subscription has no
+ *  key to add, so every surface shows ClaudeCodeOffNotice where key setup
+ *  would open; v0.3.9's picker still serves when another provider exists. */
+export function claudeCodeOff(catalog: ModelCatalogResponse | undefined, selection: string | undefined): boolean {
+	return !!catalog && selection?.split(":")[0] === "claude-code" && !catalog.providers.some((p) => p.id === "claude-code");
 }
 
 export function ClaudeCodeOffNotice() {
