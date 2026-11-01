@@ -361,6 +361,46 @@ test("(c3) a server above_maximum refusal opens the modal at the server's maximu
 	await waitInput(A, "150000");
 });
 
+test("(c3b) a late catalog load keeps the open modal and the value it confirms", async () => {
+	// LH-52: a save's catalog re-read held back until the modal is open.
+	// When it lands it carries a new stored value; the modal must stay.
+	await openAgentSettings();
+	await waitInput(A, "150000");
+	const held: Array<() => void> = [];
+	let holding = true;
+	const onRequest = (request: import("puppeteer-core").HTTPRequest) => {
+		if (holding && new URL(request.url()).pathname === "/api/models") held.push(() => void request.continue());
+		else void request.continue();
+	};
+	await page.setRequestInterception(true);
+	page.on("request", onRequest);
+	try {
+		await typeWindow(A, "80000", "enter");
+		await until(() => diskWindows()?.[A] === 80_000, "80000 on disk");
+		await until(() => held.length > 0, "the catalog re-read to be held");
+		await typeWindow(A, "200000", "enter");
+		await page.waitForSelector(dialogSel);
+		holding = false;
+		for (const release of held.splice(0)) release();
+		await waitInput(A, "80000");
+		await new Promise((r) => setTimeout(r, 1000));
+		assert.ok(await page.$(dialogSel), "the modal is still open after the late load");
+		assert.match(await page.$eval(dialogSel, (el) => el.textContent ?? ""), /200k is above the known maximum/);
+		await page.click('[data-testid="context-window-understood"]');
+		await page.click('[data-testid="context-window-confirm"]');
+		await until(() => diskWindows()?.[A] === 200_000, "200000 on disk");
+		await until(async () => (await page.$(dialogSel)) === null, "the modal to close");
+	} finally {
+		holding = false;
+		for (const release of held.splice(0)) release();
+		page.off("request", onRequest);
+		await page.setRequestInterception(false);
+	}
+	await server.json("/api/settings/context-windows", { method: "PUT", body: { provider: STUB, id: "stub-a", tokens: 150_000, confirmAboveMax: true } });
+	await openAgentSettings();
+	await waitInput(A, "150000");
+});
+
 test("(c4) a pair whose model left the catalog can still be cleared", async () => {
 	const gone = `${STUB}:gone-model`;
 	writeDiskWindow(gone, 90_000);
