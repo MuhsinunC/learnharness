@@ -240,10 +240,13 @@ export function decideAccess(headers: Headers, env: Record<string, string | unde
 
 /** A request sent from this app's own pages, or by a
  * non-browser client (no Origin, no Sec-Fetch-Site). `Origin: null`
- * (sandboxed frames, data: URLs) counts as cross-site. */
-export function sameOriginRequest(headers: Headers): boolean {
+ * (sandboxed frames, data: URLs) counts as cross-site. `opened` also
+ * accepts `Sec-Fetch-Site: none`, a page the user opened themselves (typed,
+ * bookmarked, handed over by another app), which no web page can make a
+ * browser send; an Origin that comes with it still has to match. */
+export function sameOriginRequest(headers: Headers, { opened = false } = {}): boolean {
 	const site = headers.get("sec-fetch-site");
-	if (site !== null && site !== "same-origin") return false;
+	if (site !== null && site !== "same-origin" && !(opened && site === "none")) return false;
 	const origin = headers.get("origin");
 	if (origin === null) return true;
 	try {

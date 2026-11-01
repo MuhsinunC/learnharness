@@ -29,9 +29,12 @@ export function proxy(request: NextRequest) {
 	// learner's key, /api/models asks the ChatGPT and subscription bridges).
 	// Origin, else Sec-Fetch-Site decides; a client that sends neither
 	// (curl, the desktop main process) is not a browser page and passes as
-	// before.
-	if (api && !sameOriginRequest(request.headers)) {
-		return NextResponse.json({ error: "Change LearnHarness only from its own pages." }, { status: 403, headers: { "Cache-Control": "no-store" } });
+	// before. A read the user opened themselves (a typed or bookmarked URL)
+	// passes too, except on the computer routes: a link clicked in a mail or
+	// chat app looks the same.
+	const read = request.method === "GET" || request.method === "HEAD";
+	if (api && !sameOriginRequest(request.headers, { opened: read && kind !== "computer" })) {
+		return NextResponse.json({ error: "Use LearnHarness only from its own pages." }, { status: 403, headers: { "Cache-Control": "no-store" } });
 	}
 	let access: Access | null;
 	if (isDesktopServer()) {

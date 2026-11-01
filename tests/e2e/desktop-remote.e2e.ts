@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { createHmac, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { after, before, test } from "node:test";
 import { bootServer, freePort, until, type LhServer } from "./harness/server.ts";
 import { launchChrome } from "./harness/chrome.ts";
+import { png } from "./harness/png.ts";
 
 // LH-43, desktop app: remote access from a phone through the packaged
 // server. Electron cannot run here, so the harness's production build
@@ -167,6 +168,10 @@ test("(desktop) only the window sets the password; then Settings shows the serve
 		// What main.cjs gives the window: the cookie for its pages, the header for its API calls.
 		await page.setCookie({ name: "lh_desktop", value: PAGE_KEY, url: `http://127.0.0.1:${port}`, httpOnly: true, sameSite: "Strict" });
 		await page.setExtraHTTPHeaders(WINDOW_API);
+		// Chrome sends Fetch Metadata to 127.0.0.1, as the window's renderer does:
+		// none of the window's own requests may meet the cross-site refusal.
+		const shut: string[] = [];
+		page.on("response", (res) => { if (new URL(res.url()).pathname.startsWith("/api") && [401, 403].includes(res.status())) shut.push(`${res.status()} ${res.url()}`); });
 		await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: "domcontentloaded", timeout: 120_000 });
 		await until(async () => {
 			await page.click('[data-testid="settings-entry"]');
@@ -177,6 +182,19 @@ test("(desktop) only the window sets the password; then Settings shows the serve
 		assert.equal(await page.$eval('[data-testid="remote-access-command"]', (el) => el.textContent), `tailscale serve --bg ${port}`);
 		assert.equal(await page.$eval('[data-testid="remote-access-url"]', (el) => el.textContent), `https://${TS_HOST}`);
 		assert.equal(await page.$('[data-testid="remote-access-current"]'), null, "the window never asks for the current password");
+		const image = png(40, 120, 200);
+		const imageId = `${createHash("sha256").update(image).digest("hex")}.png`;
+		fs.mkdirSync(path.join(server.dataDir, "attachments"), { recursive: true });
+		fs.writeFileSync(path.join(server.dataDir, "attachments", imageId), image);
+		const seen = await page.evaluate(async (id) => {
+			const created = (await fetch("/api/chats", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title: "Window" }) })).status;
+			const img = new Image();
+			const width = await new Promise<number>((resolve) => { img.onload = () => resolve(img.naturalWidth); img.onerror = () => resolve(0); img.src = `/api/attachments/${id}`; });
+			const live = await new Promise<boolean>((resolve) => { const es = new EventSource("/api/events"); es.onopen = () => { es.close(); resolve(true); }; es.onerror = () => { es.close(); resolve(false); }; });
+			return { created, width, live };
+		}, imageId);
+		assert.deepEqual(seen, { created: 200, width: 4, live: true });
+		assert.deepEqual(shut, [], "no request of the window's own was refused");
 	} finally {
 		await chrome.close();
 	}
