@@ -112,13 +112,24 @@ Safe:
   (`127.0.0.1`) is refused through the `ts.net` address, and the other way
   round. After updating to a version with this check, every device logs in
   once more.
-- No other page can change anything in LearnHarness. Pages from other
-  websites don't get the cookie, but a page from another program serving
-  on `127.0.0.1` (any port) counts as the same site and does, so
-  LearnHarness refuses every change (and the login and logout forms) that
-  doesn't come from its own pages, and any request from another page to the
-  parts that act on the computer (the Claude Code check runs the program,
-  even just to read its status).
+- No other page can change anything in LearnHarness. A page from another
+  program serving on `127.0.0.1` (any port) counts as the same site, so
+  the login cookie goes along with its requests, and without a password
+  any request to `127.0.0.1` is trusted. So LearnHarness refuses every
+  change (and the login and logout forms) that doesn't come from its own
+  pages, and any other page's request to its API at all, reads included:
+  some reads act too (the Claude Code check runs the program, and starting
+  dictation creates a Deepgram token with your key). An address you type
+  or bookmark yourself, such as a chat export, still opens.
+- These checks rely on the browser saying where a request comes from (the
+  `Origin` and `Sec-Fetch-Site` headers). Browsers send `Sec-Fetch-Site`
+  only to `https`, `localhost` and `127.0.0.1` addresses, and browsers from
+  before 2023 (Safari before 16.4, for one) don't send it at all. Without
+  it, another page can still make LearnHarness carry out a read, such as
+  creating a Deepgram token, though it never sees the answer. So use a
+  current browser, and open LearnHarness only at `127.0.0.1` or its
+  `https://…ts.net` address, never through a plain-http forward such as
+  `tailscale serve --http`.
 - Wrong passwords are rate-limited: five failures lock that device out for
   15 minutes, and thirty failed logins in total lock every new login out
   for 15 minutes (devices already logged in keep working). A wrong current

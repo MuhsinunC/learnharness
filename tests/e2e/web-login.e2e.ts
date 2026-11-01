@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
@@ -7,7 +8,8 @@ import { after, before, test } from "node:test";
 import type { Page } from "puppeteer-core";
 import { bootServer, REPO_ROOT, until, type LhServer } from "./harness/server.ts";
 import { launchChrome } from "./harness/chrome.ts";
-import { API_ROUTES } from "../../src/server/desktop-access.ts";
+import { png } from "./harness/png.ts";
+import { API_ROUTES, apiRouteClass } from "../../src/server/desktop-access.ts";
 
 // LH-43: the web login, in web mode (`npm start`: the harness serves the
 // production build on 127.0.0.1, as scripts/web-server.mjs would). A phone
@@ -34,14 +36,15 @@ let chatId: string;
 interface RawResponse { status: number; headers: http.IncomingHttpHeaders; body: string }
 
 /** One HTTP request with exact headers (fetch cannot set Host). `headOnly`
- * resolves on the status line and drops the socket, for SSE streams. */
+ * resolves on the status line and drops the socket if the answer is an SSE
+ * stream; any other answer (a refusal) is read whole. */
 function raw(pathname: string, opts: { method?: string; headers?: Record<string, string>; body?: string; headOnly?: boolean } = {}): Promise<RawResponse> {
 	return new Promise((resolve, reject) => {
 		// A fresh connection each time: a kept-alive socket the server already
 		// closed resets the next request. Bodies carry a length, as browsers send.
 		const headers = opts.body === undefined ? opts.headers : { ...opts.headers, "content-length": String(Buffer.byteLength(opts.body)) };
 		const req = http.request({ host: "127.0.0.1", port, path: pathname, method: opts.method ?? "GET", headers, agent: false }, (res) => {
-			if (opts.headOnly) {
+			if (opts.headOnly && /^text\/event-stream/.test(res.headers["content-type"] ?? "")) {
 				resolve({ status: res.statusCode!, headers: res.headers, body: "" });
 				res.destroy();
 				return;
@@ -89,24 +92,66 @@ function loginLocal(ip: string): Promise<RawResponse> {
 	});
 }
 
+const CSRF_REFUSAL = { error: "Use LearnHarness only from its own pages." };
+
 /** CSRF: posts to /api/chats and /api/graph/import from other origins
  * (another server on 127.0.0.1 is the same site, so a session cookie goes
  * along) are refused before any route runs; the app's own page still gets
- * through. */
+ * through. `none` (opened by the user) passes reads only, never a post. */
 async function crossOriginRefused(headers: Record<string, string>, ownOrigin: string): Promise<void> {
 	const send = (extra: Record<string, string>) => Promise.all([
 		raw("/api/chats", { method: "POST", headers: { ...headers, ...JSON_BODY, ...extra }, body: JSON.stringify({ title: "Cross-origin" }) }),
 		raw("/api/graph/import", { method: "POST", headers: { ...headers, "content-type": "multipart/form-data; boundary=lh43", ...extra }, body: "--lh43--\r\n" }),
 	]);
-	for (const extra of [{ origin: `http://127.0.0.1:${port + 1}` }, { origin: "https://evil.example" }, { origin: "null" }, { "sec-fetch-site": "same-site" }, { "sec-fetch-site": "cross-site" }] as Array<Record<string, string>>) {
+	for (const extra of [{ origin: `http://127.0.0.1:${port + 1}` }, { origin: "https://evil.example" }, { origin: "null" }, { "sec-fetch-site": "same-site" }, { "sec-fetch-site": "cross-site" }, { "sec-fetch-site": "none" }] as Array<Record<string, string>>) {
 		for (const res of await send(extra)) {
 			assert.equal(res.status, 403, JSON.stringify(extra));
-			assert.deepEqual(JSON.parse(res.body), { error: "Change LearnHarness only from its own pages." }, JSON.stringify(extra));
+			assert.deepEqual(JSON.parse(res.body), CSRF_REFUSAL, JSON.stringify(extra));
 		}
 	}
 	const [chat, graph] = await send({ origin: ownOrigin, "sec-fetch-site": "same-origin" });
 	assert.equal(chat.status, 200, "the app's own page creates a chat");
 	assert.equal(graph.status, 400, "and reaches the import route itself (no files)");
+}
+
+/** LH-60: reads too. Another page's GET is refused before the route runs
+ * (/api/stt/token would mint a Deepgram token with the learner's key,
+ * /api/models asks the subscription bridges), on every GET route; the
+ * app's own page, a URL the user opened (`none`) and a non-browser client
+ * (`headers` alone: no Origin, no Sec-Fetch-Site) still reach the route.
+ * The harness has no Deepgram key, so reaching the token route is its 503.
+ * The sweep covers every route in API_ROUTES whatever its methods: the
+ * gate answers before routing, so a GET to a POST-only route gets the same
+ * refusal, and only that body tells it from a route's own 403. */
+async function crossSiteReadsRefused(headers: Record<string, string>, ownOrigin: string): Promise<void> {
+	for (const route of ["/api/stt/token", "/api/models"]) {
+		for (const extra of [{ "sec-fetch-site": "cross-site" }, { "sec-fetch-site": "same-site" }, { origin: "null" }, { origin: "https://evil.example" }] as Array<Record<string, string>>) {
+			const res = await raw(route, { headers: { ...headers, ...extra } });
+			assert.equal(res.status, 403, `${route} ${JSON.stringify(extra)}`);
+			assert.deepEqual(JSON.parse(res.body), CSRF_REFUSAL, `${route} ${JSON.stringify(extra)}`);
+		}
+		for (const extra of [{ origin: ownOrigin, "sec-fetch-site": "same-origin" }, { "sec-fetch-site": "none" }, {}] as Array<Record<string, string>>) {
+			const res = await raw(route, { headers: { ...headers, ...extra } });
+			if (route === "/api/stt/token") {
+				assert.equal(res.status, 503, `${route} ${JSON.stringify(extra)}: ${res.body}`);
+				assert.match(JSON.parse(res.body).message, /No DEEPGRAM_API_KEY/);
+			} else {
+				assert.equal(res.status, 200, `${route} ${JSON.stringify(extra)}: ${res.body}`);
+				assert(Array.isArray(JSON.parse(res.body).models), route);
+			}
+		}
+	}
+	assert.equal((await raw("/api/models", { method: "HEAD", headers: { ...headers, "sec-fetch-site": "none" } })).status, 200, "HEAD as GET");
+	let swept = 0;
+	await Promise.all(Object.keys(API_ROUTES).map(async (route) => {
+		for (const extra of [{ origin: "null" }, { origin: "https://evil.example" }, { "sec-fetch-site": "same-site" }, { "sec-fetch-site": "cross-site" }] as Array<Record<string, string>>) {
+			const res = await raw(route.replace(/\[[^\]]+\]/g, "x"), { headers: { ...headers, ...extra }, headOnly: true });
+			assert.equal(res.status, 403, `GET ${route} ${JSON.stringify(extra)}`);
+			assert.deepEqual(JSON.parse(res.body), CSRF_REFUSAL, `GET ${route} ${JSON.stringify(extra)}`);
+			swept++;
+		}
+	}));
+	assert.equal(swept, Object.keys(API_ROUTES).length * 4);
 }
 
 /** The `lh_session=…` pair from a login response. */
@@ -175,6 +220,7 @@ test("(a) no password: loopback needs no login, remote requests get nothing, and
 	const pathRead = await raw("/api/attachments/file", { method: "POST", headers: { ...local(), ...JSON_BODY }, body: JSON.stringify({ path: "/nonexistent/lh-43.png" }) });
 	assert(![401, 403].includes(pathRead.status), `without a password, host routes answer this computer as before (${pathRead.status})`);
 	await crossOriginRefused(local(), server.url);
+	await crossSiteReadsRefused(local(), server.url);
 
 	// GET /api/claude-code runs the executable: no other page may make it, not even with a GET.
 	// A stand-in on the server's own (harness) HOME records each run; the real claude is never found.
@@ -184,11 +230,12 @@ test("(a) no password: loopback needs no login, remote requests get nothing, and
 	fs.writeFileSync(path.join(bin, "claude"), `#!/bin/sh\necho "$*" >> '${runs}'\necho "2.0.0 (Claude Code)"\n`, { mode: 0o755 });
 	try {
 		// same-site first: another server on 127.0.0.1 (an <img> there sends no Origin).
-		for (const extra of [{ "sec-fetch-site": "same-site" }, { "sec-fetch-site": "cross-site" }, { origin: `http://127.0.0.1:${port + 1}` }, { origin: "https://evil.example" }] as Array<Record<string, string>>) {
+		// `none` too: a link clicked in a mail or chat app arrives as one the user opened.
+		for (const extra of [{ "sec-fetch-site": "same-site" }, { "sec-fetch-site": "cross-site" }, { "sec-fetch-site": "none" }, { origin: `http://127.0.0.1:${port + 1}` }, { origin: "https://evil.example" }] as Array<Record<string, string>>) {
 			const res = await raw("/api/claude-code", { headers: local(extra) });
 			assert(!fs.existsSync(runs), `${JSON.stringify(extra)} made it run the executable`);
 			assert.equal(res.status, 403, JSON.stringify(extra));
-			assert.deepEqual(JSON.parse(res.body), { error: "Change LearnHarness only from its own pages." }, JSON.stringify(extra));
+			assert.deepEqual(JSON.parse(res.body), CSRF_REFUSAL, JSON.stringify(extra));
 		}
 		const own = await raw("/api/claude-code", { headers: local({ "sec-fetch-site": "same-origin" }) });
 		assert.equal(own.status, 200, own.body);
@@ -201,6 +248,9 @@ test("(a) no password: loopback needs no login, remote requests get nothing, and
 	try {
 		const tab = await chrome.browser.newPage();
 		await tab.setViewport({ width: 1280, height: 800 });
+		// A URL typed into the address bar: Chrome sends Sec-Fetch-Site: none.
+		const typed = await tab.goto(`${server.url}/api/models`, { timeout: 120_000 });
+		assert.equal(typed?.status(), 200, `a read the user opens loads: ${await typed?.text()}`);
 		await tab.goto(server.url, { waitUntil: "domcontentloaded", timeout: 120_000 });
 		await openGeneralSettings(tab);
 		assert.equal(await tab.$eval('[data-testid="remote-access-cli"]', (el) => el.textContent), "npm run remote-access:set-password");
@@ -361,6 +411,55 @@ test("(d) headless Chrome on the tailnet logs in through the login page, uses th
 		assert.equal((await raw("/api/settings", { headers: viaServe("100.70.0.4", { host: `${TS_HOST}:${port}`, cookie: `lh_session=${cookie.value}` }) })).status, 401, "the server revoked it, not only the browser");
 	} finally {
 		await chrome.close();
+	}
+});
+
+test("(d) on a phone-size screen the app's own live updates, images and export download pass the gate", { timeout: 240_000 }, async () => {
+	// Chrome treats this origin as secure, as it does the https ts.net
+	// address, so it sends Fetch Metadata and every request below meets the
+	// gate as a phone's would.
+	const origin = `http://${TS_HOST}:${port}`;
+	const chrome = await launchChrome(TICKET, [`--host-resolver-rules=MAP ${TS_HOST} 127.0.0.1`, "--no-proxy-server", `--unsafely-treat-insecure-origin-as-secure=${origin}`]);
+	const downloads = fs.mkdtempSync(path.join(path.dirname(server.dataDir), "downloads-"));
+	const image = png(40, 120, 200);
+	const imageId = `${createHash("sha256").update(image).digest("hex")}.png`;
+	fs.mkdirSync(path.join(server.dataDir, "attachments"), { recursive: true });
+	fs.writeFileSync(path.join(server.dataDir, "attachments", imageId), image);
+	try {
+		const page = await chrome.browser.newPage();
+		await page.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true });
+		// A session's 403 on the computer routes (the app asks /api/subscriptions) is
+		// by design. Decided by route, not body: puppeteer's res.text() never settled here.
+		const shut: string[] = [];
+		page.on("response", (res) => {
+			const route = new URL(res.url()).pathname;
+			if (route.startsWith("/api") && [401, 403].includes(res.status()) && apiRouteClass(route) !== "computer") shut.push(`${res.status()} ${res.url()}`);
+		});
+		await page.goto(`${origin}/chat/${chatId}`, { waitUntil: "domcontentloaded", timeout: 120_000 });
+		await page.type("#password", PASSWORD);
+		await Promise.all([page.waitForNavigation({ timeout: 120_000 }), page.click("button[type=submit]")]);
+		assert.equal(page.url(), `${origin}/chat/${chatId}`);
+		const seen = await page.evaluate(async (id) => {
+			const img = new Image();
+			const width = await new Promise<number>((resolve) => { img.onload = () => resolve(img.naturalWidth); img.onerror = () => resolve(0); img.src = `/api/attachments/${id}`; });
+			const live = await new Promise<boolean>((resolve) => { const es = new EventSource("/api/events"); es.onopen = () => { es.close(); resolve(true); }; es.onerror = () => { es.close(); resolve(false); }; });
+			return { width, live };
+		}, imageId);
+		assert.deepEqual(seen, { width: 4, live: true });
+		const cdp = await chrome.browser.target().createCDPSession();
+		await cdp.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: downloads, eventsEnabled: true });
+		const finished = new Promise<string>((resolve) => {
+			cdp.on("Browser.downloadProgress", (e) => { if (e.state !== "inProgress") resolve(e.state); });
+			setTimeout(() => resolve("no download within 60 s"), 60_000);
+		});
+		// What Export as Markdown in the chat menu does (components/sidebar.tsx).
+		await page.evaluate((id) => { const a = document.createElement("a"); a.href = `/api/chats/${id}/markdown`; a.download = ""; document.body.appendChild(a); a.click(); a.remove(); }, chatId);
+		assert.equal(await finished, "completed", `refused: ${shut}`);
+		assert.deepEqual(fs.readdirSync(downloads), ["remote.md"], "the route's file, not a refusal");
+		assert.deepEqual(shut, [], "no request of the app's own was refused");
+	} finally {
+		await chrome.close();
+		fs.rmSync(downloads, { recursive: true, force: true });
 	}
 });
 
@@ -536,6 +635,10 @@ test("(g) SSE, the turn stream, the chat export and attachments need the session
 	const md = await raw(`/api/chats/${chatId}/markdown`, { headers: viaServe("100.70.0.8", { cookie }) });
 	assert.equal(md.status, 200);
 	assert.match(String(md.headers["content-disposition"]), /attachment/);
+	// The same links opened from a bookmark or another app (Sec-Fetch-Site: none).
+	const opened = viaServe("100.70.0.8", { cookie, "sec-fetch-site": "none" });
+	assert.equal((await raw(`/api/chats/${chatId}/markdown`, { headers: opened })).status, 200);
+	assert(![401, 403].includes((await raw("/api/attachments/0000", { headers: opened })).status));
 	assert.equal((await raw(`/api/chats/${chatId}/stream`, { headers: viaServe("100.70.0.8", { cookie }), headOnly: true })).status, 200);
 	assert.notEqual((await raw("/api/attachments/0000", { headers: viaServe("100.70.0.8", { cookie }) })).status, 401);
 });
@@ -654,13 +757,12 @@ test("(i) every API route is classified, and a session reaches none of the compu
 	assert(routes.length > 30);
 	assert.deepEqual(routes.sort(), Object.keys(API_ROUTES).sort(), "classify every app/api route in API_ROUTES (src/server/desktop-access.ts)");
 
+	// Every method, not only the ones the route exports: the gate answers
+	// before routing, so no route can drop out through how it exports them.
 	const cookie = cookieOf(await login("100.70.0.18", PASSWORD));
 	for (const [route, kind] of Object.entries(API_ROUTES)) {
 		if (kind !== "computer") continue;
-		const source = fs.readFileSync(path.join(app, route, "route.ts"), "utf8");
-		const methods = [...source.matchAll(/export (?:const|async function|function) (GET|POST|PUT|PATCH|DELETE)\b/g)].map((m) => m[1]!);
-		assert(methods.length > 0, route);
-		for (const method of methods) {
+		for (const method of ["GET", "POST", "PUT", "PATCH", "DELETE"]) {
 			const res = await raw(route.replace(/\[[^\]]+\]/g, "x"), { method, headers: { ...viaServe("100.70.0.18", { cookie, origin: `https://${TS_HOST}` }), ...JSON_BODY }, body: method === "GET" ? undefined : "{}" });
 			assert.equal(res.status, 403, `${method} ${route}`);
 			assert.deepEqual(JSON.parse(res.body), { error: WEB_COMPUTER_ONLY, computerOnly: true }, `${method} ${route}`);
@@ -668,11 +770,15 @@ test("(i) every API route is classified, and a session reaches none of the compu
 	}
 });
 
-test("(i) cross-origin posts are refused with a session cookie too", async () => {
+test("(i) cross-origin posts and reads are refused with a session cookie too", async () => {
 	const cookie = cookieOf(await login("100.70.0.19", PASSWORD));
 	await crossOriginRefused(viaServe("100.70.0.19", { cookie }), `https://${TS_HOST}`);
+	await crossSiteReadsRefused(viaServe("100.70.0.19", { cookie }), `https://${TS_HOST}`);
 	const laptop = cookieOf(await loginLocal("100.70.0.19"));
 	await crossOriginRefused(local({ cookie: laptop }), server.url);
+	await crossSiteReadsRefused(local({ cookie: laptop }), server.url);
+	// Without the cookie a non-browser read is a 401, as every request is once a password exists.
+	assert.equal((await raw("/api/models", { headers: local() })).status, 401);
 });
 
 test("(c) a login that races turning remote access off gets the off page, never a 500", async () => {
