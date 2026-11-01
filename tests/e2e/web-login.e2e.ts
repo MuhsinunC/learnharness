@@ -9,7 +9,7 @@ import type { Page } from "puppeteer-core";
 import { bootServer, REPO_ROOT, until, type LhServer } from "./harness/server.ts";
 import { launchChrome } from "./harness/chrome.ts";
 import { png } from "./harness/png.ts";
-import { API_ROUTES } from "../../src/server/desktop-access.ts";
+import { API_ROUTES, apiRouteClass } from "../../src/server/desktop-access.ts";
 
 // LH-43: the web login, in web mode (`npm start`: the harness serves the
 // production build on 127.0.0.1, as scripts/web-server.mjs would). A phone
@@ -414,7 +414,7 @@ test("(d) headless Chrome on the tailnet logs in through the login page, uses th
 	}
 });
 
-test("(d) on a phone-size screen the app's own live updates, images and export download pass the gate", async () => {
+test("(d) on a phone-size screen the app's own live updates, images and export download pass the gate", { timeout: 240_000 }, async () => {
 	// Chrome treats this origin as secure, as it does the https ts.net
 	// address, so it sends Fetch Metadata and every request below meets the
 	// gate as a phone's would.
@@ -428,11 +428,12 @@ test("(d) on a phone-size screen the app's own live updates, images and export d
 	try {
 		const page = await chrome.browser.newPage();
 		await page.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true });
-		// A session's 403 on the computer routes (the app asks /api/subscriptions) is by design.
-		const shut: Array<Promise<string | null>> = [];
+		// A session's 403 on the computer routes (the app asks /api/subscriptions) is
+		// by design. Decided by route, not body: puppeteer's res.text() never settled here.
+		const shut: string[] = [];
 		page.on("response", (res) => {
-			if (!new URL(res.url()).pathname.startsWith("/api") || ![401, 403].includes(res.status())) return;
-			shut.push(res.text().then((body) => (res.status() === 401 || body.includes(CSRF_REFUSAL.error) ? `${res.status()} ${res.url()}` : null), () => null));
+			const route = new URL(res.url()).pathname;
+			if (route.startsWith("/api") && [401, 403].includes(res.status()) && apiRouteClass(route) !== "computer") shut.push(`${res.status()} ${res.url()}`);
 		});
 		await page.goto(`${origin}/chat/${chatId}`, { waitUntil: "domcontentloaded", timeout: 120_000 });
 		await page.type("#password", PASSWORD);
@@ -453,9 +454,9 @@ test("(d) on a phone-size screen the app's own live updates, images and export d
 		});
 		// What Export as Markdown in the chat menu does (components/sidebar.tsx).
 		await page.evaluate((id) => { const a = document.createElement("a"); a.href = `/api/chats/${id}/markdown`; a.download = ""; document.body.appendChild(a); a.click(); a.remove(); }, chatId);
-		assert.equal(await finished, "completed", `refused: ${(await Promise.all(shut)).filter(Boolean)}`);
+		assert.equal(await finished, "completed", `refused: ${shut}`);
 		assert.deepEqual(fs.readdirSync(downloads), ["remote.md"], "the route's file, not a refusal");
-		assert.deepEqual((await Promise.all(shut)).filter(Boolean), [], "no request of the app's own was refused");
+		assert.deepEqual(shut, [], "no request of the app's own was refused");
 	} finally {
 		await chrome.close();
 		fs.rmSync(downloads, { recursive: true, force: true });
