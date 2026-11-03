@@ -194,8 +194,9 @@ export function useAttachments(chatId?: string) {
 
 	const remove = useCallback((id: string) => setItems((prev) => prev.filter((p) => p.id !== id)), []);
 	const clear = useCallback(() => setItems([]), []);
-	/** Put refs back (a refused send's draft restore). */
-	const restore = useCallback((refs: AttachmentRef[]) => setItems(refs), []);
+	/** Put refs back (a refused send's draft restore), ahead of any chip
+	 *  attached since the send (LH-63). */
+	const restore = useCallback((refs: AttachmentRef[]) => setItems((prev) => [...refs, ...prev.filter((p) => !refs.some((r) => r.id === p.id))]), []);
 
 	return { items, notice, addFiles, takePaths, remove, clear, restore, showNotice: setNotice, modelChanged };
 }
