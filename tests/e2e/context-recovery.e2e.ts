@@ -628,3 +628,16 @@ test("(l) a chat moved to a model with room: Repair has nothing to condense, so 
 		await page.close();
 	}
 });
+
+test("(m) with no page open, a Repair with nothing to condense still retries the turn (LH-63)", async () => {
+	// The session menu's Repair, or a page closed before its answer: the
+	// retry is the server's, under the same gates as Retry.
+	const id = await newChat("Repaired with no page");
+	breakChat(id, false);
+	await server.json(`/api/chats/${id}/settings`, { method: "PUT", body: { model: { provider: STUB, id: "stub-wide" } } });
+	const start = stub.requests.length;
+	await server.json(`/api/chats/${id}/repair`, { method: "POST" });
+	const done = await settled(id, "the retried reply", (c) => isReply(c.messages.at(-1)));
+	assert.equal(recoveryMarkers(done).length, 0, "nothing was condensed");
+	assert.deepEqual(stub.requests.slice(start).filter(isTurnRequest).map((r) => r.model), ["stub-wide"], "one retry, on the chat's new model");
+});

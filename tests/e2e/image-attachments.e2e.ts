@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, before, test } from "node:test";
-import type { Page } from "puppeteer-core";
+import type { HTTPRequest, Page } from "puppeteer-core";
 import { imageDimensions, MAX_ATTACHMENT_BYTES } from "../../src/core/attachments.ts";
 import { bootServer, until, type BootOptions, type LhServer } from "./harness/server.ts";
 import { hydrated, launchChrome, type HeadlessChrome } from "./harness/chrome.ts";
@@ -762,4 +762,157 @@ test("a first message interrupted by a reload comes back with its image chip, an
 	const chat = await settled(id, 1);
 	assert.deepEqual((chat.messages[0]!.attachments as Array<{ id: string }>).map((a) => a.id), [idOf(image)], "the visible chip went with the resend");
 	await page.close();
+});
+
+// LH-63 review round 1 (#107): the opening message's chips across a
+// failure, a send still in flight, a late confirmation and a reload.
+
+/** The ids of the composer's chips, in order. */
+const chipIds = (page: Page) => page.$$eval("[data-testid=attachment-chip] img", (els) => els.map((el) => (el as HTMLImageElement).src.split("/").pop()!));
+
+/** Answer the page's chat sends in turn: "fail" with a 500, "hold" never
+ *  answered (until the test responds to it); later sends go through. */
+async function scriptChatSends(page: Page, plan: Array<"fail" | "hold">): Promise<{ held: HTTPRequest[] }> {
+	const held: HTTPRequest[] = [];
+	await page.setRequestInterception(true);
+	page.on("request", (r) => {
+		if (r.method() === "POST" && new URL(r.url()).pathname === "/api/chat") {
+			const step = plan.shift();
+			if (step === "fail") return void r.respond({ status: 500, contentType: "text/plain", body: "The server had a hiccup." });
+			if (step === "hold") return void held.push(r);
+		}
+		void r.continue();
+	});
+	return { held };
+}
+
+/** Clear the composer's text, keeping its chips. */
+async function clearText(page: Page): Promise<void> {
+	await page.focus("[data-testid=composer] textarea");
+	await page.keyboard.press("End");
+	for (let n = (await composerDraft(page)).text.length; n > 0; n--) await page.keyboard.press("Backspace");
+	await until(async () => (await composerDraft(page)).text === "", "the text to clear");
+}
+
+/** Start a session whose first send fails, and wait for its draft to come back. */
+async function startFailed(page: Page, image: Buffer, prompt: string): Promise<string> {
+	const id = await startWithImage(page, image, prompt);
+	await until(async () => {
+		const draft = await composerDraft(page);
+		return draft.text === prompt && draft.chips === 1;
+	}, "the draft to come back");
+	return id;
+}
+
+test("an image-only resend interrupted by a reload comes back as its chip, never as stored JSON", async () => {
+	const page = await chrome.browser.newPage();
+	await page.setViewport({ width: 1280, height: 800 });
+	const sends = await scriptChatSends(page, ["fail", "hold"]);
+	const image = png(40, 180, 120);
+	const id = await startFailed(page, image, "What is drawn here");
+	await clearText(page);
+	await page.keyboard.press("Enter");
+	await until(() => sends.held.length === 1, "the image-only resend to be held");
+	await page.reload({ waitUntil: "domcontentloaded", timeout: 180_000 });
+	await hydrated(page, "[data-testid=composer] textarea");
+	await until(async () => (await composerDraft(page)).chips === 1, "the chip to come back after the reload");
+	assert.equal((await composerDraft(page)).text, "", "the composer holds the resend's empty text");
+	await page.focus("[data-testid=composer] textarea");
+	await page.keyboard.press("Enter");
+	const chat = await settled(id, 1);
+	assert.deepEqual((chat.messages[0]!.attachments as Array<{ id: string }>).map((a) => a.id), [idOf(image)]);
+	await page.close();
+});
+
+test("a resend interrupted by a reload comes back with the chips it sent, not the new-session page's", async () => {
+	const page = await chrome.browser.newPage();
+	await page.setViewport({ width: 1280, height: 800 });
+	const sends = await scriptChatSends(page, ["fail", "hold"]);
+	const prompt = "Teach me the idea behind this image";
+	const id = await startFailed(page, png(120, 40, 180), prompt);
+	await page.click("[data-testid=attachment-chip] button");
+	await until(async () => (await composerDraft(page)).chips === 0, "the chip to go");
+	await page.focus("[data-testid=composer] textarea");
+	await page.keyboard.press("Enter");
+	await until(() => sends.held.length === 1, "the resend to be held");
+	await page.reload({ waitUntil: "domcontentloaded", timeout: 180_000 });
+	await hydrated(page, "[data-testid=composer] textarea");
+	await until(async () => (await composerDraft(page)).text === prompt, "the text to come back after the reload");
+	assert.equal((await composerDraft(page)).chips, 0, "the chip removed before the resend stays removed");
+	await page.focus("[data-testid=composer] textarea");
+	await page.keyboard.press("Enter");
+	const chat = await settled(id, 1);
+	assert.equal(chat.messages[0]!.attachments, undefined, "the record holds no image");
+	await page.close();
+});
+
+test("a failed first message keeps the chips attached while it was in flight", async () => {
+	const page = await chrome.browser.newPage();
+	await page.setViewport({ width: 1280, height: 800 });
+	const sends = await scriptChatSends(page, ["hold"]);
+	const first = png(15, 90, 160);
+	const later = png(160, 90, 15);
+	const prompt = "Teach me what these pictures show";
+	await startWithImage(page, first, prompt);
+	await until(() => sends.held.length === 1, "the first send to be held");
+	await fileEvent(page, "paste", later, "later.png");
+	await until(async () => (await composerDraft(page)).chips === 1, "the chip pasted in flight");
+	await sends.held[0]!.respond({ status: 500, contentType: "text/plain", body: "The server had a hiccup." });
+	await until(async () => (await composerDraft(page)).text === prompt, "the text to come back");
+	assert.deepEqual(await chipIds(page), [idOf(first), idOf(later)], "the opening's chip comes back, and the in-flight one stays");
+	await page.close();
+});
+
+test("a first message confirmed late clears its own chip, never one added since", async () => {
+	const page = await chrome.browser.newPage();
+	await page.setViewport({ width: 1280, height: 800 });
+	await scriptChatSends(page, ["fail"]);
+	const first = png(200, 200, 40);
+	const later = png(40, 200, 200);
+	const prompt = "Explain what this chart says";
+	const id = await startFailed(page, first, prompt);
+	await fileEvent(page, "paste", later, "later.png");
+	await until(async () => (await composerDraft(page)).chips === 2, "the later chip");
+	// The opening landed after all (its acknowledgment was lost): another
+	// writer puts it in the record, and the page's canonical read confirms it.
+	await sendViaApi(id, prompt, [{ id: idOf(first) }], 1);
+	await until(async () => (await composerDraft(page)).text === "", "the confirmed opening's text to clear");
+	assert.deepEqual(await chipIds(page), [idOf(later)], "only the opening's own chip clears");
+	await page.close();
+});
+
+test("a retry that continues from tool results is not refused for an earlier message's images", async () => {
+	const { id } = await server.json<{ id: string }>("/api/chats", { body: { title: "Retry after a tool" } });
+	const sketch = await store(id, png(90, 30, 200), "sketch.png");
+	let turnRequests = 0;
+	// The first request calls a tool; the next, after its result, fails.
+	stub.setResponder((req) => {
+		if (isSummary(req)) return baseResponder(req);
+		return turnRequests++ === 0 ? reply.tools([{ name: "view_image", arguments: { id: sketch.id } }]) : reply.http(400, { error: { message: "The provider had a hiccup." } });
+	});
+	try {
+		const res = await server.api("/api/chat", { body: { chatId: id, input: { type: "text", text: "Look at my sketch.", attachments: [sketch] } } });
+		assert.equal(res.status, 200, await res.clone().text());
+		await res.arrayBuffer();
+		await until(async () => {
+			const c = await server.json<{ messages: Array<{ role: string; stopReason?: string }>; turnInFlight: boolean }>(`/api/chats/${id}`);
+			return !c.turnInFlight && c.messages.at(-1)?.stopReason === "error";
+		}, "the turn to fail");
+	} finally {
+		stub.setResponder(baseResponder);
+	}
+	const failed = await server.json<{ messages: Array<{ role: string }> }>(`/api/chats/${id}`);
+	assert.equal(failed.messages.at(-2)?.role, "toolResult", "the failure follows the tool's result");
+	await server.json(`/api/chats/${id}/settings`, { method: "PUT", body: { model: { provider: "e2e-stub", id: "plain-text" } } });
+	// A text send on this history is not refused (its own message has no
+	// image), and the retry re-sends no learner message: no refusal either.
+	const before = stub.requests.length;
+	const res = await server.api("/api/chat", { body: { chatId: id, input: { type: "retry" } } });
+	assert.equal(res.status, 200, await res.clone().text());
+	await res.arrayBuffer();
+	assert.ok(stub.requests.slice(before).some((r) => r.model === "plain-text"), "the retry reached the provider");
+	// With no failed turn left, a retry gets Retry's own 400, not the image gate's.
+	const again = await server.api("/api/chat", { body: { chatId: id, input: { type: "retry" } } });
+	assert.equal(again.status, 400);
+	assert.match(((await again.json()) as { error: string }).error, /retry input requires a failed turn to retry/);
 });
