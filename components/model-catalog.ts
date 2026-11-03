@@ -10,7 +10,7 @@ import { useNotifyHub } from "@/components/server-events";
 let catalogCache: ModelCatalogResponse | undefined;
 /** The last catalog that loaded, kept through a connection change's
  *  clear: readers that only show a model's settings stay mounted on it
- *  until the refetch lands, so an open modal survives (LH-63). */
+ *  until the refetch lands or fails, so an open modal survives (LH-63). */
 let catalogLoaded: ModelCatalogResponse | undefined;
 let catalogError = false;
 let catalogInflight: Promise<void> | undefined;
@@ -35,7 +35,9 @@ function fetchCatalog(revalidate = false): void {
 			if (generation === catalogGeneration) { catalogCache = catalogLoaded = c; catalogError = false; publishCatalog(); }
 		})
 		.catch(() => {
-			if (generation === catalogGeneration) { catalogError = true; publishCatalog(); }
+			// A failed reload ends the hold: what shows follows what may be
+			// selected, as in the slot pickers (LH-63).
+			if (generation === catalogGeneration) { catalogLoaded = catalogCache; catalogError = true; publishCatalog(); }
 		})
 		.finally(() => { if (generation === catalogGeneration) catalogInflight = undefined; });
 }
