@@ -296,6 +296,14 @@ export function retryDrops(messages: readonly LhMessage[]): Set<string> {
 	return ids;
 }
 
+/** The learner message a retry re-sends: the input just before the
+ *  failed tail, when it is one. A tail after tool results continues from
+ *  them and re-sends no message (LH-63). */
+export function retriedInput(messages: readonly LhMessage[]): Extract<LhMessage, { role: "user" }> | undefined {
+	const { before } = failedTail(messages);
+	return before?.role === "user" ? before : undefined;
+}
+
 /** Walk back over failed assistants and UI-only plan blocks. A compaction
  * is a boundary, not a marker Retry may cross. A failure AFTER a compaction
  * can still retry: that compacted context was already its starting state. */
