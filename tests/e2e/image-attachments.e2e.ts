@@ -910,7 +910,11 @@ test("a retry that continues from tool results is not refused for an earlier mes
 	const res = await server.api("/api/chat", { body: { chatId: id, input: { type: "retry" } } });
 	assert.equal(res.status, 200, await res.clone().text());
 	await res.arrayBuffer();
-	assert.ok(stub.requests.slice(before).some((r) => r.model === "plain-text"), "the retry reached the provider");
+	await until(() => stub.requests.slice(before).some((r) => r.model === "plain-text"), "the retry to reach the provider");
+	await until(async () => {
+		const c = await server.json<{ messages: Array<{ role: string; stopReason?: string }>; turnInFlight: boolean }>(`/api/chats/${id}`);
+		return !c.turnInFlight && c.messages.at(-1)?.role === "assistant" && c.messages.at(-1)?.stopReason !== "error";
+	}, "the retried reply");
 	// With no failed turn left, a retry gets Retry's own 400, not the image gate's.
 	const again = await server.api("/api/chat", { body: { chatId: id, input: { type: "retry" } } });
 	assert.equal(again.status, 400);
