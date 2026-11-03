@@ -272,8 +272,15 @@ export async function handleRepairRequest(chatId: string): Promise<Response> {
 	if (!run) return Response.json({ error: "This session is already being condensed. Try again in a moment." }, { status: 409 });
 	if ((await run) === "unchanged") {
 		// The chat's rejection no longer speaks for this model or window
-		// (LH-55) and nothing needs dropping: it already fits, send again.
-		if (!deps.rejectionInForce) return Response.json({ ok: true });
+		// (LH-55) and nothing needs dropping: it already fits, so the turn
+		// retries here, through Retry's own gates, whether or not a page
+		// is open (LH-63). A refused retry is the repair's answer.
+		if (!deps.rejectionInForce) {
+			const retry = await handleChatInput(chatId, { type: "retry" });
+			if (!retry.ok) return retry;
+			void retry.arrayBuffer().catch(() => undefined);
+			return Response.json({ ok: true });
+		}
 		explainOverflow(stores.chatStore, chatId, overflowExplanation.stillTooLong(modelName), true);
 		return Response.json({ error: "Nothing older in this chat can be condensed." }, { status: 422 });
 	}

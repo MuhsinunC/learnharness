@@ -86,8 +86,9 @@ Pi's shape, with Codex's clipping and option 2 as the fallback
   in force: given by the model the recovery runs on (pi-ai stamps provider
   and model on every reply) and newer than the user's last window save for
   that pair (one of unknown age counts as older). Otherwise the target is
-  the known window, and when nothing needs dropping there Repair just
-  answers ok (the chat already fits). The target never exceeds the known
+  the known window, and when nothing needs dropping there the chat
+  already fits: Repair retries the failed turn itself, through Retry's
+  gates, and answers with that retry's refusal if it has one (LH-63). The target never exceeds the known
   window either, so a custom window below the stated limit is what
   recovery aims at. The fallback cuts down to the last message alone only
   as a last resort, for a rejection in force when no larger tail can be
