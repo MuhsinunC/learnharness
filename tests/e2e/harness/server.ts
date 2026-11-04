@@ -46,6 +46,8 @@ export interface BootOptions {
 	readyPath?: string;
 	/** Default 6 minutes (a `next dev` first compile is slow on a busy machine). */
 	bootTimeoutMs?: number;
+	/** Start from a copy of this data dir, as a restart does; `settings` still replaces settings.json. */
+	seedDataDir?: string;
 }
 
 export interface LhServer {
@@ -221,6 +223,7 @@ export async function bootServer(opts: BootOptions): Promise<LhServer> {
 	const dataDir = path.join(root, "data");
 	const tmpDir = path.join(root, "tmp");
 	fs.mkdirSync(dataDir, { recursive: true });
+	if (opts.seedDataDir) fs.cpSync(opts.seedDataDir, dataDir, { recursive: true });
 	fs.mkdirSync(tmpDir, { recursive: true });
 	fs.writeFileSync(path.join(dataDir, "settings.json"), JSON.stringify(opts.settings, null, "\t"));
 	const authFile = path.join(root, "auth.json");
