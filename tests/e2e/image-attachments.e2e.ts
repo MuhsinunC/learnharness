@@ -938,7 +938,7 @@ test("a retry whose stored image is gone still runs, with the image's reference 
 	} finally {
 		stub.setResponder(baseResponder);
 	}
-	fs.rmSync(path.join(server.dataDir, "attachments", sketch.id));
+	fs.rmSync(path.join(dataDir, "attachments", sketch.id));
 	// A new send still can't name an image the store doesn't have.
 	const send = await server.api("/api/chat", { body: { chatId: id, input: { type: "text", text: "And this one?", attachments: [{ id: sketch.id }] } } });
 	assert.equal(send.status, 400);
