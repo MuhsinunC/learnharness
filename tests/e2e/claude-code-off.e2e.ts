@@ -5,7 +5,7 @@ import { after, before, describe, test } from "node:test";
 import type { Page } from "puppeteer-core";
 import { bootServer, until, type LhServer } from "./harness/server.ts";
 import { hydrated as reactHydrated, launchChrome, type HeadlessChrome } from "./harness/chrome.ts";
-import { reply, startStubProvider, type StubProvider } from "./harness/stub-provider.ts";
+import { calledTool, reply, startStubProvider, type StubProvider } from "./harness/stub-provider.ts";
 
 // LH-61: a Claude Code (subscription) selection that is off keeps v0.3.9's
 // own flows: the pre-send picker, Retry and the refusal handling. The fork
@@ -18,13 +18,25 @@ import { reply, startStubProvider, type StubProvider } from "./harness/stub-prov
 const TICKET = "lh-61";
 const stub = (id: string) => ({ model: { provider: "e2e-stub", id } });
 const RETIRED = { model: { provider: "claude-code", id: "claude-retired-model" } };
+const QUIZ = "[quiz-me]";
+const PROBE = {
+	question: "What is the limit of 1/x as x grows?",
+	options: [{ label: "0", value: "a" }, { label: "1", value: "b" }],
+	explanation: "1/x shrinks toward 0.",
+	correctAnswer: "a",
+};
 
 let chrome: HeadlessChrome;
 let provider: StubProvider;
 
 before(async () => {
-	// stub-fail answers like a provider outage, so a turn on it fails.
-	provider = await startStubProvider((req) => (req.model === "stub-fail" ? reply.http(500, { error: { message: "upstream down" } }) : reply.text("Hello.")));
+	// stub-fail answers like a provider outage, so a turn on it fails. A
+	// transcript carrying QUIZ gets one probe question, which stays open.
+	provider = await startStubProvider((req) => {
+		if (req.model === "stub-fail") return reply.http(500, { error: { message: "upstream down" } });
+		if (JSON.stringify(req.messages).includes(QUIZ) && !calledTool(req, "probe")) return reply.tools([{ name: "probe", arguments: PROBE }]);
+		return reply.text("Hello.");
+	});
 	chrome = await launchChrome(TICKET);
 });
 
@@ -61,31 +73,48 @@ async function userMessages(server: LhServer, id: string): Promise<number> {
 	return chat.messages.filter((m) => m.role === "user").length;
 }
 
+/** A stand-in Claude Code executable: it answers --version and nothing else. */
+function standInClaude(server: LhServer): string {
+	const claude = path.join(path.dirname(server.dataDir), "claude");
+	fs.writeFileSync(claude, `#!/bin/sh\n[ "$1" = --version ] && echo "2.0.0 (Claude Code)" && exit 0\nexit 1\n`, { mode: 0o755 });
+	return claude;
+}
+
+/** Claude Code on (the stand-in) or off, as the Settings card turns it: a
+ *  same-origin PUT from the page, which the route requires for writes. */
+async function setClaudeCode(page: Page, server: LhServer, claude: string, mode: "local" | "off"): Promise<void> {
+	const body = JSON.stringify(mode === "off" ? { mode } : { mode, executable: claude });
+	const res = await page.evaluate(async (body) => {
+		const r = await fetch("/api/claude-code", { method: "PUT", headers: { "content-type": "application/json" }, body });
+		return { status: r.status, text: await r.text() };
+	}, body);
+	assert.equal(res.status, 200, res.text);
+	const catalog = await server.json<{ providers: Array<{ id: string }> }>("/api/models");
+	assert.equal(catalog.providers.some((p) => p.id === "claude-code"), mode === "local", `Claude Code ${mode}`);
+}
+
+/** A session stamped with `model`, switched there through its settings route. */
+async function sessionOn(server: LhServer, model: { provider: string; id: string }): Promise<string> {
+	const { id } = await server.json<{ id: string }>("/api/chats", { body: { title: "Claude Code off" } });
+	await server.json(`/api/chats/${id}/settings`, { method: "PUT", body: { model } });
+	return id;
+}
+
+/** The first model Claude Code lists (it must be on). */
+async function firstClaudeModel(server: LhServer): Promise<{ provider: string; id: string }> {
+	const catalog = await server.json<{ models: Array<{ provider: string; id: string }> }>("/api/models");
+	const model = catalog.models.find((m) => m.provider === "claude-code");
+	assert(model, "Claude Code lists models");
+	return { provider: model.provider, id: model.id };
+}
+
 describe("another provider is connected", () => {
 	let server: LhServer;
 	let page: Page;
 	let claude: string;
 	let claudeModel: { provider: string; id: string };
-
-	/** Claude Code on (the stand-in) or off, as the Settings card turns it: a
-	 *  same-origin PUT from the page, which the route requires for writes. */
-	async function claudeCode(mode: "local" | "off"): Promise<void> {
-		const body = JSON.stringify(mode === "off" ? { mode } : { mode, executable: claude });
-		const res = await page.evaluate(async (body) => {
-			const r = await fetch("/api/claude-code", { method: "PUT", headers: { "content-type": "application/json" }, body });
-			return { status: r.status, text: await r.text() };
-		}, body);
-		assert.equal(res.status, 200, res.text);
-		const catalog = await server.json<{ providers: Array<{ id: string }> }>("/api/models");
-		assert.equal(catalog.providers.some((p) => p.id === "claude-code"), mode === "local", `Claude Code ${mode}`);
-	}
-
-	/** A session stamped with `model`, switched there through its settings route. */
-	async function chatOn(model: { provider: string; id: string }): Promise<string> {
-		const { id } = await server.json<{ id: string }>("/api/chats", { body: { title: "Claude Code off" } });
-		await server.json(`/api/chats/${id}/settings`, { method: "PUT", body: { model } });
-		return id;
-	}
+	const claudeCode = (mode: "local" | "off") => setClaudeCode(page, server, claude, mode);
+	const chatOn = (model: { provider: string; id: string }) => sessionOn(server, model);
 
 	before(async () => {
 		server = await bootServer({
@@ -94,15 +123,11 @@ describe("another provider is connected", () => {
 			// Strong names a Claude Code model the catalog doesn't list (retired or renamed).
 			settings: { version: 1, graph: { enabled: false }, models: { strong: RETIRED, cheap: stub("stub-a"), vision: stub("stub-a") } },
 		});
-		claude = path.join(path.dirname(server.dataDir), "claude");
-		fs.writeFileSync(claude, `#!/bin/sh\n[ "$1" = --version ] && echo "2.0.0 (Claude Code)" && exit 0\nexit 1\n`, { mode: 0o755 });
+		claude = standInClaude(server);
 		page = await chrome.browser.newPage();
 		await page.goto(server.url, { waitUntil: "domcontentloaded", timeout: 180_000 });
 		await claudeCode("local");
-		const catalog = await server.json<{ models: Array<{ provider: string; id: string }> }>("/api/models");
-		const model = catalog.models.find((m) => m.provider === "claude-code");
-		assert(model, "Claude Code lists models");
-		claudeModel = { provider: model.provider, id: model.id };
+		claudeModel = await firstClaudeModel(server);
 	});
 
 	after(async () => {
@@ -186,6 +211,101 @@ describe("another provider is connected", () => {
 	});
 });
 
+describe("the catalog changed after the page loaded", () => {
+	let server: LhServer;
+	let page: Page;
+	let claude: string;
+	const openrouter = (id: string) => ({ model: { provider: "openrouter", id } });
+
+	before(async () => {
+		server = await bootServer({
+			ticket: TICKET,
+			// openrouter keeps its key gate; no key is saved yet.
+			providers: [{ id: "openrouter", baseUrl: provider.baseUrl, models: [{ id: "or-a" }] }],
+			settings: { version: 1, graph: { enabled: false }, models: { strong: openrouter("or-a"), cheap: openrouter("or-a"), vision: openrouter("or-a") } },
+		});
+		claude = standInClaude(server);
+		page = await chrome.browser.newPage();
+	});
+
+	after(async () => {
+		await page?.close();
+		await server?.stop();
+	});
+
+	test("a Claude Code refusal decides from the refreshed catalog: the picker for a provider keyed since the load", async () => {
+		await page.goto(server.url, { waitUntil: "domcontentloaded", timeout: 180_000 });
+		await setClaudeCode(page, server, claude, "local");
+		const id = await sessionOn(server, await firstClaudeModel(server));
+		await hydrated(page, `/chat/${id}`, server);
+		// The page's catalog: Claude Code on, openrouter without a key.
+		let catalogReads = 0;
+		page.on("request", (req) => { if (new URL(req.url()).pathname === "/api/models") catalogReads++; });
+		// Behind the page's back: Claude Code goes off and openrouter gets a key.
+		await setClaudeCode(page, server, claude, "off");
+		await server.json("/api/keys/OPENROUTER_API_KEY", { method: "PUT", body: { value: "e2e-dummy-key-not-real" } });
+		assert.equal(catalogReads, 0, "the page still holds the catalog it loaded");
+		await type(page, "Hello there");
+		await page.waitForSelector("[data-testid=model-search]", { timeout: 30_000 });
+		assert.equal(await draft(page), "Hello there");
+		assert.equal(await userMessages(server, id), 0, "nothing was sent");
+	});
+});
+
+describe("a refused send leaves the session usable", () => {
+	let server: LhServer;
+	let page: Page;
+	const openrouter = { model: { provider: "openrouter", id: "or-a" } };
+
+	before(async () => {
+		server = await bootServer({
+			ticket: TICKET,
+			// openrouter keeps its key gate; the stub stays connected.
+			providers: [
+				{ id: "e2e-stub", baseUrl: provider.baseUrl, models: [{ id: "stub-a" }] },
+				{ id: "openrouter", baseUrl: provider.baseUrl, models: [{ id: "or-a" }] },
+			],
+			settings: { version: 1, graph: { enabled: false }, models: { strong: openrouter, cheap: stub("stub-a"), vision: stub("stub-a") } },
+		});
+		page = await chrome.browser.newPage();
+	});
+
+	after(async () => {
+		await page?.close();
+		await server?.stop();
+	});
+
+	test("after a missing-key refusal the open question can still be dismissed", async () => {
+		await server.json("/api/keys/OPENROUTER_API_KEY", { method: "PUT", body: { value: "e2e-dummy-key-not-real" } });
+		const id = await sessionOn(server, openrouter.model);
+		const res = await server.api("/api/chat", { body: { chatId: id, input: { type: "text", text: `Quiz me on limits. ${QUIZ}` } } });
+		assert.equal(res.status, 200, await res.clone().text());
+		await res.arrayBuffer();
+		await until(async () => !(await server.json<{ turnInFlight: boolean }>(`/api/chats/${id}`)).turnInFlight, "the probe turn to settle");
+		await page.setViewport({ width: 1280, height: 800 });
+		await page.goto(`${server.url}/chat/${id}`, { waitUntil: "domcontentloaded", timeout: 180_000 });
+		await reactHydrated(page, "[data-testid=question-dock] [role=radio]");
+		// The key goes; answering is refused, which lands as the picker.
+		await server.json("/api/keys/OPENROUTER_API_KEY", { method: "DELETE" });
+		await page.click("[data-testid=question-dock] [role=radio]");
+		await page.click("[data-testid=question-dock] button[type=submit]");
+		await page.waitForSelector("[data-testid=model-search]", { timeout: 30_000 });
+		await page.keyboard.press("Escape");
+		await until(async () => !(await present(page, "[data-testid=model-search]")), "the picker to close", 10_000);
+		// Esc with nothing open asks to dismiss the question.
+		await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+		if (!(await present(page, "[data-testid=abort-turn-dialog]"))) await page.keyboard.press("Escape");
+		await page.waitForSelector("[data-testid=abort-turn-confirm]", { timeout: 10_000 });
+		await page.click("[data-testid=abort-turn-confirm]");
+		await until(async () => {
+			const chat = await server.json<{ messages: Array<{ role: string }> }>(`/api/chats/${id}`);
+			const last = chat.messages.at(-1);
+			return last?.role === "toolResult" && JSON.stringify(last).includes('"dismissed":true');
+		}, "the dismissal to reach the record", 30_000);
+		assert.equal(await userMessages(server, id), 1, "the refused answer sent nothing");
+	});
+});
+
 describe("Claude Code is the only provider", () => {
 	let server: LhServer;
 	let page: Page;
@@ -212,7 +332,29 @@ describe("Claude Code is the only provider", () => {
 		assert.equal(status.envOverride, true);
 		assert.equal(status.active, false);
 		assert.equal(status.error, "Claude Code executable was rejected (LH_IGNORE_ENV_KEYS=1)");
+		// The Settings card shows that reason.
+		await page.setViewport({ width: 1280, height: 800 });
+		await page.goto(server.url, { waitUntil: "domcontentloaded", timeout: 180_000 });
+		// Clicks before hydration land on inert markup: retry until it opens.
+		await until(async () => {
+			await page.click("[data-testid=settings-entry]");
+			return page.waitForSelector("[data-testid=settings-nav-keys]", { timeout: 2000 });
+		}, "the settings dialog to open", 180_000, 500);
+		await page.click("[data-testid=settings-nav-keys]");
+		const alert = "[data-testid=claude-code-connection] [role=alert]";
+		await page.waitForSelector(alert, { timeout: 60_000 });
+		assert.equal(await page.$eval(alert, (el) => el.textContent), "Claude Code executable was rejected (LH_IGNORE_ENV_KEYS=1)");
 	});
+
+	/** Enter, then one more key. React commits a key's update before the
+	 *  next key's handler runs, so once the extra "!" shows, anything the
+	 *  Enter opened is already on the page. */
+	async function sendAndSettle(page: Page, pathname: string, text: string): Promise<void> {
+		await type(page, text);
+		await page.type(FIELD, "!");
+		await until(async () => (await present(page, "[data-testid=setup-dialog]")) || (await draft(page)) === `${text}!`, `${pathname}: the Enter to be handled`, 10_000);
+		assert(!(await present(page, "[data-testid=setup-dialog]")), `${pathname}: no key setup`);
+	}
 
 	test("every page shows the off notice where key setup would be, and a send opens no key setup", async () => {
 		const { id } = await server.json<{ id: string }>("/api/chats", { body: { title: "Only Claude" } });
@@ -220,13 +362,39 @@ describe("Claude Code is the only provider", () => {
 			await hydrated(page, pathname, server);
 			await page.waitForSelector("[data-testid=claude-code-off-notice]", { timeout: 30_000 });
 			assert(!(await present(page, "[data-testid=setup-cta-keys]")), `${pathname}: no "Add a provider key"`);
-			await type(page, "Limits");
-			await new Promise((r) => setTimeout(r, 1000));
-			assert(!(await present(page, "[data-testid=setup-dialog]")), `${pathname}: no key setup`);
-			assert.equal(await draft(page), "Limits", pathname);
+			await sendAndSettle(page, pathname, "Limits");
 		}
 		assert.equal(await userMessages(server, id), 0, "nothing was sent");
 		assert.equal(await sessions(server), 1, "no session was created");
+	});
+
+	test("Enter before the model control has read the session opens no key setup", async () => {
+		const { id } = await server.json<{ id: string }>("/api/chats", { body: { title: "Only Claude, early Enter" } });
+		const early = await chrome.browser.newPage();
+		try {
+			// Hold the model control's session read, so the stats bar has not
+			// reported the model when Enter lands.
+			const held: Array<{ continue(): Promise<void> }> = [];
+			await early.setBypassServiceWorker(true);
+			await early.setRequestInterception(true);
+			early.on("request", (req) => {
+				if (req.method() === "GET" && new URL(req.url()).pathname === `/api/chats/${id}`) held.push(req);
+				else void req.continue();
+			});
+			await early.setViewport({ width: 1280, height: 800 });
+			await early.goto(`${server.url}/chat/${id}`, { waitUntil: "domcontentloaded", timeout: 180_000 });
+			await reactHydrated(early, FIELD);
+			// The catalog has loaded: one of the two zero-keys surfaces shows.
+			await until(async () => (await present(early, "[data-testid=claude-code-off-notice]")) || (await present(early, "[data-testid=setup-cta-keys]")), "the catalog to load", 60_000);
+			const label = (await early.$eval("[data-testid=stats-model]", (el) => el.textContent ?? "").catch(() => "")).trim();
+			assert(held.length > 0 && (label === "" || label === "—"), `the session read is still held (label "${label}")`);
+			await sendAndSettle(early, "early Enter", "Limits");
+			assert(await present(early, "[data-testid=claude-code-off-notice]"), "the off notice shows");
+			for (const req of held) await req.continue();
+		} finally {
+			await early.close();
+		}
+		assert.equal(await userMessages(server, id), 0, "nothing was sent");
 	});
 });
 
