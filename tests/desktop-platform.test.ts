@@ -224,7 +224,7 @@ describe("workflow action versions", () => {
 			assert.ok(checks.includes(check), `preflight runs ${check}`);
 		}
 		// The release job uses preflight's values, so the two cannot disagree.
-		for (const [name, output] of [["FORK_VERSION", "fork_version"], ["TAG", "tag"], ["E2E_URL", "e2e_url"]]) {
+		for (const [name, output] of [["FORK_VERSION", "fork_version"], ["TAG", "tag"], ["E2E_URL", "e2e_url"]] as const) {
 			assert.equal(release.env?.[name], `\${{ needs.preflight.outputs.${output} }}`);
 			assert.equal(preflight.outputs?.[output], `\${{ steps.check.outputs.${output} }}`);
 		}
