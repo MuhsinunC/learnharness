@@ -53,11 +53,11 @@ async function hydrated(page: Page, pathname: string, server: LhServer): Promise
 	await page.goto(`${server.url}${pathname}`, { waitUntil: "domcontentloaded", timeout: 180_000 });
 	await reactHydrated(page, FIELD);
 	// The model control has read the session (or the Strong slot): the send guards key on it.
-	await until(async () => {
-		const label = await page.$eval("[data-testid=stats-model]", (el) => el.textContent ?? "").catch(() => "");
-		return label.trim().length > 1 && label.trim() !== "—";
-	}, "the model control to load", 120_000);
+	await until(async () => !["", "—"].includes(await modelLabel(page)), "the model control to load", 120_000);
 }
+
+/** The stats bar's model label without the menu caret ("—" = unpicked or unread). */
+const modelLabel = async (page: Page) => (await page.$eval("[data-testid=stats-model]", (el) => el.textContent ?? "").catch(() => "")).replace("▾", "").trim();
 
 async function type(page: Page, text: string): Promise<void> {
 	await page.type(FIELD, text);
@@ -386,8 +386,8 @@ describe("Claude Code is the only provider", () => {
 			await reactHydrated(early, FIELD);
 			// The catalog has loaded: one of the two zero-keys surfaces shows.
 			await until(async () => (await present(early, "[data-testid=claude-code-off-notice]")) || (await present(early, "[data-testid=setup-cta-keys]")), "the catalog to load", 60_000);
-			const label = (await early.$eval("[data-testid=stats-model]", (el) => el.textContent ?? "").catch(() => "")).trim();
-			assert(held.length > 0 && (label === "" || label === "—"), `the session read is still held (label "${label}")`);
+			const label = await modelLabel(early);
+			assert(held.length > 0 && ["", "—"].includes(label), `the session read is still held (label "${label}")`);
 			await sendAndSettle(early, "early Enter", "Limits");
 			assert(await present(early, "[data-testid=claude-code-off-notice]"), "the off notice shows");
 			for (const req of held) await req.continue();
