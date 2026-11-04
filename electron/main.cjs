@@ -29,10 +29,10 @@ const { createChatGPT, fileStore } = require("./chatgpt.cjs");
 const { attachChatGPTChild, trustedSender, chatGPTControl } = require("./chatgpt-ipc.cjs");
 const { createSubscriptions, loadSubscriptionSDK } = require("./subscriptions.cjs");
 const { attachSubscriptionChild, subscriptionControl } = require("./subscription-ipc.cjs");
-const { desktopAPIHeaders } = require("./desktop-api.cjs");
+const { desktopAPIHeaders, desktopPageKey } = require("./desktop-api.cjs");
 const { openWebSubscriptionBrowser } = require("./web-subscription-browser.cjs");
 const { isForkBuild } = require("./updater-gate.cjs");
-const { createHmac, randomBytes } = require("node:crypto");
+const { randomBytes } = require("node:crypto");
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -694,12 +694,10 @@ async function main() {
 		session.defaultSession.webRequest.onBeforeSendHeaders({ urls: ["<all_urls>"] }, (details, callback) => {
 			callback({ requestHeaders: desktopAPIHeaders(details, ownedOrigin, desktopAPISecret, [...trustedAppWindows]) });
 		});
-		// Web login (LH-43): once a remote-access password exists, page loads
-		// need a per-launch value too (src/server/desktop-access.ts). Only this
-		// session holds it, HttpOnly and SameSite=Strict. Cookies ignore ports,
-		// so it is an HMAC of the secret, never the API secret itself.
-		const pageKey = createHmac("sha256", desktopAPISecret).update("lh-desktop-page").digest("hex");
-		await session.defaultSession.cookies.set({ url: ownedOrigin, name: "lh_desktop", value: pageKey, httpOnly: true, sameSite: "strict" });
+		// Web login (LH-43, LH-45): page loads need a per-launch value too
+		// (src/server/desktop-access.ts), with or without a password. Only this
+		// session holds it, HttpOnly and SameSite=Strict.
+		await session.defaultSession.cookies.set({ url: ownedOrigin, name: "lh_desktop", value: desktopPageKey(desktopAPISecret), httpOnly: true, sameSite: "strict" });
 		chatgpt = createChatGPT({
 			store: fileStore(path.join(app.getPath("userData"), "chatgpt-credentials.json")),
 			openExternal: (target) => shell.openExternal(target),

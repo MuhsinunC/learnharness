@@ -15,3 +15,9 @@ export function computerOnlyMessage(desktop: boolean): string {
 		? "Change this in the LearnHarness desktop app on the computer."
 		: "Change this on the computer: run npm run remote-access:off, change it here, then set the password again.";
 }
+
+/** proxy.ts's refusal of a typed image path to a logged-in browser
+ * (LH-45): the file is on the computer, which only its own window or
+ * browser reads (attachments/file is computer-only), so it points at the
+ * composer's image picker instead. */
+export const PATH_COMPUTER_ONLY = "Images can't be attached by path from this browser. Use the image button instead.";

@@ -115,6 +115,8 @@ export function useSidebar() {
 
 export function SidebarProvider({ children }: { children: React.ReactNode }) {
 	useEffect(() => {
+		// Electron only: in a browser, NativeSubscriptionUIProvider's web bridge
+		// already hears every provider's change, ChatGPT's included (LH-45).
 		const bridge = window.lh?.chatgpt;
 		if (!bridge) return;
 		const off = bridge.onChange(() => notifySettingsSaved("keys"));
