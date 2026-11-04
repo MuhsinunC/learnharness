@@ -646,8 +646,9 @@ export function Chat({
 				if (draftRef.current?.text === prompt) draftRef.current = null;
 			});
 		}).then(accepted => {
-			if (!accepted && openingMountedRef.current && openingDraftRef.current === opening && !textRef.current) {
-				applyText(prompt);
+			if (!accepted && openingMountedRef.current && openingDraftRef.current === opening) {
+				// Text typed since stays; the chips merge with any added since.
+				if (!textRef.current) applyText(prompt);
 				restoreChips(images);
 			}
 		});
