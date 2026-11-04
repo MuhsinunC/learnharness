@@ -4,7 +4,7 @@ import path from "node:path";
 import { after, before, test } from "node:test";
 import type { Page } from "puppeteer-core";
 import { bootServer, until, type E2EProvider, type LhServer } from "./harness/server.ts";
-import { launchChrome, type HeadlessChrome } from "./harness/chrome.ts";
+import { hydrated, launchChrome, type HeadlessChrome } from "./harness/chrome.ts";
 import { reply, startStubProvider, type StubProvider } from "./harness/stub-provider.ts";
 
 // LH-38: the per-(provider, model) context window. Settings > Agent >
@@ -20,6 +20,7 @@ import { reply, startStubProvider, type StubProvider } from "./harness/stub-prov
 const STUB = "openrouter";
 const A = `${STUB}:stub-a`; // Default 100k
 const B = `${STUB}:stub-b`; // Default 128k, maxTokens 64k
+const C = `${STUB}:stub-c`; // Default 200k, the cheap and vision slots
 const D = `${STUB}:stub-d`; // Default 64k, never in a slot
 
 let stub: StubProvider;
@@ -457,11 +458,14 @@ test("(f) the runtime uses the pair's value: footer denominator and engine budge
 	// cleared back to the 128k default, the full 64k returns.
 	const custom = await turnBudget(id);
 	assert.ok(custom <= 60_000 - 4096, `max tokens ${custom} fits the custom 60k window`);
+	await page.evaluate(() => { (window as { lh54?: boolean }).lh54 = true; });
+	// Saved from elsewhere (another window, here the API): this page's
+	// footer follows without a reload (LH-54).
 	await server.json("/api/settings/context-windows", { method: "PUT", body: { provider: STUB, id: "stub-b", tokens: null } });
 	assert.equal(diskWindows()?.[B], undefined);
 	assert.equal(await turnBudget(id), 64_000);
-	await page.reload({ waitUntil: "domcontentloaded" });
 	await footerReads("128k");
+	assert.equal(await page.evaluate(() => (window as { lh54?: boolean }).lh54), true, "the same page, never reloaded");
 });
 
 test("(g) the composer's model picker edits a model that is in no slot", async () => {
@@ -497,4 +501,45 @@ test("(g) the composer's model picker edits a model that is in no slot", async (
 	await until(() => diskWindows()?.[D] === 250_000, "D = 250000 on disk");
 	await footerReads("250k");
 	assert.ok(!JSON.stringify(diskSettings().models).includes("stub-d"), "stub-d is in no slot");
+});
+
+/** Count the /api/models requests `page` makes from now on. */
+function catalogReads(on: Page): { count: () => number; stop: () => void } {
+	let n = 0;
+	const seen = (r: { url(): string }) => { if (new URL(r.url()).pathname === "/api/models") n++; };
+	on.on("request", seen);
+	return { count: () => n, stop: () => { on.off("request", seen); } };
+}
+
+test("(h) a page load reads the catalog once, its event channel's first open included (LH-54)", async () => {
+	const fresh = await chrome.browser.newPage();
+	const reads = catalogReads(fresh);
+	try {
+		let opened = false;
+		fresh.on("response", (r) => { if (new URL(r.url()).pathname === "/api/events") opened = true; });
+		await fresh.goto(`${server.url}/chat/new`, { waitUntil: "domcontentloaded", timeout: 180_000 });
+		await hydrated(fresh, '[data-testid="composer"] textarea');
+		await until(() => opened, "the page's event channel to open");
+		await new Promise((r) => setTimeout(r, 3_000));
+		assert.equal(reads.count(), 1, `one /api/models request per page load (${reads.count()})`);
+	} finally {
+		reads.stop();
+		await fresh.close();
+	}
+});
+
+test("(i) a window saved in Settings refetches the saving page's catalog once (LH-54)", async () => {
+	await openAgentSettings();
+	await waitInput(C, "");
+	await new Promise((r) => setTimeout(r, 2_000));
+	const reads = catalogReads(page);
+	try {
+		await typeWindow(C, "90000", "enter");
+		await until(() => diskWindows()?.[C] === 90_000, "C = 90000 on disk");
+		await waitInput(C, "90000");
+		await new Promise((r) => setTimeout(r, 3_000));
+		assert.equal(reads.count(), 1, `one /api/models request for the save (${reads.count()})`);
+	} finally {
+		reads.stop();
+	}
 });

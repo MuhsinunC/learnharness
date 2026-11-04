@@ -51,3 +51,31 @@ export async function hydrated(page: Page, selector: string, timeout = 180_000):
 		selector,
 	);
 }
+
+/** The page's EventSource behind a switch (window.lhChannel): drop()
+ *  closes the connection as a sleep or a network blip does, so what the
+ *  server sends meanwhile never arrives; reopen() connects again, which
+ *  fires the page's own open handler. A script, not a function: tsx
+ *  would wrap a nested class in its __name helper, which the page lacks. */
+export const DROPPABLE_CHANNEL = `(() => {
+	const Native = window.EventSource;
+	window.EventSource = function (url, init) {
+		const listeners = [];
+		const channel = { onopen: null };
+		const connect = () => {
+			const es = new Native(url, init);
+			es.onopen = (ev) => channel.onopen && channel.onopen(ev);
+			for (const [name, cb] of listeners) es.addEventListener(name, cb);
+			return es;
+		};
+		let es = connect();
+		channel.addEventListener = (name, cb) => { listeners.push([name, cb]); es.addEventListener(name, cb); };
+		channel.close = () => es.close();
+		channel.drop = () => es.close();
+		channel.reopen = () => { es = connect(); };
+		window.lhChannel = channel;
+		return channel;
+	};
+})();`;
+
+export type ChannelWindow = { lhChannel: { drop(): void; reopen(): void } };

@@ -9,19 +9,34 @@ type Reply<T> = { value: T; browserAction?: string; error?: string };
 const PATH = "/api/subscriptions";
 const headers = { "Content-Type": "application/json", "x-learnharness-subscriptions": "1" };
 
+type Statuses = { chatgpt: ChatGPTStatus; native: NativeSubscriptionStatus[] };
+/** Which account each subscription is connected with: what the catalog
+ *  and the key readers read from a status (LH-54). */
+const connectionsOf = (s: Partial<Statuses>) => JSON.stringify([s.chatgpt?.activeId, s.chatgpt?.accounts?.filter((a) => a.connected).map((a) => a.id), Array.isArray(s.native) ? s.native.map((n) => n.connected ? n.connectionId : null) : null]);
+/** The connections the window's last status read showed. */
+let seenConnections: string | undefined;
 async function status() {
 	const response = await fetch(PATH, { headers, cache: "no-store" });
 	if (!response.ok) throw new Error("Subscription status is unavailable.");
-	return response.json() as Promise<{ chatgpt: ChatGPTStatus; native: NativeSubscriptionStatus[] }>;
+	const value = await response.json() as Statuses;
+	seenConnections = connectionsOf(value);
+	return value;
 }
 async function control<T>(providerId: string, op: string, fields: Record<string, unknown> = {}): Promise<Reply<T>> {
 	const response = await fetch(PATH, { method: "POST", headers, body: JSON.stringify({ providerId, op, ...fields }) });
 	if (!response.ok) throw new Error("The subscription connection could not be changed.");
 	return response.json() as Promise<Reply<T>>;
 }
-function onChange(hub: Hub, listener: () => void): () => void {
-	const offEvent = hub?.subscribe("subscriptions-changed", listener);
-	const offResync = hub?.onResync(listener);
+/** `compare`: a reconnect re-reads the connections first, and reports a
+ *  change (no argument) when they differ from the last read, since the
+ *  channel was down when it happened; otherwise "resync" (LH-54). */
+function onChange(hub: Hub, listener: (change?: "resync") => void, compare = false): () => void {
+	const offEvent = hub?.subscribe("subscriptions-changed", () => listener());
+	const offResync = hub?.onResync((reconnect) => {
+		const before = seenConnections;
+		if (!compare || !reconnect || before === undefined) return listener("resync");
+		void status().then(() => listener(seenConnections === before ? "resync" : undefined), () => listener("resync"));
+	});
 	return () => { offEvent?.(); offResync?.(); };
 }
 /** Reserve the new tab synchronously in the click gesture. Only a one-use
@@ -64,7 +79,7 @@ export function createWebNativeBridge(hub: Hub): NativeSubscriptionControlBridge
 		open: async (providerId, attemptId, actionId) => { await withBrowser(() => control(providerId, "open", { attemptId, actionId })); },
 		retry: (providerId) => call(providerId, "retry"), disconnect: (providerId) => call(providerId, "disconnect"),
 		consent: (providerId, enabled) => call(providerId, "consent", { enabled }),
-		onChange: (listener) => onChange(hub, listener),
+		onChange: (listener) => onChange(hub, listener, true),
 	};
 }
 export function useChatGPTBridge(): ChatGPTControlBridge | undefined {

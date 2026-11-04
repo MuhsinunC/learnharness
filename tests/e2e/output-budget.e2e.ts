@@ -16,7 +16,9 @@ import { inputTokens, maxOutputTokens, reply, requestTokens, startStubProvider, 
 // were rejected again (max_tokens kept asking 16,384 against the 1M
 // window), and the chat ended unrecoverable with Repair refused. The
 // second case is the live single huge paste: its recovery's retry was
-// rejected too (27,684 text + 3,796 tool + 16,384 out).
+// rejected too (27,684 text + 3,796 tool + 16,384 out). The third is
+// that paste on stub-o, which counts 1.18x like OpenRouter (LH-54): its
+// retry cannot fit, and the learner gets one plain explanation.
 
 const LIMIT = 40_960;
 const MAX_OUTPUT = 16_384;
@@ -40,6 +42,7 @@ const SUMMARY = [
 const PASTE = "The derivative of x squared is two x, by the limit of the difference quotient. ".repeat(100);
 const REPLY = "Checked: each step follows from the definition of the derivative. ".repeat(30);
 const paste = (n: number) => `Part ${n}: my next worked attempt. ${PASTE}`;
+const HUGE_PASTE = `Part 2: all my notes at once. ${"A derivative measures how fast a quantity changes at an instant. ".repeat(1_400)}`;
 
 type Msg = {
 	id: string;
@@ -61,15 +64,28 @@ const lastPart = (req: StubRequest) => {
 let rejections = 0;
 /** Turn requests to reject regardless of size (the Repair case). */
 let forcedRejections = 0;
+/** stub-o's bill: pi-ai's chars/3.5 over the message text and the tool
+ *  declarations, as OpenRouter's billed count matched pi-ai's estimate. */
+const billedO = (req: StubRequest) => Math.ceil((
+	req.messages.reduce((n, m) => n + (typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? "")).length, 0) +
+	JSON.stringify(((req.body.tools ?? []) as Array<{ function: unknown }>).map((t) => t.function)).length
+) / 3.5);
+/** Its pre-flight count: 1.18x the bill (LH-54). */
+const overcounted = (req: StubRequest) => Math.ceil(1.18 * billedO(req));
 const responder: StubResponder = (req) => {
+	if (req.model === "stub-o" && overcounted(req) + maxOutputTokens(req) > LIMIT) {
+		rejections++;
+		return reply.contextLength(LIMIT, { text: overcounted(req), output: maxOutputTokens(req) });
+	}
 	const limit = req.model === "stub-t" ? TINY : req.model === "stub-s" ? SMALL_OUT : LIMIT;
-	if (requestTokens(req) > limit || (isTurnRequest(req) && forcedRejections > 0 && forcedRejections--)) {
+	if ((req.model !== "stub-o" && requestTokens(req) > limit) || (isTurnRequest(req) && forcedRejections > 0 && forcedRejections--)) {
 		rejections++;
 		return reply.contextLength(limit);
 	}
 	if (!isTurnRequest(req)) return reply.text(SUMMARY);
 	const text = `Answering part ${lastPart(req)}. ${REPLY}`;
 	if (req.model === "stub-s") return reply.text(text, { prompt_tokens: 0, completion_tokens: 0 });
+	if (req.model === "stub-o") return reply.text(text, { prompt_tokens: billedO(req), completion_tokens: Math.ceil(text.length / 3.5) });
 	return reply.text(text, { prompt_tokens: inputTokens(req), completion_tokens: Math.ceil(text.length / 4) });
 };
 
@@ -85,12 +101,17 @@ before(async () => {
 		providers: [{
 			id: STUB,
 			baseUrl: stub.baseUrl,
-			models: [{ id: "stub-q", contextWindow: LIMIT, maxTokens: MAX_OUTPUT }, { id: "stub-t", contextWindow: TINY, maxTokens: 2_048 }, { id: "stub-s", contextWindow: SMALL_OUT, maxTokens: 1_024 }],
+			models: [
+				{ id: "stub-q", contextWindow: LIMIT, maxTokens: MAX_OUTPUT },
+				{ id: "stub-o", contextWindow: LIMIT, maxTokens: MAX_OUTPUT },
+				{ id: "stub-t", contextWindow: TINY, maxTokens: 2_048 },
+				{ id: "stub-s", contextWindow: SMALL_OUT, maxTokens: 1_024 },
+			],
 		}],
 		settings: {
 			version: 1,
 			models: { strong: slot, cheap: slot, vision: slot },
-			contextWindows: { [`${STUB}:stub-q`]: 1_000_000, [`${STUB}:stub-t`]: 1_000_000 },
+			contextWindows: { [`${STUB}:stub-q`]: 1_000_000, [`${STUB}:stub-o`]: 1_000_000, [`${STUB}:stub-t`]: 1_000_000 },
 			graph: { enabled: false },
 		},
 	});
@@ -110,16 +131,16 @@ const isReply = (m: Msg | undefined) => m?.role === "assistant" && m.stopReason 
 const replies = (c: Chat) => c.messages.filter(isReply).length;
 const recoveryMarkers = (c: Chat) => c.messages.filter((m) => m.customType === "compaction" && m.details?.notice);
 const settingsFile = () => path.join(server.dataDir, "settings.json");
-const readSettings = () => JSON.parse(fs.readFileSync(settingsFile(), "utf-8")) as { contextWindows?: Record<string, number>; learnedContextLimits?: Record<string, number> };
+const readSettings = () => JSON.parse(fs.readFileSync(settingsFile(), "utf-8")) as { contextWindows?: Record<string, number>; learnedContextLimits?: Record<string, number>; learnedOvercounts?: Record<string, number> };
 const learned = () => readSettings().learnedContextLimits?.[`${STUB}:stub-q`];
 const writeSettings = (patch: Record<string, unknown>) => fs.writeFileSync(settingsFile(), JSON.stringify({ ...readSettings(), ...patch }, null, "\t"));
 type ModelRow = { id: string; contextWindow: number; customContextWindow?: number; learnedContextLimit?: number };
 const modelRow = async (id: string) => (await server.json<{ models: ModelRow[] }>("/api/models")).models.find((m) => m.id === id);
 const errored = (c: Chat) => c.messages.filter((m) => m.role === "assistant" && m.stopReason === "error");
 
-/** A new chat, with no limit learned from an earlier case. */
+/** A new chat, with no limit or overcount learned from an earlier case. */
 async function newChat(title: string): Promise<string> {
-	const { learnedContextLimits: _learned, ...rest } = JSON.parse(fs.readFileSync(settingsFile(), "utf-8")) as Record<string, unknown>;
+	const { learnedContextLimits: _learned, learnedOvercounts: _overcounts, ...rest } = JSON.parse(fs.readFileSync(settingsFile(), "utf-8")) as Record<string, unknown>;
 	fs.writeFileSync(settingsFile(), JSON.stringify(rest, null, "\t"));
 	rejections = 0;
 	return (await server.json<{ id: string }>("/api/chats", { body: { title } })).id;
@@ -213,7 +234,7 @@ test("one huge paste: the recovery's retry fits the window with the tool declara
 	await turn(id, paste(1));
 	// ~22k tokens of pasted notes in one message, like the live 69k-char paste.
 	const start = stub.requests.length;
-	const c = await turn(id, `Part 2: all my notes at once. ${"A derivative measures how fast a quantity changes at an instant. ".repeat(1_400)}`);
+	const c = await turn(id, HUGE_PASTE);
 	const requests = stub.requests.slice(start).filter(isTurnRequest);
 	assert.equal(rejections, 1, "only the first request is rejected");
 	assert.equal(requests.length, 2, "the rejected turn and one retry");
@@ -224,6 +245,41 @@ test("one huge paste: the recovery's retry fits the window with the tool declara
 	const after = await turn(id, paste(3));
 	assert.ok(isReply(after.messages.at(-1)));
 	assert.equal(rejections, 1, "no later rejection");
+});
+
+test("one huge paste on a route that counts 1.18x: the retry cannot fit, so it is held back, and the learner reads one plain explanation", async () => {
+	const id = await newChat("One huge paste, counted high");
+	await server.json(`/api/chats/${id}/settings`, { method: "PUT", body: { model: { provider: STUB, id: "stub-o" } } });
+	await turn(id, paste(1));
+	const start = stub.requests.length;
+	const c = await turn(id, HUGE_PASTE);
+	const sent = stub.requests.slice(start).filter((r) => r.model === "stub-o" && isTurnRequest(r));
+	assert.equal(rejections, 1, "the provider rejected the paste once");
+	assert.equal(sent.length, 1, "the retry was held back, never sent");
+	const overcount = readSettings().learnedOvercounts?.[`${STUB}:stub-o`];
+	assert.ok(overcount !== undefined && Math.abs(overcount - 1.18) < 0.02, `the rejection taught the 1.18x count (${overcount})`);
+	assert.equal(recoveryMarkers(c).length, 1, "one recovery, no loop");
+	const failed = c.messages.at(-1)!;
+	assert.equal(failed.role, "assistant");
+	assert.match(failed.errorMessage ?? "", /^This chat is still too long for stub-o\b/, "the explanation replaces the held-back retry");
+	assert.equal(failed.contextOverflow?.providerText, undefined, "the held-back retry reached no provider");
+	// Settled: nothing runs on, and nothing more is sent.
+	const requests = stub.requests.length;
+	await new Promise((r) => setTimeout(r, 2_000));
+	assert.equal(stub.requests.length, requests, "no further request");
+	assert.equal((await chat(id)).messages.length, c.messages.length, "nothing more lands");
+	const page = await chrome.browser.newPage();
+	try {
+		await page.goto(`${server.url}/chat/${id}`, { waitUntil: "domcontentloaded", timeout: 180_000 });
+		await page.waitForSelector('[data-testid="chat-error"]', { timeout: 60_000 });
+		const banners = await page.$$eval('[data-testid="chat-error"]', (els) => els.map((el) => el.textContent ?? ""));
+		assert.equal(banners.length, 1, "one error banner");
+		assert.ok(banners[0]!.includes(failed.errorMessage!), `the banner reads the explanation (${banners[0]})`);
+		const body = await page.evaluate(() => document.body.innerText);
+		assert.ok(!/maximum context length|context_length_exceeded|Not sent:/.test(body), "no stale rejection or held-back text renders");
+	} finally {
+		await page.close();
+	}
 });
 
 test("a window too small for the prompt, the tool declarations and a reply: nothing is sent to be cut off, and the learner gets the explanation", async () => {

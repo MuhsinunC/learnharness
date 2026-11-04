@@ -6,7 +6,9 @@
  * actually enforces, then the turn is retried ONCE (chat-handler). The
  * learner's "Repair this chat" action runs the same compaction. The limit
  * a rejection states is remembered per model (learnedContextLimits), so
- * the threshold compaction fires before the next rejection.
+ * the threshold compaction fires before the next rejection, and so is how
+ * much more than pi-ai's estimate it says the provider counted
+ * (learnedOvercounts, LH-54), so every request keeps that much free.
  *
  * Nothing is ever deleted: the rejected reply stays in the record (pi
  * drops errored assistants on the wire), and full history stays behind a
@@ -42,6 +44,9 @@ import {
 	overflowProviderText,
 	planTreeToText,
 	reportedContextLimit,
+	reportedInputTokens,
+	sentEstimate,
+	MAX_OVERCOUNT,
 	type ChatRecord,
 	type CompactionDetails,
 	type LhMarkerMessage,
@@ -61,7 +66,7 @@ import {
 	summarySpan,
 	type CompactionDeps,
 } from "./compaction.ts";
-import { CONTEXT_SAFETY_TOKENS, replyFloorTokens, type PiEngine } from "../agent/models.ts";
+import { CONTEXT_SAFETY_TOKENS, inputBudgetTokens, replyFloorTokens, type PiEngine } from "../agent/models.ts";
 import { stores } from "./stores.ts";
 import { updateSettings } from "../store/settings.ts";
 
@@ -82,19 +87,52 @@ function rejectionInForce(overflow: LhMessage | undefined, model: { provider: st
 	return cleared === undefined || overflow.timestamp > cleared;
 }
 
-/** Remember the limit the chat's newest rejection states for its model —
- *  its own settings key, never the user's window. A held-back request
- *  has no provider text, so it never teaches a limit, nor does a
+/** What this rejection says of the model's overcount (LH-54): its stated
+ *  input over the estimate the engine stamped when it sent the request.
+ *  "none" when the provider counted no more than the estimate; undefined
+ *  when either count is missing, or for a ratio above MAX_OVERCOUNT (the
+ *  estimate missed part of the request: a misread, not a tokenizer). */
+function rejectionOvercount(overflow: LhMessage | undefined): number | "none" | undefined {
+	const counted = reportedInputTokens(overflowProviderText(overflow));
+	const estimate = sentEstimate(overflow);
+	if (!counted || !estimate) return undefined;
+	const ratio = counted / estimate;
+	return ratio <= 1 ? "none" : ratio <= MAX_OVERCOUNT ? ratio : undefined;
+}
+
+/** Remember what the chat's newest rejection states for its model — its
+ *  own settings keys, never the user's window: the limit, and how much
+ *  more than pi-ai's estimate the provider counted. The newest count
+ *  replaces the learned ratio, down as well as up (LH-54 review), as the
+ *  newest stated limit replaces the limit: a ratio learned too high would
+ *  otherwise hold back requests for good, while one too low costs one
+ *  more rejection, which teaches it again. A rejection that states no
+ *  count, or a misread one, leaves the ratio as it was. A held-back
+ *  request has no provider text, so it never teaches either, nor does a
  *  rejection no longer in force (rejectionInForce). */
 export function learnStatedLimit(model: { provider: string; id: string }, messages: readonly LhMessage[]): void {
 	const overflow = lastOverflow(messages);
 	const stated = reportedContextLimit(overflowProviderText(overflow));
-	if (!stated) return;
+	const overcount = rejectionOvercount(overflow);
+	if (!stated && overcount === undefined) return;
 	const modelId = `${model.provider}:${model.id}`;
-	updateSettings((record) =>
-		rejectionInForce(overflow, model, record.learnedLimitsClearedAt) && record.learnedContextLimits?.[modelId] !== stated
-			? { ...record, learnedContextLimits: { ...record.learnedContextLimits, [modelId]: stated } }
-			: record);
+	let learned = false;
+	updateSettings((record) => {
+		if (!rejectionInForce(overflow, model, record.learnedLimitsClearedAt)) return record;
+		learned = !!stated && record.learnedContextLimits?.[modelId] !== stated;
+		const { [modelId]: known, ...others } = record.learnedOvercounts ?? {};
+		const ratio = overcount === "none" ? undefined : overcount ?? known;
+		const changed = ratio !== known;
+		return learned || changed
+			? {
+				...record,
+				...(learned ? { learnedContextLimits: { ...record.learnedContextLimits, [modelId]: stated! } } : {}),
+				...(changed ? { learnedOvercounts: ratio === undefined ? others : { ...others, [modelId]: ratio } } : {}),
+			}
+			: record;
+	});
+	// The catalog reports the learned limit: open windows refetch it (LH-54).
+	if (learned) emit("models-changed", {});
 }
 
 /** THE WINDOW SEAM: the window this app may trust for the engine's
@@ -116,9 +154,15 @@ const WIRE_CHARS_PER_TOKEN = 3.5;
 
 /** The share of its room a recovery retry fills, the system prompt and
  *  tool declarations included (LH-55). The OB-0645 live check counted
- *  OpenRouter's pre-flight at about 1.18x the billed tokens, and pi-ai's
- *  flat 4,096-token margin absorbs that only below ~22.7k tokens once it
- *  clamps max_tokens to the window: 1/1.18 ≈ 0.85, less some headroom. */
+ *  OpenRouter's pre-flight at about 1.18x the billed tokens: 1/1.18 ≈
+ *  0.85, less some headroom, for a provider whose rejection states no
+ *  count. It stays when the overcount is known (LH-54 review), though
+ *  the room then takes the overcount off already: the share is also the
+ *  next turn's growth room under the threshold compaction. With no
+ *  overcount the reply's room is the threshold; with a ratio r it sits
+ *  (reserve − 4,096 − reply floor) × (1 − 1/r) above it. At 40,960 with
+ *  a 16k max output and 1.18x, a full room lands 1,406 tokens over the
+ *  21,156 threshold, and the next turn would condense again. */
 const RETRY_FIT_SHARE = 0.8;
 
 /** Per-line cap for the learner's dropped lines in the fallback marker. */
@@ -203,13 +247,15 @@ export interface RecoveryDeps extends Omit<CompactionDeps, "thresholdTokens" | "
 	/** The window to fit (recoveryWindowTokens). */
 	windowTokens: number;
 	/** What the marker and the kept tail may fill, in wire tokens:
-	 *  RETRY_FIT_SHARE of the window less the reply's room
-	 *  (outputReserveTokens), less the system prompt and tool
-	 *  declarations. At most 0 when those leave no room. */
+	 *  RETRY_FIT_SHARE of what the window leaves a request with the
+	 *  reply's room (outputReserveTokens) and the engine's margin, less
+	 *  the system prompt and tool declarations. At most 0 when those
+	 *  leave no room. */
 	fitTokens: number;
 	/** What they may fill before the request is held back: the same
-	 *  share of the window less pi-ai's margin and the least reply room
-	 *  (replyFloorTokens), less the prompt and declarations; the whole of
+	 *  share of what the window leaves with the engine's margin and the
+	 *  least reply room (replyFloorTokens), less the prompt and
+	 *  declarations; the whole of
 	 *  that room when the share leaves none. At most 0 when nothing can
 	 *  be sent: the chat is explained, never condensed. */
 	floorFitTokens: number;
@@ -237,7 +283,10 @@ export function recoveryDeps(chatStore: ChatStore, record: ChatRecord, engine: P
 	const inForce = rejectionInForce(overflow, engine.model, stores.settingsStore.readSettings()?.learnedLimitsClearedAt);
 	const windowTokens = recoveryWindowTokens(overflow, contextWindowFor(engine), failedRequestTokens, inForce);
 	const prefixTokens = requestPrefixTokens(record.id, kind);
-	const floorRoom = windowTokens - CONTEXT_SAFETY_TOKENS - replyFloorTokens(engine.model.maxTokens);
+	// Sized from the engine's own margin (LH-54): with the provider's
+	// overcount, both rooms come down as its requests' do.
+	const floorRoom = inputBudgetTokens(windowTokens, replyFloorTokens(engine.model.maxTokens), engine.overcount);
+	const reserveRoom = inputBudgetTokens(windowTokens, outputReserveTokens(windowTokens, engine.model.maxTokens) - CONTEXT_SAFETY_TOKENS, engine.overcount);
 	const marginedFloorFit = Math.floor(RETRY_FIT_SHARE * floorRoom) - prefixTokens;
 	return {
 		chatStore,
@@ -247,7 +296,7 @@ export function recoveryDeps(chatStore: ChatStore, record: ChatRecord, engine: P
 		rejectionInForce: inForce,
 		failedRequestTokens,
 		windowTokens,
-		fitTokens: Math.floor(RETRY_FIT_SHARE * (windowTokens - outputReserveTokens(windowTokens, engine.model.maxTokens))) - prefixTokens,
+		fitTokens: Math.floor(RETRY_FIT_SHARE * reserveRoom) - prefixTokens,
 		// A prefix that fits only without the margin still gets its room
 		// (LH-55): a budget of 0 would drop the whole history.
 		floorFitTokens: marginedFloorFit > 0 ? marginedFloorFit : floorRoom - prefixTokens,

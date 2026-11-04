@@ -102,6 +102,8 @@ export interface EffectiveSettings {
 	/** The limits providers stated, as stored, keyed `provider:id` (LH-40)
 	 *  — the engine's window never exceeds one (LH-50). */
 	learnedContextLimits: Record<string, number>;
+	/** The overcounts providers showed, as stored (LH-54). */
+	learnedOvercounts: Record<string, number>;
 	/** Image-support overrides as stored (LH-39) — core/attachments.ts
 	 *  supportsImages resolves a pair against the catalog. */
 	imageSupport: ImageSupportSettings;
@@ -233,6 +235,7 @@ export function resolveSettings(record: UserSettings | null): EffectiveSettings 
 		},
 		contextWindows: record?.contextWindows ?? {},
 		learnedContextLimits: record?.learnedContextLimits ?? {},
+		learnedOvercounts: record?.learnedOvercounts ?? {},
 		imageSupport: record?.imageSupport ?? {},
 	};
 }

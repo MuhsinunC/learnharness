@@ -48,7 +48,7 @@ import {
 } from "../core/index.ts";
 import { emit } from "../core/events.ts";
 import type { ChatStore } from "../core/ports.ts";
-import { CONTEXT_SAFETY_TOKENS, type PiEngine } from "../agent/models.ts";
+import { CONTEXT_SAFETY_TOKENS, inputBudgetTokens, replyFloorTokens, type PiEngine } from "../agent/models.ts";
 import { runSubagent } from "../agent/subagents/pi-run.ts";
 import { composeInstructions, fullToolRegistry, type AgentKind } from "../agent/teacher-agent.ts";
 
@@ -161,14 +161,17 @@ export function outputReserveTokens(contextWindowTokens: number, maxOutputTokens
  *  (honest: no fake window — the catalog-index precedent). With the
  *  engine's max output known, the reserve is the reply's room
  *  (outputReserveTokens); without it, pi's 16k, a quarter of a small
- *  window (LH-40: a learned 8k limit). */
-export function effectiveThresholdTokens(settingTokens: number | undefined, contextWindowTokens: number | undefined, maxOutputTokens?: number): number {
+ *  window (LH-40: a learned 8k limit). A model whose provider counts
+ *  more than pi-ai's estimate (`overcount`, LH-54) keeps the same growth
+ *  room below a held-back floor that its margin brings down: the
+ *  threshold always lands first. With no overcount it is window − reserve. */
+export function effectiveThresholdTokens(settingTokens: number | undefined, contextWindowTokens: number | undefined, maxOutputTokens?: number, overcount?: number): number {
 	const setting = settingTokens ?? 150_000;
 	if (contextWindowTokens === undefined) return setting;
-	const reserve = maxOutputTokens === undefined
-		? Math.min(COMPACTION_RESERVE_TOKENS, Math.floor(contextWindowTokens / 4))
-		: outputReserveTokens(contextWindowTokens, maxOutputTokens);
-	return Math.min(setting, Math.max(contextWindowTokens - reserve, 1));
+	if (maxOutputTokens === undefined) return Math.min(setting, Math.max(contextWindowTokens - Math.min(COMPACTION_RESERVE_TOKENS, Math.floor(contextWindowTokens / 4)), 1));
+	const floor = replyFloorTokens(maxOutputTokens);
+	const growth = outputReserveTokens(contextWindowTokens, maxOutputTokens) - CONTEXT_SAFETY_TOKENS - floor;
+	return Math.min(setting, Math.max(inputBudgetTokens(contextWindowTokens, floor, overcount) - growth, 1));
 }
 
 /** The kept tail for a window: pi's 20k, or a quarter of a small window

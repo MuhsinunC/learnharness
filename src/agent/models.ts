@@ -21,7 +21,7 @@ import { Value } from "typebox/value";
 import { type ModelRole } from "../../config.ts";
 import { claudeCodeProvider, type ClaudeCodeProviderDeps } from "./claude-code/provider.ts";
 import { DEFAULT_THINKING_ORDER } from "../core/settings.ts";
-import type { HeldBack } from "../core/context-overflow.ts";
+import { contextOverflowState, type HeldBack } from "../core/context-overflow.ts";
 import packageMetadata from "../../package.json" with { type: "json" };
 import { chatGPTModel } from "./chatgpt-bridge.ts";
 import { chatGPTStream } from "./chatgpt-stream.ts";
@@ -57,6 +57,10 @@ export interface PiEngine {
 	/** The resolved (config-or-settings, CLAMPED) thinking level —
 	 *  observability + tests; the streamFn pins it anyway. */
 	level?: ThinkingLevel;
+	/** The model's learned overcount (ResolvedModelSpec.overcount): the
+	 *  threshold compaction and recovery size from the same margin as
+	 *  the engine's requests (contextMarginTokens). */
+	overcount?: number;
 }
 
 export type { ThinkingLevel };
@@ -139,6 +143,10 @@ export interface ResolvedModelSpec {
 	 *  the engine's window never exceeds it, so pi-ai's max-tokens clamp
 	 *  uses the real limit, not a larger custom window (LH-50). */
 	contextLimit?: number;
+	/** How much more than pi-ai's estimate the provider counted in its
+	 *  own rejections (LH-54's learned overcount): the engine's requests
+	 *  keep that much more free (contextMarginTokens). */
+	overcount?: number;
 }
 
 /** The first entry of the baked default order the model supports (owner,
@@ -201,32 +209,86 @@ function maxOutputTokens(): number | undefined {
  *  much free (api/simple-options.js CONTEXT_SAFETY_TOKENS). */
 export const CONTEXT_SAFETY_TOKENS = 4096;
 
+/** The APIs whose thinking budget pi-ai adds to the reply's max tokens
+ *  before clamping the sum to the window (api/anthropic-messages and
+ *  api/bedrock-converse-stream streamSimple): options.maxTokens does not
+ *  bound such a request. */
+const BUDGET_THINKING_APIS = new Set<string>(["anthropic-messages", "bedrock-converse-stream"]);
+
 /** The least reply room a request goes out with (LH-50): 1024 tokens,
  *  or the model's whole max output when that is smaller. */
 export const replyFloorTokens = (maxTokens: number) => Math.min(1024, maxTokens);
 
-/** The reply room pi-ai's max-tokens clamp leaves this request:
- *  window − its estimate of the context (system prompt, tool
- *  declarations, messages) − its safety margin. */
-function replyRoomTokens(model: Model<Api>, context: Context): number {
-	if (!(model.contextWindow > 0)) return Infinity;
-	return model.contextWindow - estimateContextTokens(normalizeContext(context)).tokens - CONTEXT_SAFETY_TOKENS;
+/** The margin a request keeps under the window, for pi-ai's estimate
+ *  of its input (LH-54): pi-ai's flat 4,096, plus what the provider
+ *  counts over that estimate when its rejections showed it counts more
+ *  (`overcount`, the learned ratio). The request clamp, the held-back
+ *  floor, the threshold compaction and recovery all size from it. */
+export function contextMarginTokens(estimate: number, overcount = 1): number {
+	return CONTEXT_SAFETY_TOKENS + Math.max(0, Math.ceil(estimate * (overcount - 1)));
+}
+
+/** Its inverse: the largest estimate a request may carry and still leave
+ *  its reply `room` tokens (estimate + margin + room ≤ window). */
+export function inputBudgetTokens(windowTokens: number, room: number, overcount = 1): number {
+	return Math.floor((windowTokens - CONTEXT_SAFETY_TOKENS - room) / Math.max(overcount, 1));
+}
+
+/** The reply room this request goes out with: window − pi-ai's estimate
+ *  of the context (system prompt, tool declarations, messages) − the
+ *  margin (contextMarginTokens). */
+function replyRoom(model: Model<Api>, context: Context, overcount: number | undefined): { room: number; estimate: number; margin: number } {
+	const estimate = estimateContextTokens(normalizeContext(context)).tokens;
+	const margin = contextMarginTokens(estimate, overcount);
+	return { room: model.contextWindow > 0 ? model.contextWindow - estimate - margin : Infinity, estimate, margin };
+}
+
+/** The request's stream, with pi-ai's estimate stamped on a length
+ *  rejection (core SentEstimate): the provider's own count in it then
+ *  teaches the model's overcount (LH-54, context-recovery). It always
+ *  settles: the source's result is passed on (pi-ai's lazy streams end
+ *  with a result and no event), and a source that throws, or ends with
+ *  neither, ends in an error event. */
+function withSentEstimate(model: Model<Api>, source: AssistantMessageEventStream, estimate: number): AssistantMessageEventStream {
+	const output = new AssistantMessageEventStream();
+	const fail = (text: string) => { output.push({ type: "error", reason: "error", error: errorMessage(model, text) }); output.end(); };
+	void (async () => {
+		let terminal = false;
+		try {
+			for await (const event of source) {
+				if (event.type === "error" && contextOverflowState(event.error) !== null) Object.assign(event.error, { sentEstimate: estimate });
+				terminal ||= event.type === "done" || event.type === "error";
+				output.push(event);
+			}
+			// An ended source resolved its result already, if it has one.
+			const result = terminal ? await source.result() : await Promise.race([source.result(), Promise.resolve(undefined)]);
+			if (result) output.end(result);
+			else fail("The model's stream ended without a response.");
+		} catch (error) {
+			fail(error instanceof Error ? error.message : String(error));
+		}
+	})();
+	return output;
+}
+
+/** An error reply of `model` that no provider answered. */
+function errorMessage(model: Model<Api>, text: string): AssistantMessage {
+	const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+	return { role: "assistant", api: model.api, provider: model.provider, model: model.id, content: [], usage, stopReason: "error", errorMessage: text, timestamp: Date.now() };
 }
 
 /** A request whose reply would be cut off silently is held back as a
  *  length rejection marked `heldBack` (LH-50, core/context-overflow):
  *  overflow recovery then condenses the chat, or explains that nothing
  *  can (context-recovery). No provider saw it, so it states no limit. */
-function heldBackStream(model: Model<Api>, room: number, lifecycle?: ChatGPTDispatchLifecycle) {
+function heldBackStream(model: Model<Api>, { room, estimate, margin }: ReturnType<typeof replyRoom>, lifecycle?: ChatGPTDispatchLifecycle) {
 	const output = new AssistantMessageEventStream();
-	const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
-	markUnadmittedUsage(usage);
-	lifecycle?.noDispatch("heldBack");
 	const error: AssistantMessage & HeldBack = {
-		role: "assistant", api: model.api, provider: model.provider, model: model.id, content: [], usage, stopReason: "error", timestamp: Date.now(),
-		errorMessage: `Not sent: the reply would have only ${Math.max(room, 0)} tokens of room in this chat's ${model.contextWindow}-token context window.`,
+		...errorMessage(model, `Not sent: the reply would have only ${Math.max(room, 0)} tokens of room in this chat's ${model.contextWindow}-token context window (about ${estimate} tokens of request and a ${margin}-token margin).`),
 		heldBack: true,
 	};
+	markUnadmittedUsage(error.usage);
+	lifecycle?.noDispatch("heldBack");
 	output.push({ type: "error", reason: "error", error });
 	output.end();
 	return output;
@@ -267,6 +329,7 @@ export function piEngineForSpec(spec: ResolvedModelSpec, background: boolean | (
 	return {
 		model,
 		level,
+		...(spec.overcount !== undefined ? { overcount: spec.overcount } : {}),
 		// bound streamSimple: the agent loop forwards state.thinkingLevel as
 		// `reasoning` (undefined = off on pi-ai's scale); the clamp above keeps
 		// the pin honest even when config or settings drift off the map.
@@ -277,14 +340,28 @@ export function piEngineForSpec(spec: ResolvedModelSpec, background: boolean | (
 			const streamModel = model !== catalogModel && matches ? model
 				: cap !== undefined && !matches && requestModel.maxTokens > cap
 					? { ...requestModel, maxTokens: cap } : requestModel;
-			const room = replyRoomTokens(streamModel, context);
-			if (room < replyFloorTokens(streamModel.maxTokens)) return heldBackStream(streamModel, room, lifecycle);
+			// The overcount is this model's: another model's request keeps
+			// pi-ai's flat margin.
+			const fit = replyRoom(streamModel, context, matches ? spec.overcount : undefined);
+			if (fit.room < replyFloorTokens(streamModel.maxTokens)) return heldBackStream(streamModel, fit, lifecycle);
 			const outputCeiling = cap === undefined ? undefined : Math.min(streamModel.maxTokens, cap);
-			return stream(streamModel, context, {
+			const asked = outputCeiling !== undefined && options?.maxTokens !== undefined && options.maxTokens > outputCeiling ? outputCeiling : options?.maxTokens;
+			// The margin past pi-ai's flat one reaches the request as the
+			// reply's max tokens: every API takes the smaller of those and its
+			// own clamp to the window, and the model keeps its real window.
+			// Anthropic's and Bedrock's budget thinking add the thinking
+			// budget to max tokens and clamp the sum to the window with the
+			// flat margin alone, so there the margin goes through a window
+			// that much smaller.
+			const extraMargin = fit.margin - CONTEXT_SAFETY_TOKENS;
+			const budgetThinking = level !== "off" && BUDGET_THINKING_APIS.has(streamModel.api);
+			const sentModel = extraMargin > 0 && budgetThinking && streamModel.contextWindow > 0 ? { ...streamModel, contextWindow: streamModel.contextWindow - extraMargin } : streamModel;
+			const maxTokens = extraMargin > 0 && !budgetThinking ? Math.min(asked ?? streamModel.maxTokens, fit.room) : asked;
+			return withSentEstimate(streamModel, stream(sentModel, context, {
 				...options,
-				...(outputCeiling !== undefined && options?.maxTokens !== undefined && options.maxTokens > outputCeiling ? { maxTokens: outputCeiling } : {}),
+				...(maxTokens !== options?.maxTokens ? { maxTokens } : {}),
 				reasoning: level === "off" ? undefined : level,
-			});
+			}), fit.estimate);
 		},
 	};
 }

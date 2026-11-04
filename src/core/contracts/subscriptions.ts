@@ -64,5 +64,8 @@ export interface NativeSubscriptionControlBridge {
 	retry(providerId: NativeSubscriptionProviderId): Promise<void>;
 	disconnect(providerId: NativeSubscriptionProviderId): Promise<void>;
 	consent(providerId: NativeSubscriptionProviderId, enabled: boolean): Promise<void>;
-	onChange(listener: () => void): () => void;
+	/** `resync`: the web bridge's change channel reopened, so a change may
+	 *  have been missed; re-read, but nothing is known to have changed
+	 *  (LH-54). Otherwise a change happened. */
+	onChange(listener: (change?: "resync") => void): () => void;
 }

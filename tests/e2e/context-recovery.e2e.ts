@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { after, before, test } from "node:test";
 import { bootServer, until, type LhServer } from "./harness/server.ts";
-import { hydrated, launchChrome, type HeadlessChrome } from "./harness/chrome.ts";
+import { DROPPABLE_CHANNEL, hydrated, launchChrome, type ChannelWindow, type HeadlessChrome } from "./harness/chrome.ts";
 import type { Page } from "puppeteer-core";
 import { maxOutputTokens, reply, startStubProvider, type StubProvider, type StubRequest, type StubResponder } from "./harness/stub-provider.ts";
 
@@ -17,6 +17,10 @@ import { maxOutputTokens, reply, startStubProvider, type StubProvider, type Stub
 // answers past it with pi-ai's real context-length 400, stating LIMIT.
 // Its usage reports the input it counted (chars/4), so the threshold
 // compaction's usage anchor behaves as with a real provider.
+// (j) LH-54: a limit learned in one chat reaches the footer of another
+// chat's open page on the same model, with no reload.
+// (k) LH-54: one learned while that page's event channel is down reaches
+// its footer when the channel reopens.
 
 /** The real window, in tokens: between the sixth turn's request (about
  *  116k chars of messages, plus max_tokens 2,048) and the fifth's. Room
@@ -176,13 +180,18 @@ async function newChat(title: string): Promise<string> {
 }
 
 /** Open the chat and wait until React has hydrated `selector`. */
-async function openChat(id: string, selector: string) {
+async function openChat(id: string, selector: string, beforeLoad?: string) {
 	const page = await chrome.browser.newPage();
 	await page.setViewport({ width: 1400, height: 900 });
+	if (beforeLoad) await page.evaluateOnNewDocument(beforeLoad);
 	await page.goto(`${server.url}/chat/${id}`, { waitUntil: "domcontentloaded", timeout: 180_000 });
 	await hydrated(page, selector, 120_000);
 	return page;
 }
+
+/** The composer footer's context window, as the learner reads it. */
+const footerReads = (page: Page, denominator: string) =>
+	until(async () => (await page.$eval('[data-testid="stats-context"]', (el) => el.textContent ?? "").catch(() => "")).trim().endsWith(`/ ${denominator}`), `footer to read / ${denominator}`, 60_000);
 
 /** The sidebar row for a chat title, once the session list has loaded,
  *  React has hydrated it (a right-click before that opens nothing) and
@@ -279,9 +288,12 @@ test("(a, c) an over-window chat recovers on the next learner turn, and the lear
 
 	// The learner is in the tab when the chat breaks: part 6 goes through
 	// the composer, and the same page (no reload) must end on the
-	// recovered reply and the notice, with no error banner or bubble.
+	// recovered reply and the notice, with no error banner or bubble,
+	// and its footer on the learned window (LH-54).
 	const page = await openChat(id, '[data-testid="composer"] textarea');
 	try {
+		await footerReads(page, "1.5M");
+		await page.evaluate(() => { (window as { lh54?: boolean }).lh54 = true; });
 		await page.type('[data-testid="composer"] textarea', "Keep going, part 6.");
 		await page.keyboard.press("Enter");
 		await page.waitForFunction(
@@ -289,6 +301,8 @@ test("(a, c) an over-window chat recovers on the next learner turn, and the lear
 				[...document.querySelectorAll('[data-testid="compaction-divider"]')].some((el) => el.textContent?.includes("condensed the older part and continued")),
 			{ timeout: 120_000 },
 		);
+		await footerReads(page, "28.5k");
+		assert.equal(await page.evaluate(() => (window as { lh54?: boolean }).lh54), true, "the same page, never reloaded");
 		assert.equal(await page.$('[data-testid="chat-error"]'), null, "no stale error banner");
 		assert.ok(!(await page.evaluate(() => document.body.innerText)).includes("context_length_exceeded"), "the kept rejection renders nothing");
 	} finally {
@@ -542,4 +556,50 @@ test("(i) the stated limit is learned: after one recovery, the threshold compact
 	const later = done.messages.slice(done.messages.indexOf(done.messages.find((m) => m.id === marker.id)!) + 1);
 	assert.ok(later.some((m) => m.customType === "compaction" && !m.details?.notice), "a threshold compaction fired");
 	assert.equal(recoveryMarkers(done).length, 1);
+});
+
+test("(j) a limit learned in another chat reaches the open page's footer without a reload (LH-54)", async () => {
+	// The open page shows a chat that changes nothing while another chat
+	// on the same model is rejected and teaches the limit: only the
+	// server's word that the catalog changed can update its footer.
+	const open = await newChat("Open in the tab");
+	await grow(open, 1);
+	const other = await newChat("Elsewhere");
+	await grow(other, 5);
+	const page = await openChat(open, '[data-testid="composer"] textarea');
+	try {
+		await footerReads(page, "1.5M");
+		await page.evaluate(() => { (window as { lh54?: boolean }).lh54 = true; });
+		await send(other, "Keep going, part 6.");
+		await settled(other, "the recovered reply elsewhere", replyAfterRecovery);
+		assert.equal(settingsOnDisk().learnedContextLimits?.[`${STUB}:stub-a`], LIMIT, "the rejection taught the limit");
+		await footerReads(page, "28.5k");
+		assert.equal(await page.evaluate(() => (window as { lh54?: boolean }).lh54), true, "the same page, never reloaded");
+	} finally {
+		await page.close();
+	}
+});
+
+test("(k) a limit learned while the page's event channel is down reaches its footer when the channel reopens (LH-54)", async () => {
+	const open = await newChat("Open, then disconnected");
+	await grow(open, 1);
+	const other = await newChat("Elsewhere, meanwhile");
+	await grow(other, 5);
+	const page = await openChat(open, '[data-testid="composer"] textarea', DROPPABLE_CHANNEL);
+	try {
+		await footerReads(page, "1.5M");
+		const reconnects: string[] = [];
+		page.on("request", (r) => { if (new URL(r.url()).pathname === "/api/events") reconnects.push(r.url()); });
+		await page.evaluate(() => (window as unknown as ChannelWindow).lhChannel.drop());
+		await send(other, "Keep going, part 6.");
+		await settled(other, "the recovered reply elsewhere", replyAfterRecovery);
+		assert.equal(settingsOnDisk().learnedContextLimits?.[`${STUB}:stub-a`], LIMIT, "the rejection taught the limit");
+		await new Promise((r) => setTimeout(r, 2_000));
+		assert.ok((await page.$eval('[data-testid="stats-context"]', (el) => el.textContent ?? "")).trim().endsWith("/ 1.5M"), "the event never reached the page while it was down");
+		await page.evaluate(() => (window as unknown as ChannelWindow).lhChannel.reopen());
+		await footerReads(page, "28.5k");
+		assert.equal(reconnects.length, 1, "the page reconnected once, and the reconnect brought the limit");
+	} finally {
+		await page.close();
+	}
 });

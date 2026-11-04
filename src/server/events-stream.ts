@@ -14,9 +14,11 @@
  * loopback; the poll lattice it left behind is what this replaces).
  *
  * Wire dialect mirrors the turn stream (pi/ui-stream.ts): text/event-stream,
- * no-cache/no-transform, X-Accel-Buffering off — plus a `: ping` comment
- * every 25s to keep any intermediary from idling the socket out (locally
- * unnecessary, harmless, and it makes dead-connection detection cheap).
+ * no-cache/no-transform, X-Accel-Buffering off — plus an `: open` comment
+ * at once (the client's open, and so its resync, fires on the first
+ * bytes) and a `: ping` comment every 25s to keep any intermediary from
+ * idling the socket out (locally unnecessary, harmless, and it makes
+ * dead-connection detection cheap).
  *
  * The DIFFERENCE from the turn stream is lifetime: a turn's stream ends at
  * settle ([DONE]); this channel ends when the CLIENT goes away — cancel()
@@ -62,6 +64,11 @@ export function eventsResponse(): Response {
 				frame(`event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`);
 			});
 			heartbeat = setInterval(() => frame(": ping\n\n"), 25_000);
+			// Open the stream at once: the window's EventSource fires its open
+			// (the resync) on the first bytes, so without them the window's
+			// first event, or the first ping 25s on, doubled as a reconnect,
+			// and every consumer resynced mid-interaction (LH-54).
+			frame(": open\n\n");
 
 			teardown = stop;
 		},

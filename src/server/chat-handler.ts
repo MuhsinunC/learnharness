@@ -153,19 +153,22 @@ function resolveEngine(role: ModelRole): PiEngine | undefined {
 /** The spec with its pair's custom context window (LH-38) and the limit
  *  its provider stated (LH-40), from the same settings read that resolved
  *  it — every engine built here carries the window, capped at that limit
- *  (LH-50), so the engine model, pi-ai's max-tokens clamp and the
- *  compaction trigger agree. */
+ *  (LH-50), and the overcount its rejections showed (LH-54), so the
+ *  engine model, pi-ai's max-tokens clamp and the compaction trigger
+ *  agree. */
 function withContextWindow(
 	spec: ResolvedModelSpec,
-	settings: { contextWindows?: Record<string, number>; learnedContextLimits?: Record<string, number> } | null | undefined,
+	settings: { contextWindows?: Record<string, number>; learnedContextLimits?: Record<string, number>; learnedOvercounts?: Record<string, number> } | null | undefined,
 ): ResolvedModelSpec {
 	const key = contextWindowKey(spec.provider, spec.id);
 	const contextWindow = settings?.contextWindows?.[key];
 	const contextLimit = settings?.learnedContextLimits?.[key];
+	const overcount = settings?.learnedOvercounts?.[key];
 	return {
 		...spec,
 		...(contextWindow !== undefined ? { contextWindow } : {}),
 		...(contextLimit !== undefined ? { contextLimit } : {}),
+		...(overcount !== undefined ? { overcount } : {}),
 	};
 }
 
@@ -401,7 +404,7 @@ export async function handleChatInput(
 			canStart: () => connectionBackgroundAllowed(conversation.provider),
 			modelId: modelIdForCompaction,
 			kind: sessionKind(record),
-			thresholdTokens: effectiveThresholdTokens(effective.compaction?.thresholdTokens, compactionWindow, conversationEngine.model.maxTokens),
+			thresholdTokens: effectiveThresholdTokens(effective.compaction?.thresholdTokens, compactionWindow, conversationEngine.model.maxTokens, conversationEngine.overcount),
 			keepRecentTokens: keepRecentTokensFor(compactionWindow),
 		},
 		chatId,
@@ -781,7 +784,7 @@ export async function handleChatInput(
 							canStart: () => connectionBackgroundAllowed(spec.provider),
 							modelId: kickModelId,
 							kind: sessionKind(freshRecord),
-							thresholdTokens: effectiveThresholdTokens(fresh.compaction?.thresholdTokens, contextWindowFor(kickEngine), kickEngine.model.maxTokens),
+							thresholdTokens: effectiveThresholdTokens(fresh.compaction?.thresholdTokens, contextWindowFor(kickEngine), kickEngine.model.maxTokens, kickEngine.overcount),
 							keepRecentTokens: keepRecentTokensFor(contextWindowFor(kickEngine)),
 						};
 					}, chatId);
