@@ -19,6 +19,9 @@ export default async function ChatPage({
 	// over the settings record, server-read — the same gate home/new read. The
 	// server's 503 stays the truth; this only decides whether the pill rides.
 	const record = readSettingsRecord();
+	// The session's own model, else Strong for a legacy unstamped session:
+	// the send guards know it before the stats bar has read the session.
+	const model = chat.settings?.model ?? record?.models?.strong?.model;
 	return (
 		<Chat
 			key={chat.id}
@@ -31,6 +34,7 @@ export default async function ChatPage({
 				initialMessages={chat.messages}
 			initialError={turnFailure(chat.id)}
 			initialConfigured={slotsConfigured(record?.models)}
+			initialModel={model && `${model.provider}:${model.id}`}
 			initialPrompt={prompt}
 			// New-session images (LH-39): stored ids only — anything else drops.
 			initialAttachments={parseAttachmentRefs(images?.split(",").map((imageId) => ({ id: imageId }))) ?? undefined}

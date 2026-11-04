@@ -100,9 +100,13 @@ export function ModelControl({ chatId, onModelChange }: { chatId?: string; onMod
 		: strong;
 	const effectiveId = override?.model?.id;
 	const effectiveProvider = override?.model?.provider;
+	// Unread is not "unpicked": nothing is reported until the session (and,
+	// for a legacy one, Strong) is known, so the caller keeps what it has.
+	const unread = !!chatId && (!session || (!session.settings?.model && models === undefined));
 	useEffect(() => {
+		if (unread) return;
 		onModelChange?.(effectiveProvider && effectiveId ? `${effectiveProvider}:${effectiveId}` : undefined);
-	}, [effectiveProvider, effectiveId, onModelChange]);
+	}, [unread, effectiveProvider, effectiveId, onModelChange]);
 	const storedLevel = override?.thinkingLevel;
 	const entry = catalog?.models.find(
 		(m) => m.id === effectiveId && m.provider === effectiveProvider,

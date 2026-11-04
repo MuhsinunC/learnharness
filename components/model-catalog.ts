@@ -23,9 +23,9 @@ type Hub = NonNullable<ReturnType<typeof useNotifyHub>>;
  *  hub, however many readers it has (LH-54). */
 const hubSignals = new Map<Hub, { readers: number; stop: () => void }>();
 
-function fetchCatalog(revalidate = false): void {
+function fetchCatalog(revalidate = false): Promise<void> {
 	if (revalidate) { catalogGeneration++; catalogInflight = undefined; }
-	if (catalogInflight) return;
+	if (catalogInflight) return catalogInflight;
 	const generation = catalogGeneration;
 	catalogError = false;
 	publishCatalog();
@@ -40,6 +40,16 @@ function fetchCatalog(revalidate = false): void {
 			if (generation === catalogGeneration) { catalogLoaded = catalogCache; catalogError = true; publishCatalog(); }
 		})
 		.finally(() => { if (generation === catalogGeneration) catalogInflight = undefined; });
+	return catalogInflight;
+}
+
+/** Revalidate now and resolve with the catalog once no read is in flight
+ *  (the last good one if the read failed): for a decision that must not
+ *  read the snapshot it is about to replace. */
+export async function refreshCatalogNow(): Promise<ModelCatalogResponse | undefined> {
+	await fetchCatalog(true);
+	while (catalogInflight) await catalogInflight;
+	return catalogCache;
 }
 
 /** Refetch on the server's word that the catalog changed (a provider
@@ -50,7 +60,7 @@ function fetchCatalog(revalidate = false): void {
 function holdHub(hub: Hub): () => void {
 	let held = hubSignals.get(hub);
 	if (!held) {
-		const offEvent = hub.subscribe("models-changed", () => fetchCatalog(true));
+		const offEvent = hub.subscribe("models-changed", () => { void fetchCatalog(true); });
 		const offResync = hub.onResync((reconnect) => { if (reconnect) fetchCatalog(true); });
 		held = { readers: 0, stop: () => { offEvent(); offResync(); } };
 		hubSignals.set(hub, held);
@@ -86,6 +96,6 @@ export function useModelCatalog(): { catalog: ModelCatalogResponse | undefined; 
 		return () => { catalogReaders.delete(read); if (!catalogReaders.size) { stopCatalogSignals?.(); stopCatalogSignals = undefined; } };
 	}, []);
 	useEffect(() => hub ? holdHub(hub) : undefined, [hub]);
-	const refresh = useCallback(() => fetchCatalog(true), []);
+	const refresh = useCallback(() => { void fetchCatalog(true); }, []);
 	return { ...snapshot, refresh };
 }
