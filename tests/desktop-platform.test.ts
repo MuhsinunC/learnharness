@@ -169,23 +169,34 @@ describe("desktop packaging policy", () => {
 });
 
 describe("workflow action versions", () => {
-	type Step = { uses?: string; with?: Record<string, unknown> };
-	type Workflow = { jobs: Record<string, { steps?: Step[] }> };
+	type Step = { uses?: string; run?: string; with?: Record<string, unknown> };
+	type Job = { uses?: string; steps?: Step[]; needs?: string | string[]; env?: Record<string, string>; outputs?: Record<string, string> };
+	type Workflow = { jobs: Record<string, Job> };
 	const yaml = require("js-yaml") as { load(source: string): Workflow };
+	const loadWorkflow = (filename: string) =>
+		yaml.load(readFileSync(new URL(`../.github/workflows/${filename}`, import.meta.url), "utf8"));
 
 	for (const filename of ["ci.yml", "release.yml", "fork-release.yml", "fork-windows-build.yml"]) {
 		it(`${filename} uses supported Action runtimes without changing the app's Node 26`, () => {
-			const workflow = yaml.load(readFileSync(new URL(`../.github/workflows/${filename}`, import.meta.url), "utf8"));
+			const workflow = loadWorkflow(filename);
 			const expected = ["actions/checkout@v7", "actions/setup-node@v7"];
+			// Job-level reusable-workflow calls; each callee is checked by this loop too.
+			const expectedCalls = filename === "fork-release.yml" ? ["./.github/workflows/fork-windows-build.yml"] : [];
 			if (filename === "release.yml") {
 				expected.push("actions/github-script@v9", "actions/upload-artifact@v7", "maxim-lobanov/setup-xcode@v1");
 			}
 			if (filename === "fork-release.yml") expected.push("actions/download-artifact@v8");
 			if (filename === "fork-windows-build.yml") expected.push("actions/upload-artifact@v7");
 			const observed = new Set<string>();
+			const observedCalls: string[] = [];
 			for (const job of Object.values(workflow.jobs)) {
-				// A reusable-workflow job (fork-release.yml's windows) has no steps.
-				for (const step of job.steps ?? []) {
+				if (job.uses !== undefined) {
+					assert.ok(expectedCalls.includes(job.uses), `unexpected reusable workflow: ${job.uses}`);
+					observedCalls.push(job.uses);
+					continue;
+				}
+				assert.ok(job.steps, "a job without uses has steps");
+				for (const step of job.steps) {
 					if (!step.uses) continue;
 					assert.ok(expected.includes(step.uses), `unexpected Action reference: ${step.uses}`);
 					observed.add(step.uses);
@@ -199,8 +210,26 @@ describe("workflow action versions", () => {
 				}
 			}
 			assert.deepEqual([...observed].sort(), expected.sort());
+			assert.deepEqual(observedCalls.sort(), expectedCalls.sort());
 		});
 	}
+
+	it("fork-release.yml rejects a wrong dispatch before any build starts", () => {
+		const { preflight, windows, release } = loadWorkflow("fork-release.yml").jobs;
+		assert.ok(preflight?.steps && windows && release?.steps);
+		assert.equal(windows.needs, "preflight");
+		assert.deepEqual(release.needs, ["preflight", "windows"]);
+		const checks = preflight.steps.map(step => step.run ?? "").join("\n");
+		for (const check of ["git ls-remote origin refs/heads/ai-reviewed", "git ls-remote --tags origin", "fork-mac-e2e.yml"]) {
+			assert.ok(checks.includes(check), `preflight runs ${check}`);
+		}
+		// The release job uses preflight's values, so the two cannot disagree.
+		for (const [name, output] of [["FORK_VERSION", "fork_version"], ["TAG", "tag"], ["E2E_URL", "e2e_url"]]) {
+			assert.equal(release.env?.[name], `\${{ needs.preflight.outputs.${output} }}`);
+			assert.equal(preflight.outputs?.[output], `\${{ steps.check.outputs.${output} }}`);
+		}
+		assert.ok(!release.steps.some(step => step.run?.includes("fork-mac-e2e.yml")));
+	});
 });
 
 describe("desktop release workflow", () => {

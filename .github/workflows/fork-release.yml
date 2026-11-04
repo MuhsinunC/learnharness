@@ -27,18 +27,43 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Checked before any build, so a wrong dispatch spends no runner time.
+  # Every dispatch check runs here, before any build starts. The release job
+  # re-checks the tip and the tag right before tagging.
   preflight:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
       FORK_BUILD: ${{ inputs.fork_build }}
+      GH_TOKEN: ${{ github.token }}
+    outputs:
+      fork_version: ${{ steps.check.outputs.fork_version }}
+      tag: ${{ steps.check.outputs.tag }}
+      e2e_url: ${{ steps.check.outputs.e2e_url }}
     steps:
       - name: Require ai-reviewed and a valid fork build
         run: |
           set -euo pipefail
           [[ $GITHUB_REF == refs/heads/ai-reviewed ]] || { echo "dispatch on ai-reviewed, not $GITHUB_REF" >&2; exit 1; }
           [[ $FORK_BUILD =~ ^[1-9][0-9]*$ ]] || { echo "fork_build must be a positive integer" >&2; exit 1; }
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Require an unmoved tip, a new tag and Fork macOS E2E success at this commit
+        id: check
+        run: |
+          set -euo pipefail
+          [[ $(git ls-remote origin refs/heads/ai-reviewed | cut -f1) == "$GITHUB_SHA" ]] || { echo "ai-reviewed moved since dispatch" >&2; exit 1; }
+          version=$(jq -er .version package.json)-fork.$FORK_BUILD
+          tag=lh-$version
+          [[ -z $(git ls-remote --tags origin "refs/tags/$tag") ]] || { echo "$tag exists on origin" >&2; exit 1; }
+          url=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/fork-mac-e2e.yml/runs?head_sha=$GITHUB_SHA" \
+            --jq '[.workflow_runs[] | select(.conclusion == "success")][0].html_url // empty')
+          [[ -n $url ]] || { echo "no successful Fork macOS E2E run at $GITHUB_SHA yet; wait for it" >&2; exit 1; }
+          {
+            echo "fork_version=$version"
+            echo "tag=$tag"
+            echo "e2e_url=$url"
+          } >> "$GITHUB_OUTPUT"
 
   windows:
     needs: preflight
@@ -58,6 +83,9 @@ jobs:
       LH_FORK_ICON: icns
       GH_TOKEN: ${{ github.token }}
       FORK_BUILD: ${{ inputs.fork_build }}
+      FORK_VERSION: ${{ needs.preflight.outputs.fork_version }}
+      TAG: ${{ needs.preflight.outputs.tag }}
+      E2E_URL: ${{ needs.preflight.outputs.e2e_url }}
       EXE_NAME: ${{ needs.windows.outputs.exe_name }}
       EXE_SHA256: ${{ needs.windows.outputs.exe_sha256 }}
     steps:
@@ -74,25 +102,6 @@ jobs:
         with:
           node-version: "26"
           cache: npm
-      - name: Check the tip and tag
-        run: |
-          set -euo pipefail
-          [[ $(git ls-remote origin refs/heads/ai-reviewed | cut -f1) == "$GITHUB_SHA" ]] || { echo "ai-reviewed moved since dispatch" >&2; exit 1; }
-          version=$(node -p 'require("./package.json").version')-fork.$FORK_BUILD
-          tag=lh-$version
-          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then echo "$tag exists locally" >&2; exit 1; fi
-          [[ -z $(git ls-remote --tags origin "refs/tags/$tag") ]] || { echo "$tag exists on origin" >&2; exit 1; }
-          {
-            echo "FORK_VERSION=$version"
-            echo "TAG=$tag"
-          } >> "$GITHUB_ENV"
-      - name: Require Fork macOS E2E success at this commit
-        run: |
-          set -euo pipefail
-          url=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/fork-mac-e2e.yml/runs?head_sha=$GITHUB_SHA" \
-            --jq '[.workflow_runs[] | select(.conclusion == "success")][0].html_url // empty')
-          [[ -n $url ]] || { echo "no successful Fork macOS E2E run at $GITHUB_SHA yet; wait for it" >&2; exit 1; }
-          echo "E2E_URL=$url" >> "$GITHUB_ENV"
       - name: Install dependencies
         run: |
           set -euo pipefail
@@ -151,7 +160,7 @@ jobs:
             echo '## Verification'
             echo "- Fork macOS E2E passed at this commit: $E2E_URL"
             echo "- Built by \`scripts/build-fork-mac.sh $FORK_BUILD\` in run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID: server and provider runtime smokes passed; the app's signature verifies (ad-hoc, no hardened runtime)."
-            echo "- Windows installer built by \`.github/workflows/fork-windows-build.yml\` in the same run: native renderer tests, server, provider runtime and demo runtime smokes passed under the packaged executable."
+            echo "- Windows installer built by \`.github/workflows/fork-windows-build.yml\` in the same run. Before packaging: native renderer tests under Electron's Node, the provider runtime smoke under host Node, and the server smoke under host Node and Electron's Node passed. After packaging: provider runtime and demo runtime smokes passed under the packaged \`LearnHarness.exe\`."
             echo
             echo "## Changes since ${prev:-the first commit}"
             echo '```'
