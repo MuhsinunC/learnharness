@@ -920,3 +920,60 @@ test("a retry that continues from tool results is not refused for an earlier mes
 	assert.equal(again.status, 400);
 	assert.match(((await again.json()) as { error: string }).error, /retry input requires a failed turn to retry/);
 });
+
+// LH-63 review round 2 (#107).
+
+test("a retry whose stored image is gone still runs, with the image's reference text", async () => {
+	const { id } = await server.json<{ id: string }>("/api/chats", { body: { title: "Retry, image gone" } });
+	const sketch = await store(id, png(55, 165, 75), "sketch.png");
+	stub.setResponder(() => reply.http(400, { error: { message: "The provider had a hiccup." } }));
+	try {
+		const res = await server.api("/api/chat", { body: { chatId: id, input: { type: "text", text: "What does my drawing show?", attachments: [sketch] } } });
+		assert.equal(res.status, 200, await res.clone().text());
+		await res.arrayBuffer();
+		await until(async () => {
+			const c = await server.json<{ messages: Array<{ role: string; stopReason?: string }>; turnInFlight: boolean }>(`/api/chats/${id}`);
+			return !c.turnInFlight && c.messages.at(-1)?.stopReason === "error";
+		}, "the turn to fail");
+	} finally {
+		stub.setResponder(baseResponder);
+	}
+	fs.rmSync(path.join(server.dataDir, "attachments", sketch.id));
+	// A new send still can't name an image the store doesn't have.
+	const send = await server.api("/api/chat", { body: { chatId: id, input: { type: "text", text: "And this one?", attachments: [{ id: sketch.id }] } } });
+	assert.equal(send.status, 400);
+	assert.match(((await send.json()) as { error: string }).error, /No stored image has the id/);
+	// The retry can't take the message out of the history: it runs on the
+	// image-capable model, and the request names the image by its reference.
+	const before = stub.requests.length;
+	const res = await server.api("/api/chat", { body: { chatId: id, input: { type: "retry" } } });
+	assert.equal(res.status, 200, await res.clone().text());
+	await res.arrayBuffer();
+	await until(async () => {
+		const c = await server.json<{ messages: Array<{ role: string; stopReason?: string }>; turnInFlight: boolean }>(`/api/chats/${id}`);
+		return !c.turnInFlight && c.messages.at(-1)?.role === "assistant" && c.messages.at(-1)?.stopReason !== "error";
+	}, "the retried reply");
+	const retried = stub.requests.slice(before).find((r) => !isSummary(r))!;
+	assert.deepEqual(imagesIn(retried), [], "no pixels for a file that is gone");
+	assert.ok(JSON.stringify(retried.messages).includes(`Image attached by the learner: ${sketch.id}`), "the reference text names it");
+});
+
+test("a failed first message brings its image chip back beside text typed while it was in flight", async () => {
+	const page = await chrome.browser.newPage();
+	await page.setViewport({ width: 1280, height: 800 });
+	const sends = await scriptChatSends(page, ["hold"]);
+	const image = png(175, 55, 105);
+	const id = await startWithImage(page, image, "Explain this diagram");
+	await until(() => sends.held.length === 1, "the first send to be held");
+	const typed = "and the labels too";
+	await page.type("[data-testid=composer] textarea", typed);
+	await until(async () => (await composerDraft(page)).text === typed, "the typed text");
+	await sends.held[0]!.respond({ status: 500, contentType: "text/plain", body: "The server had a hiccup." });
+	await until(async () => (await chipIds(page)).includes(idOf(image)), "the opening's chip to come back");
+	assert.equal((await composerDraft(page)).text, typed, "the learner's newer text stays");
+	await page.focus("[data-testid=composer] textarea");
+	await page.keyboard.press("Enter");
+	const chat = await settled(id, 1);
+	assert.deepEqual((chat.messages[0]!.attachments as Array<{ id: string }>).map((a) => a.id), [idOf(image)], "the next send carries the image");
+	await page.close();
+});
