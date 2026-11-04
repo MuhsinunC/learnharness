@@ -31,7 +31,7 @@ import { runPiTurn } from "./pi/ui-stream.ts";
 import { collectToolCallIds } from "./pi/call-ids.ts";
 import { providerEventNote } from "../agent/provider-events.ts";
 import { effectiveSettings, stores } from "./stores.ts";
-import { imageInputRefusal, withImageSupport } from "./attachments.ts";
+import { imageInputRefusal, retryImageRefusal, withImageSupport } from "./attachments.ts";
 import { searchAvailable, searchProvider } from "./search.ts";
 import { providerKeyPresent } from "./keys.ts";
 import { bootClaudeCodeProvider } from "./claude-code-boot.ts";
@@ -401,10 +401,12 @@ export async function handleChatInput(
 	// for a model that can't take them refuses before anything persists.
 	conversationEngine = withImageSupport(conversationEngine);
 	// A retry re-sends the learner message before the failed tail, its
-	// images included, to the model the chat runs now: the same gate. One
-	// that continues from tool results re-sends no message (LH-63).
-	const retried = input.type === "retry" ? retriedInput(record.messages) : undefined;
-	const imageRefusal = imageInputRefusal(conversationEngine.model, input.type === "text" ? input.attachments : retried?.attachments);
+	// images included, to the model the chat runs now. One that continues
+	// from tool results re-sends no message (LH-63). Checked here so a
+	// refused retry never starts a compaction, and again on the re-read.
+	const imageRefusal = input.type === "text"
+		? imageInputRefusal(conversationEngine.model, input.attachments)
+		: input.type === "retry" ? retryImageRefusal(conversationEngine.model, retriedInput(record.messages)?.attachments) : null;
 	if (imageRefusal) return imageRefusal;
 	const modelIdForCompaction = `${conversationEngine.model.provider}:${conversationEngine.model.id}`;
 	// The window seam (LH-40): never above a limit the provider stated.
@@ -435,6 +437,8 @@ export async function handleChatInput(
 			if (err instanceof ChatInputError) return Response.json({ error: err.message }, { status: 400 });
 			throw err;
 		}
+		const retryRefusal = retryImageRefusal(conversationEngine.model, retriedInput(record.messages)?.attachments);
+		if (retryRefusal) return retryRefusal;
 	}
 
 	// The input's native appends (pure; the honest 400 for an answer with no

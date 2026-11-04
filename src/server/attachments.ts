@@ -40,6 +40,13 @@ export function imageInputRefusal(model: Model<Api>, attachments: readonly Attac
 	return modelRefusal(model);
 }
 
+/** A retry's gate: the model only. Its message is already in the
+ *  history, so a stored file gone missing rides as its reference text,
+ *  as on any turn (LH-63). */
+export function retryImageRefusal(model: Model<Api>, attachments: readonly AttachmentRef[] | undefined): Response | null {
+	return attachments?.length ? modelRefusal(model) : null;
+}
+
 /** The model a chat's next turn would run (no engine exists yet), or the
  *  503 when it doesn't resolve. No chat id = the new-session draft, which
  *  the server will stamp from the strong slot. */
