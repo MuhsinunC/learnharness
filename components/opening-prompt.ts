@@ -1,3 +1,5 @@
+import { parseAttachmentRefs, type AttachmentRef } from "@/src/core";
+
 /**
  * Same-tab handover of a new session's full opening text. Never put the
  * message in the navigation URL: long query payloads can be rejected before
@@ -7,16 +9,20 @@
 export const OPENING_PROMPT_FAILURE = "Couldn’t open the session. Your message is still here. Try sending again.";
 
 export interface OpeningPrompt {
+	/** Empty for an image-only resend (LH-63). */
 	text: string;
 	/** Written BEFORE sending. A later mount restores a draft, never reposts. */
 	attempted: boolean;
+	/** The chips a send carried, written with it: a later mount restores
+	 *  these, not the new-session page's (LH-63). */
+	images?: AttachmentRef[];
 }
 
 const keyFor = (id: string) => `lh.openingPrompt.${id}`;
 
-export function stashOpeningPrompt(id: string, text: string, attempted = false): boolean {
+export function stashOpeningPrompt(id: string, text: string, attempted = false, images?: AttachmentRef[]): boolean {
 	try {
-		const value = JSON.stringify({ text, attempted } satisfies OpeningPrompt);
+		const value = JSON.stringify({ text, attempted, ...(images ? { images } : {}) } satisfies OpeningPrompt);
 		// Catch both the storage getter and its methods (quota/security errors).
 		const storage = globalThis.sessionStorage;
 		storage.setItem(keyFor(id), value);
@@ -33,8 +39,9 @@ export function readOpeningPromptEntry(id: string): OpeningPrompt | undefined {
 		try {
 			const entry: unknown = JSON.parse(value);
 			if (entry && typeof entry === "object" && "text" in entry && typeof entry.text === "string" &&
-				entry.text.length > 0 && "attempted" in entry && typeof entry.attempted === "boolean") {
-				return { text: entry.text, attempted: entry.attempted };
+				"attempted" in entry && typeof entry.attempted === "boolean") {
+				const images = "images" in entry ? parseAttachmentRefs(entry.images) : undefined;
+				return { text: entry.text, attempted: entry.attempted, ...(images ? { images } : {}) };
 			}
 		} catch { /* Old raw-text stashes have no proof that sending never began. */ }
 		return { text: value, attempted: true };

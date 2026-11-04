@@ -543,3 +543,72 @@ test("(i) a window saved in Settings refetches the saving page's catalog once (L
 		reads.stop();
 	}
 });
+
+/** A real "keys" change (LH-63): a ChatGPT setting changed through the
+ *  server, as from another tab, reaches the open page as
+ *  subscriptions-changed; its subscription bridge turns that into a
+ *  "keys" save, which clears the shared catalog until it reloads. */
+async function postKeysChange(): Promise<void> {
+	const res = await fetch(`${server.url}/api/subscriptions`, {
+		method: "POST",
+		headers: { "content-type": "application/json", "x-learnharness-subscriptions": "1", origin: server.url },
+		body: JSON.stringify({ providerId: "chatgpt", op: "consent", enabled: true }),
+	});
+	assert.equal(res.status, 200, await res.clone().text());
+}
+
+/** A keys change, resolved once the page shows the reloaded catalog: B's
+ *  window goes to disk first, so only the reload carries `marker` into
+ *  the field at `input`. */
+async function keysSignal(input: string, marker: number): Promise<void> {
+	writeDiskWindow(B, marker);
+	await postKeysChange();
+	await until(async () => (await page.$eval(input, (el) => (el as HTMLInputElement).value)) === String(marker), "the reloaded catalog to show");
+}
+
+test("(j) a keys change while the modal is open keeps the modal, in Settings and in the composer (LH-63)", async () => {
+	// (d) left stub-b in the strong slot, so its row is the one shown.
+	await openAgentSettings();
+	await typeWindow(B, "5000000", "enter");
+	await page.waitForSelector(dialogSel);
+	await keysSignal(inputSel(B), 71_000);
+	assert.ok(await page.$(dialogSel), "the Settings modal is still open after the catalog reload");
+	assert.match(await page.$eval(dialogSel, (el) => el.textContent ?? ""), /5M is above the known maximum/);
+	await page.click('[data-testid="context-window-cancel"]');
+	await until(async () => (await page.$(dialogSel)) === null, "the modal to close");
+
+	const { id } = await server.json<{ id: string }>("/api/chats", { body: { title: "Keys mid-modal" } });
+	await page.goto(`${server.url}/chat/${id}`, { waitUntil: "domcontentloaded", timeout: 180_000 });
+	await until(async () => {
+		await page.click('[data-testid="stats-model"]');
+		return page.waitForSelector('[data-testid="model-menu"]', { timeout: 2000 });
+	}, "the composer model menu to open", 180_000, 500);
+	const field = '[data-testid="composer-context-window"]';
+	await page.waitForSelector(field);
+	await typeIn(field, "5000000", "enter");
+	await page.waitForSelector(dialogSel);
+	await keysSignal(`${field} [data-testid="input-context-window"]`, 93_000);
+	assert.ok(await page.$(dialogSel), "the composer modal is still open after the catalog reload");
+	await page.click('[data-testid="context-window-cancel"]');
+	await until(async () => (await page.$(dialogSel)) === null, "the composer modal to close");
+});
+
+test("(k) a keys reload that fails takes the window rows down with the slot pickers' catalog (LH-63)", async () => {
+	await openAgentSettings();
+	await page.waitForSelector(rowSel(B));
+	const alert = '[data-testid="group-models"] [role="alert"]';
+	const failCatalog = (r: import("puppeteer-core").HTTPRequest) =>
+		void (new URL(r.url()).pathname === "/api/models" ? r.respond({ status: 500, contentType: "text/plain", body: "down" }) : r.continue());
+	await page.setRequestInterception(true);
+	page.on("request", failCatalog);
+	try {
+		await postKeysChange();
+		await page.waitForSelector(alert, { timeout: 60_000 });
+		await until(async () => (await page.$(rowSel(B))) === null, "the window rows to follow the failed catalog");
+	} finally {
+		page.off("request", failCatalog);
+		await page.setRequestInterception(false);
+	}
+	await page.click(`${alert} button`);
+	await page.waitForSelector(rowSel(B), { timeout: 60_000 });
+});

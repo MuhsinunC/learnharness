@@ -3,6 +3,8 @@
 // window, and saves the result (src/server/context-recovery.ts). 409
 // while a turn or a compaction holds the chat, or when its last reply
 // did not fail for length; 422 when nothing older can be condensed.
+// When the rejection no longer applies and nothing needs condensing, it
+// retries the turn instead (LH-63).
 import { handleRepairRequest } from "@/src/server";
 
 export async function POST(_req: Request, ctx: { params: Promise<{ id: string }> }): Promise<Response> {

@@ -42,7 +42,7 @@ export function catalogLimits(catalog: Pick<ModelCatalogResponse, "models">): Ma
  * no-factory-fallback language: the UI never presents a default model).
  */
 export function ModelControl({ chatId, onModelChange }: { chatId?: string; onModelChange?: (model: string | undefined) => void }) {
-	const { catalog, refresh } = useModelCatalog();
+	const { catalog, loaded, refresh } = useModelCatalog();
 	const [models, setModels] = useState<ModelsSettings | undefined>();
 	// A successful read with no settings is a legacy session; undefined
 	// means no session record is known yet, not permission to inherit Strong.
@@ -108,6 +108,9 @@ export function ModelControl({ chatId, onModelChange }: { chatId?: string; onMod
 		(m) => m.id === effectiveId && m.provider === effectiveProvider,
 	);
 	const levels = entry?.supportedLevels ?? [];
+	// The context-window field reads the last catalog that loaded, so a key
+	// change's reload keeps it, and its open modal, mounted (LH-63).
+	const windowEntry = loaded?.models.find((m) => m.id === effectiveId && m.provider === effectiveProvider);
 	// Legacy display (chunk 2 item 4, owner): a record with a model but no
 	// stored level shows the RESOLVED level — the ordering's first supported
 	// — because that is exactly what the engine build would run. Display-
@@ -357,13 +360,13 @@ export function ModelControl({ chatId, onModelChange }: { chatId?: string; onMod
 					/>
 					{/* The active model's context window (LH-38): every pair is
 					    editable where it is chosen, slot or not. */}
-					{entry && (
+					{windowEntry && (
 						<div data-testid="composer-context-window" className="mt-1.5 flex items-center justify-between gap-2 border-t px-2 pt-1.5">
 							<span className="min-w-0 text-muted-foreground">
 								<span className="block text-card-foreground">Context window</span>
-								<span className="block">{contextWindowCaption(entry)}</span>
+								<span className="block">{contextWindowCaption(windowEntry)}</span>
 							</span>
-							<ContextWindowField key={`${entry.provider}:${entry.id}`} entry={entry} />
+							<ContextWindowField key={`${windowEntry.provider}:${windowEntry.id}`} entry={windowEntry} />
 						</div>
 					)}
 				</MenuShell>

@@ -8,6 +8,10 @@ import { useNotifyHub } from "@/components/server-events";
 // Shared stale-while-revalidate catalog. Metadata refreshes retain the last
 // good snapshot; connection changes clear selectable models immediately.
 let catalogCache: ModelCatalogResponse | undefined;
+/** The last catalog that loaded, kept through a connection change's
+ *  clear: readers that only show a model's settings stay mounted on it
+ *  until the refetch lands or fails, so an open modal survives (LH-63). */
+let catalogLoaded: ModelCatalogResponse | undefined;
 let catalogError = false;
 let catalogInflight: Promise<void> | undefined;
 let catalogGeneration = 0;
@@ -28,10 +32,12 @@ function fetchCatalog(revalidate = false): void {
 	catalogInflight = fetch("/api/models")
 		.then((r) => { if (!r.ok) throw new Error(`catalog request failed: ${r.status}`); return r.json() as Promise<ModelCatalogResponse>; })
 		.then((c) => {
-			if (generation === catalogGeneration) { catalogCache = c; catalogError = false; publishCatalog(); }
+			if (generation === catalogGeneration) { catalogCache = catalogLoaded = c; catalogError = false; publishCatalog(); }
 		})
 		.catch(() => {
-			if (generation === catalogGeneration) { catalogError = true; publishCatalog(); }
+			// A failed reload ends the hold: what shows follows what may be
+			// selected, as in the slot pickers (LH-63).
+			if (generation === catalogGeneration) { catalogLoaded = catalogCache; catalogError = true; publishCatalog(); }
 		})
 		.finally(() => { if (generation === catalogGeneration) catalogInflight = undefined; });
 }
@@ -54,12 +60,15 @@ function holdHub(hub: Hub): () => void {
 	return () => { if (--mine.readers === 0) { mine.stop(); hubSignals.delete(hub); } };
 }
 
-export function useModelCatalog(): { catalog: ModelCatalogResponse | undefined; failed: boolean; refresh: () => void } {
-	const [snapshot, setSnapshot] = useState(() => ({ catalog: catalogCache, failed: catalogError }));
+/** `catalog` is what may be selected; `loaded` is the last catalog that
+ *  loaded, for display that must not blink out while a key change
+ *  reloads it. */
+export function useModelCatalog(): { catalog: ModelCatalogResponse | undefined; loaded: ModelCatalogResponse | undefined; failed: boolean; refresh: () => void } {
+	const [snapshot, setSnapshot] = useState(() => ({ catalog: catalogCache, loaded: catalogLoaded, failed: catalogError }));
 	const hub = useNotifyHub();
 	useEffect(() => {
 		const first = catalogReaders.size === 0;
-		const read = () => setSnapshot({ catalog: catalogCache, failed: catalogError });
+		const read = () => setSnapshot({ catalog: catalogCache, loaded: catalogLoaded, failed: catalogError });
 		catalogReaders.add(read);
 		if (first) {
 			// A window save's models-changed reaches every window with a

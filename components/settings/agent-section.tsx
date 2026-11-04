@@ -295,7 +295,7 @@ export function AgentSection({
 	/** Writes the whole compaction section (replace-PUT discipline). */
 	onCompactionChange: (next: CompactionSettings) => void;
 }) {
-	const { catalog: body, failed: catalogFailed, refresh: refreshCatalog } = useModelCatalog();
+	const { catalog: body, loaded, failed: catalogFailed, refresh: refreshCatalog } = useModelCatalog();
 	const catalog = body?.models;
 	const slots = body?.slots;
 	/** The live search state (/api/search) — the row's reason line. */
@@ -581,10 +581,12 @@ export function AgentSection({
 		compaction === undefined ? null : { version: 1, compaction },
 	).compaction;
 
+	// From the last catalog that loaded: a key change's reload keeps the
+	// rows, and an open window modal, mounted (LH-63).
 	const contextWindowEntries: ModelCatalogEntry[] = [];
 	for (const slot of MODEL_SLOTS) {
-		const coord = models?.[slot]?.model ?? slots?.[slot]?.model;
-		const entry = coord && catalog?.find((m) => m.id === coord.id && m.provider === coord.provider);
+		const coord = models?.[slot]?.model ?? loaded?.slots?.[slot]?.model;
+		const entry = coord && loaded?.models.find((m) => m.id === coord.id && m.provider === coord.provider);
 		if (entry && !contextWindowEntries.includes(entry)) contextWindowEntries.push(entry);
 	}
 

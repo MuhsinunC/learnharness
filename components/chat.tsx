@@ -286,7 +286,7 @@ export function Chat({
 	// Image attachments (LH-39): the server checks the chat's model on
 	// every intake, so a model that can't read images shows the notice.
 	const attach = useAttachments(chatId);
-	const { takePaths } = attach;
+	const { takePaths, clear: clearChips, restore: restoreChips, remove: removeChip } = attach;
 
 	// A turn running server-side, attached to no live view of ours (navigate
 	// away mid-turn, or a wake turn discovered mid-session): the reattach
@@ -605,7 +605,8 @@ export function Chat({
 	 *  Auto-continuations (probe answers) never set it — their refusal
 	 *  opens recovery with no replay. */
 	const draftRef = useRef<{ text: string; refs: AttachmentRef[] } | null>(null);
-	const openingDraftRef = useRef<string | null>(null);
+	/** The opening message still owed: its text and its own chips. */
+	const openingDraftRef = useRef<{ text: string; refs: AttachmentRef[] } | null>(null);
 	const [openingError, setOpeningError] = useState(false);
 	const openingMountedRef = useRef(false);
 	useEffect(() => {
@@ -613,33 +614,45 @@ export function Chat({
 		return () => { openingMountedRef.current = false; };
 	}, []);
 
-	const deliverOpeningPrompt = useCallback((prompt: string) => {
-		openingDraftRef.current = prompt;
+	/** `images` are the opening message's chips: the new-session page's
+	 *  on the first delivery, the visible ones on a resend. A failure puts
+	 *  them back with the text, and only they go (LH-63). A resend's draft
+	 *  comes `lifted`: the composer send already took its image paths. */
+	const deliverOpeningPrompt = useCallback((prompt: string, images: AttachmentRef[], lifted = false) => {
+		const opening = { text: prompt, refs: images };
+		openingDraftRef.current = opening;
 		// Persist uncertainty BEFORE the POST: another mount must restore,
 		// not race the still-arriving request. No storage means no auto-send.
-		if (!stashOpeningPrompt(chatId, prompt, true)) {
+		if (!stashOpeningPrompt(chatId, prompt, true, images)) {
 			applyText(prompt);
+			restoreChips(images);
 			setOpeningError(true);
 			return;
 		}
 		setOpeningError(false);
-		draftRef.current = { text: prompt, refs: initialAttachments }; // The existing 503 flow must restore it too.
+		draftRef.current = opening; // The existing 503 flow must restore it too.
 		applyText("");
-		// Images from the new-session page and image paths in the opening
-		// message attach like a composer send's (LH-39).
-		void takePaths(prompt).then(({ text, refs }) => {
-			const attachments = [...initialAttachments, ...refs];
-			return send({ type: "text", text, ...(attachments.length ? { attachments } : {}) }, () => {
+		clearChips();
+		// Image paths in the first message attach like a composer send's
+		// (LH-39); a path may name an image the new-session page holds.
+		const draft = lifted ? Promise.resolve(opening) : takePaths(prompt).then(({ text, refs }) => ({
+			text,
+			refs: [...images, ...refs.filter((r) => !images.some((i) => i.id === r.id))],
+		}));
+		void draft.then(({ text, refs }) => {
+			return send({ type: "text", text, ...(refs.length ? { attachments: refs } : {}) }, () => {
 				clearOpeningPrompt(chatId);
 				openingDraftRef.current = null;
 				if (draftRef.current?.text === prompt) draftRef.current = null;
 			});
 		}).then(accepted => {
-			if (!accepted && openingMountedRef.current && openingDraftRef.current === prompt && !textRef.current) {
-				applyText(prompt);
+			if (!accepted && openingMountedRef.current && openingDraftRef.current === opening) {
+				// Text typed since stays; the chips merge with any added since.
+				if (!textRef.current) applyText(prompt);
+				restoreChips(images);
 			}
 		});
-	}, [chatId, send, applyText, takePaths, initialAttachments]);
+	}, [chatId, send, applyText, takePaths, clearChips, restoreChips]);
 
 	const sentInitial = useRef(false);
 	useEffect(() => {
@@ -651,13 +664,18 @@ export function Chat({
 			if (initialMessages.some(m => m.role === "user" || m.role === "assistant")) clearOpeningPrompt(chatId);
 			return;
 		}
-		openingDraftRef.current = prompt!;
+		// A send's stash names the chips it carried; until one, they are
+		// the new-session page's (LH-63).
+		const images = entry?.images ?? initialAttachments;
+		openingDraftRef.current = { text: prompt!, refs: images };
 		if (entry?.attempted || initiallyInFlight) {
-			applyText(prompt!); // Interrupted start: the learner explicitly resends.
+			// Interrupted start: the learner explicitly resends.
+			applyText(prompt!);
+			restoreChips(images);
 			return;
 		}
-		deliverOpeningPrompt(prompt!);
-	}, [chatId, initialPrompt, initialMessages, initiallyInFlight, deliverOpeningPrompt, applyText]);
+		deliverOpeningPrompt(prompt!, images);
+	}, [chatId, initialPrompt, initialAttachments, initialMessages, initiallyInFlight, deliverOpeningPrompt, applyText, restoreChips]);
 
 	useEffect(() => {
 		if (!hasConfirmedConversation) return;
@@ -665,11 +683,15 @@ export function Chat({
 		// A later canonical read may confirm a lost acknowledgment. Clear
 		// only the unchanged recovered draft, never the learner's newer work.
 		const opening = openingDraftRef.current;
-		if (opening !== null && textRef.current === opening) applyText("");
-		if (draftRef.current?.text === opening) draftRef.current = null;
+		if (opening !== null && textRef.current === opening.text) {
+			applyText("");
+			// Its own chips only: an image attached since is newer work (LH-63).
+			for (const ref of opening.refs) removeChip(ref.id);
+		}
+		if (opening !== null && draftRef.current?.text === opening.text) draftRef.current = null;
 		openingDraftRef.current = null;
 		setOpeningError(false);
-	}, [chatId, hasConfirmedConversation, applyText]);
+	}, [chatId, hasConfirmedConversation, applyText, removeChip]);
 
 	// THE BYOK REFUSAL (owner, 2026-09-22): a send that lands the server's
 	// 503 models_not_configured envelope renders as the SETUP FLOW, never
@@ -855,7 +877,9 @@ export function Chat({
 	// "Repair this chat" (LH-40): a context-length failure gets the
 	// overflow recovery's compaction on demand; the record sync drops the
 	// banner (the recovery marker now ends the record). A refusal shows
-	// the server's reason.
+	// the server's reason. A repair with nothing to condense (the
+	// rejection no longer applies) retries the turn server-side, and the
+	// page attaches to it like any other turn (LH-63).
 	const [repairing, setRepairing] = useState(false);
 	// Keyed by the banner it answers, so a later failure never shows a stale reason.
 	const [repairError, setRepairError] = useState<{ banner: string; text: string } | null>(null);
@@ -1288,8 +1312,8 @@ export function Chat({
 		}
 		const { text: t, refs } = await attach.takePaths(textRef.current.trim());
 		if (!t && refs.length === 0) return;
-		if (openingDraftRef.current !== null && refs.length === 0) {
-			deliverOpeningPrompt(t);
+		if (openingDraftRef.current !== null) {
+			deliverOpeningPrompt(t, refs, true);
 			return;
 		}
 		draftRef.current = { text: t, refs }; // the refusal flow's preserve-and-replay seam
@@ -1949,10 +1973,11 @@ export type EscAbortTarget = "mermaid" | "plan" | "setup" | "question" | "proble
  * session started with map picks carries a graph-context MARKER as
  * message[0], and that scaffolding must never swallow the first send
  * (owner report, 2026-10-04: the turn went dead behind it — the old
- * `length === 0` check saw the marker and refused to fire).
+ * `length === 0` check saw the marker and refused to fire). An empty
+ * stashed text is an image-only resend, still owed (LH-63).
  */
 export function initialPromptOwed(messages: readonly { role: string }[], prompt: string | undefined): boolean {
-	if (!prompt) return false;
+	if (prompt === undefined) return false;
 	return !messages.some((m) => m.role === "user" || m.role === "assistant");
 }
 
