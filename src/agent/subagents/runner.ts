@@ -25,7 +25,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ModelRole } from "../../../config.ts";
-import { ProviderKeyMissingError, ROLE_SLOT, modelsNotConfigured, type ModelSlotName } from "../../core/settings.ts";
+import { ProviderKeyMissingError, ROLE_SLOT, modelsNotConfigured } from "../../core/settings.ts";
 import type { ChatStore, JobStore } from "../../core/ports.ts";
 import { runDemoBuilder } from "./demo-builder.ts";
 import { runPdfReaderAgent } from "./pdf-reader.ts";

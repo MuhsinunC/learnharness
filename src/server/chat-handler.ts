@@ -42,7 +42,7 @@ import {
 	resolveRoleSpec,
 } from "../core/settings-resolution.ts";
 import { contextWindowKey } from "../core/context-windows.ts";
-import { ProviderKeyMissingError, ROLE_SLOT, modelsNotConfigured, providerKeyMissing as providerKeyMissingEnvelope, type ProviderKeyMissing } from "../core/settings.ts";
+import { ProviderKeyMissingError, ROLE_SLOT, modelsNotConfigured, providerKeyMissing as providerKeyMissingEnvelope } from "../core/settings.ts";
 import { beginTurn, endTurn, isTurnRunning } from "./turn-liveness.ts";
 import { applyParkedDismissal } from "./dismissal-park.ts";
 import { registerTurn, rememberTurnFailure, unregisterTurn } from "./turn-runs.ts";
