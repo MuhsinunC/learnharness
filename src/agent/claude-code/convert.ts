@@ -3,7 +3,6 @@ import type { Message as PiMessage, ToolResultMessage, UserMessage } from "@eare
 import type { ContentBlock, Message as SessionMessage, ToolResultBlock } from "cc-session-io";
 
 import type { PromptBlock } from "./history.ts";
-
 import { CONTINUE_TEXT, MCP_TOOL_PREFIX } from "./query-options.ts";
 
 export const PROVIDER_ID = "claude-code";
