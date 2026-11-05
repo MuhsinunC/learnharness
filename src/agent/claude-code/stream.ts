@@ -55,12 +55,9 @@ export function streamClaudeCode(model: Model<any>, transcript: TranscriptContex
 
 		mapper.onToolTurnEnded = () => { wake(); stopChild("turn ended"); };
 		try {
-			if (overageLatched()) throw new Error(OVERAGE_REFUSAL);
-			if (options?.signal?.aborted) { abort(); return; }
-			options?.signal?.addEventListener("abort", abort, { once: true });
-			const { systemPrompt, tools, history } = foldTranscript(transcript);
-			const split = splitPrompt(history);
-			if (split.kind === "invalid") throw new Error("claude-code: nothing to send");
+			const call = preflight(transcript, options, abort);
+			if (!call) return;
+			const { systemPrompt, tools, split } = call;
 			release = await acquireClaudeCodeSlot(options?.signal, evictIdleLiveChild);
 			if (mapper.ended || options?.signal?.aborted) { abort(); return; }
 			if (overageLatched()) throw new Error(OVERAGE_REFUSAL);
@@ -74,18 +71,12 @@ export function streamClaudeCode(model: Model<any>, transcript: TranscriptContex
 				...(endpoint ? { endpoint } : {}),
 				effort: resolveEffort(model, options?.reasoning), appendPrompt: systemPrompt, resumeId: sessionId,
 				...(server ? { mcpServers: { [MCP_SERVER_NAME]: server.config } } : {}) });
-			const loading = deps.loadQuery();
-			void loading.catch(error => { if (mapper.ended) warn(error); });
-			const queryFn = await Promise.race([loading, ended]);
-			if (!queryFn) { abort(); return; }
-			if (mapper.ended || options?.signal?.aborted) { abort(); return; }
-			if (overageLatched()) throw new Error(OVERAGE_REFUSAL);
+			const queryFn = await loadQueryUnlessEnded(deps, mapper, ended, warn);
+			if (!queryFn || !stillAdmitted(mapper, options, deps)) { abort(); return; }
 			const content = split.kind === "user" ? split.blocks : [{ type: "text" as const, text: CONTINUE_TEXT }];
 			async function* prompt(): AsyncGenerator<SDKUserMessage> {
 				yield { type: "user", message: { role: "user", content: content as SDKUserMessage["message"]["content"] }, parent_tool_use_id: null, session_id: "" };
 			}
-			const registrationError = deps.registrationError?.();
-			if (registrationError) throw new Error(registrationError);
 			child = queryFn({ prompt: prompt(), options: queryOptions });
 			const iterator = child[Symbol.asyncIterator]();
 			while (!mapper.ended) {
@@ -99,8 +90,7 @@ export function streamClaudeCode(model: Model<any>, transcript: TranscriptContex
 				park.check();
 			}
 		} catch (error) {
-			if (mapper.ended) warn(error);
-			else mapper.fail(options?.signal?.aborted ? "aborted" : "error", options?.signal?.aborted ? "aborted" : error instanceof Error ? error.message : String(error));
+			failCall(mapper, options, warn, error);
 		} finally {
 			options?.signal?.removeEventListener("abort", abort);
 			stopChild(options?.signal?.aborted ? "aborted" : "turn ended");
@@ -121,6 +111,41 @@ export function callMapper(stream: AssistantMessageEventStream, model: Model<any
 	const mapper = new EventMapper(stream, model, toolNameMap, logger);
 	mapper.redact = redact;
 	return { mapper, logger, warn: (error: unknown) => logger.warn(`claude-code: ${String(error)}`), readEndpoint: () => endpoint = deps.endpoint?.() };
+}
+
+/** The checks both paths run first: the overage latch, an abort that already fired, and something to send.
+ * Undefined once it has called `abort`. */
+export function preflight(transcript: TranscriptContext, options: SimpleStreamOptions | undefined, abort: () => void) {
+	if (overageLatched()) throw new Error(OVERAGE_REFUSAL);
+	if (options?.signal?.aborted) { abort(); return undefined; }
+	options?.signal?.addEventListener("abort", abort, { once: true });
+	const { systemPrompt, tools, history } = foldTranscript(transcript);
+	const split = splitPrompt(history);
+	if (split.kind === "invalid") throw new Error("claude-code: nothing to send");
+	return { systemPrompt, tools, history, split };
+}
+
+/** Races the SDK import against the call's end; an import failure after the call ended is only logged. */
+export function loadQueryUnlessEnded(deps: Deps, mapper: EventMapper, ended: Promise<undefined>, warn: (error: unknown) => void): Promise<typeof query | undefined> {
+	const loading = deps.loadQuery();
+	void loading.catch(error => { if (mapper.ended) warn(error); });
+	return Promise.race([loading, ended]);
+}
+
+/** Rechecks a call once the SDK has loaded: false when it ended or aborted meanwhile.
+ * The overage latch and the registration guard refuse it by throwing. Synchronous, so nothing runs between the checks and the spawn. */
+export function stillAdmitted(mapper: EventMapper, options: SimpleStreamOptions | undefined, deps: Deps): boolean {
+	if (mapper.ended || options?.signal?.aborted) return false;
+	if (overageLatched()) throw new Error(OVERAGE_REFUSAL);
+	const registrationError = deps.registrationError?.();
+	if (registrationError) throw new Error(registrationError);
+	return true;
+}
+
+/** Reports a call's failure; once the call has ended it is only logged. */
+export function failCall(mapper: EventMapper, options: SimpleStreamOptions | undefined, warn: (error: unknown) => void, error: unknown): void {
+	if (mapper.ended) warn(error);
+	else mapper.fail(options?.signal?.aborted ? "aborted" : "error", options?.signal?.aborted ? "aborted" : error instanceof Error ? error.message : String(error));
 }
 
 /** Fallback frames describe a complete API response and arrive back to back before tools/call.

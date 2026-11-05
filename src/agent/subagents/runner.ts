@@ -230,12 +230,7 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 			registerJobAbort(jobId, new AbortController());
 			try {
 				if (stillRunning(jobId)) jobStore.updateJob(jobId, { error: reason });
-				const resolved = resolveInput(job, input) as
-					| ResearchToolInput
-					| DemoToolInput
-					| VisualToolInput
-					| PdfToolInput
-					| undefined;
+				const resolved = resolveInput(job, input);
 				const pdf = resolved as PdfToolInput | undefined;
 				const flag = needsSettingsFix ? { needsSettingsFix: true as const } : {};
 				const failure: JobResult =

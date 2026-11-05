@@ -18,13 +18,15 @@ function buildModels<T extends Model<Api>>(piAiModels: readonly T[]) {
 	return piAiModels
 		.filter((m) => !isDatedAlias(m.id))
 		.sort((a, b) => {
-			const fa = FAMILY_ORDER.indexOf(versionRank(a.id).family);
-			const fb = FAMILY_ORDER.indexOf(versionRank(b.id).family);
+			const va = versionRank(a.id);
+			const vb = versionRank(b.id);
+			const fa = FAMILY_ORDER.indexOf(va.family);
+			const fb = FAMILY_ORDER.indexOf(vb.family);
 			const ta = fa === -1 ? FAMILY_ORDER.length : fa;
 			const tb = fb === -1 ? FAMILY_ORDER.length : fb;
 			if (ta !== tb) return ta - tb;
-			const ra = versionRank(a.id).tuple;
-			const rb = versionRank(b.id).tuple;
+			const ra = va.tuple;
+			const rb = vb.tuple;
 			if (ra[0] !== rb[0]) return rb[0] - ra[0];
 			if (ra[1] !== rb[1]) return rb[1] - ra[1];
 			return a.id.localeCompare(b.id);

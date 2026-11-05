@@ -27,12 +27,12 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { onRunSessionEnd } from "../run-session.ts";
 import { buildChildEnv } from "./child-env.ts";
 import { overageLatched, OVERAGE_REFUSAL, type EventMapperLogger } from "./events.ts";
-import { foldTranscript, splitPrompt, type PromptBlock } from "./history.ts";
+import { splitPrompt, type PromptBlock } from "./history.ts";
 import { claudeCodeModelId, CLAUDE_CODE_SETTINGS } from "./models.ts";
 import { createToolServer } from "./mcp-server.ts";
 import { buildQueryOptions, CONTINUE_TEXT, MCP_SERVER_NAME, MCP_TOOL_PREFIX, resolveEffort } from "./query-options.ts";
 import { acquireClaudeCodeSlot, claudeCodeSlotWaiters } from "./slots.ts";
-import { callMapper, importHistory, parkCheck, reapChild, type Deps } from "./stream.ts";
+import { callMapper, failCall, importHistory, loadQueryUnlessEnded, parkCheck, preflight, reapChild, stillAdmitted, type Deps } from "./stream.ts";
 
 const DEFAULT_IDLE_MS = 600_000;
 /** setTimeout overflows past 2^31 ms, so a day is the longest idle hold. */
@@ -332,12 +332,9 @@ export async function streamLive(key: string, model: Model<any>, transcript: Tra
 	}
 	mapper.onToolTurnEnded = () => { settle(); wake(); };
 	try {
-		if (overageLatched()) throw new Error(OVERAGE_REFUSAL);
-		if (options?.signal?.aborted) { abort(); return; }
-		options?.signal?.addEventListener("abort", abort, { once: true });
-		const { systemPrompt, tools, history } = foldTranscript(transcript);
-		const split = splitPrompt(history);
-		if (split.kind === "invalid") throw new Error("claude-code: nothing to send");
+		const call = preflight(transcript, options, abort);
+		if (!call) return;
+		const { systemPrompt, tools, history, split } = call;
 		for (const tool of tools) toolNameMap.set(MCP_TOOL_PREFIX + tool.name, tool.name);
 		const endpoint = readEndpoint();
 		if (deps.endpoint && !endpoint) throw new Error("claude-code: endpoint not configured");
@@ -366,14 +363,8 @@ export async function streamLive(key: string, model: Model<any>, transcript: Tra
 				...(endpoint ? { endpoint } : {}),
 				effort, appendPrompt: systemPrompt, resumeId: fresh.sessionFile,
 				...(fresh.server ? { mcpServers: { [MCP_SERVER_NAME]: fresh.server.config } } : {}) });
-			const loading = deps.loadQuery();
-			void loading.catch(error => { if (mapper.ended) warn(error); });
-			const queryFn = await Promise.race([loading, ended]);
-			if (!queryFn) { abort(); return false; }
-			if (mapper.ended || options?.signal?.aborted) { abort(); return false; }
-			if (overageLatched()) throw new Error(OVERAGE_REFUSAL);
-			const registrationError = deps.registrationError?.();
-			if (registrationError) throw new Error(registrationError);
+			const queryFn = await loadQueryUnlessEnded(deps, mapper, ended, warn);
+			if (!queryFn || !stillAdmitted(mapper, options, deps)) { abort(); return false; }
 			fresh.input.push(split.kind === "user" ? split.blocks : [{ type: "text", text: CONTINUE_TEXT }]);
 			fresh.start(queryFn({ prompt: fresh.input.messages, options: queryOptions }));
 			delivered = true;
@@ -416,8 +407,7 @@ export async function streamLive(key: string, model: Model<any>, transcript: Tra
 			park.check();
 		}
 	} catch (error) {
-		if (mapper.ended) warn(error);
-		else mapper.fail(options?.signal?.aborted ? "aborted" : "error", options?.signal?.aborted ? "aborted" : error instanceof Error ? error.message : String(error));
+		failCall(mapper, options, warn, error);
 	} finally {
 		settle();
 	}

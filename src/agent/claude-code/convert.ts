@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
-import type { Message as PiMessage, ToolResultMessage } from "@earendil-works/pi-ai";
+import type { Message as PiMessage, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
 import type { ContentBlock, Message as SessionMessage, ToolResultBlock } from "cc-session-io";
+
+import type { PromptBlock } from "./history.ts";
 
 import { CONTINUE_TEXT, MCP_TOOL_PREFIX } from "./query-options.ts";
 
@@ -66,6 +68,21 @@ export function toolResultContent(
 	return blocks;
 }
 
+/** A user message's text and image blocks as the prompt sends them, so a replayed
+ * record matches the prompt; undefined when the content is neither a string nor a block array. */
+export function userPromptBlocks(content: UserMessage["content"]): PromptBlock[] | undefined {
+	const source = typeof content === "string" ? [{ type: "text" as const, text: content }] : content;
+	if (!Array.isArray(source)) return undefined;
+	const blocks: PromptBlock[] = [];
+	for (const block of source) {
+		if (block.type === "text" && block.text) blocks.push({ type: "text", text: block.text });
+		else if (block.type === "image" && block.data && block.mimeType) {
+			blocks.push({ type: "image", source: { type: "base64", media_type: block.mimeType, data: block.data } });
+		}
+	}
+	return blocks;
+}
+
 /** Content discarded during conversion. */
 export type DroppedContent = {
 	thinking: number;
@@ -105,13 +122,7 @@ export function convertPiMessages(
 			// Replay each input user run as the single prompt record splitPrompt sends.
 			let next: PiMessage | undefined = msg;
 			while (next?.role === "user") {
-				const content = typeof next.content === "string" ? [{ type: "text" as const, text: next.content }] : next.content;
-				if (Array.isArray(content)) for (const block of content) {
-					if (block.type === "text" && block.text) parts.push({ type: "text", text: block.text });
-					else if (block.type === "image" && block.data && block.mimeType) {
-						parts.push({ type: "image", source: { type: "base64", media_type: block.mimeType, data: block.data } });
-					}
-				}
+				parts.push(...(userPromptBlocks(next.content) ?? []));
 				next = messages[index + 1];
 				if (next?.role === "user") index++;
 			}
