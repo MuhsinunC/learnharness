@@ -28,7 +28,7 @@ import { onRunSessionEnd } from "../run-session.ts";
 import { buildChildEnv } from "./child-env.ts";
 import { overageLatched, OVERAGE_REFUSAL, type EventMapperLogger } from "./events.ts";
 import { splitPrompt, type PromptBlock } from "./history.ts";
-import { claudeCodeModelId, CLAUDE_CODE_SETTINGS } from "./models.ts";
+import { claudeCodeModelId } from "./models.ts";
 import { createToolServer } from "./mcp-server.ts";
 import { buildQueryOptions, CONTINUE_TEXT, MCP_SERVER_NAME, MCP_TOOL_PREFIX, resolveEffort } from "./query-options.ts";
 import { acquireClaudeCodeSlot, claudeCodeSlotWaiters } from "./slots.ts";
@@ -338,7 +338,7 @@ export async function streamLive(key: string, model: Model<any>, transcript: Tra
 		for (const tool of tools) toolNameMap.set(MCP_TOOL_PREFIX + tool.name, tool.name);
 		const endpoint = readEndpoint();
 		if (deps.endpoint && !endpoint) throw new Error("claude-code: endpoint not configured");
-		const cliModel = claudeCodeModelId(model, CLAUDE_CODE_SETTINGS);
+		const cliModel = claudeCodeModelId(model);
 		const effort = resolveEffort(model, options?.reasoning);
 		const config = configKey({ executable: deps.executable, cliModel, effort, systemPrompt, tools, env: buildChildEnv(process.env, endpoint, deps.executable) });
 		keys = history.map(messageKey);

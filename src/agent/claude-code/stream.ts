@@ -5,7 +5,7 @@ import { redactSecrets } from "./redact.ts";
 import { convertPiMessages } from "./convert.ts";
 import { EventMapper, overageLatched, OVERAGE_REFUSAL, type EventMapperLogger } from "./events.ts";
 import { foldTranscript, splitPrompt } from "./history.ts";
-import { claudeCodeModelId, CLAUDE_CODE_SETTINGS } from "./models.ts";
+import { claudeCodeModelId } from "./models.ts";
 import { createToolServer } from "./mcp-server.ts";
 import { buildQueryOptions, CONTINUE_TEXT, MCP_SERVER_NAME, MCP_TOOL_PREFIX, resolveEffort } from "./query-options.ts";
 import { claudeCodeWorkdir, deleteSessionFile, markSessionActive, markSessionDone, sweepStaleSessions, writeSessionFile } from "./session-file.ts";
@@ -62,7 +62,7 @@ export function streamClaudeCode(model: Model<any>, transcript: TranscriptContex
 			if (mapper.ended || options?.signal?.aborted) { abort(); return; }
 			if (overageLatched()) throw new Error(OVERAGE_REFUSAL);
 			for (const tool of tools) toolNameMap.set(MCP_TOOL_PREFIX + tool.name, tool.name);
-			const cliModel = claudeCodeModelId(model, CLAUDE_CODE_SETTINGS);
+			const cliModel = claudeCodeModelId(model);
 			({ cwd, sessionId } = importHistory(split.prior, toolNameMap, cliModel, deps, warn));
 			if (tools.length) server = createToolServer(tools, { timeoutMs: 3_600_000, onCall: park.check });
 			const endpoint = readEndpoint();

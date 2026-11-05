@@ -7,6 +7,7 @@ import type { AnthropicMessage } from "./convert.ts";
 
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CWD_SCAN_BYTES = 64 * 1024;
+const STALE_SESSION_MS = 3_600_000;
 const activeSessionsKey = Symbol.for("learnharness.claude-code.active-sessions");
 
 function activeSessions(): Set<string> {
@@ -72,7 +73,6 @@ function recordedCwd(path: string): string | undefined {
 export function sweepStaleSessions(
 	cwd: string,
 	claudeDir: string,
-	olderThanMs = 3_600_000,
 	now = Date.now(),
 ): void {
 	const projectDir = getProjectDir(cwd, claudeDir);
@@ -89,7 +89,7 @@ export function sweepStaleSessions(
 		if (!SESSION_ID.test(id) || activeSessions().has(id)) continue;
 		try {
 			const path = join(projectDir, entry.name);
-			if (lstatSync(path).mtimeMs < now - olderThanMs && recordedCwd(path) === normalizeProjectPath(cwd)) {
+			if (lstatSync(path).mtimeMs < now - STALE_SESSION_MS && recordedCwd(path) === normalizeProjectPath(cwd)) {
 				deleteSessionFile(id, cwd, claudeDir);
 			}
 		} catch (error) {

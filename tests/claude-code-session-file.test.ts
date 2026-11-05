@@ -80,7 +80,7 @@ test("invalid session names survive sweeping and invalid delete ids throw", (t) 
 		utimesSync(path, new Date(0), new Date(0));
 	}
 	utimesSync(fresh.jsonlPath, new Date(now), new Date(now));
-	sweepStaleSessions(options.cwd, options.claudeDir, undefined, now);
+	sweepStaleSessions(options.cwd, options.claudeDir, now);
 	for (const id of ["", "foo"]) {
 		assert.throws(() => deleteSessionFile(id, options.cwd, options.claudeDir), {
 			message: `claude-code: invalid session id "${id}"`,
@@ -108,7 +108,7 @@ test("sweep skips per-entry ENOENT races but propagates other errors", (t) => {
 		syncBuiltinESMExports();
 	});
 	syncBuiltinESMExports();
-	assert.doesNotThrow(() => sweepStaleSessions(options.cwd, options.claudeDir, undefined, 1_800_000_000_000));
+	assert.doesNotThrow(() => sweepStaleSessions(options.cwd, options.claudeDir, 1_800_000_000_000));
 	assert.ok(!existsSync(removed.jsonlPath));
 	assert.ok(!existsSync(other.jsonlPath));
 	writeFileSync(removed.jsonlPath, "");
@@ -122,10 +122,10 @@ test("active old sessions survive until marked done", (t) => {
 	utimesSync(written.jsonlPath, new Date(0), new Date(0));
 	markSessionActive(written.sessionId);
 	t.after(() => markSessionDone(written.sessionId));
-	sweepStaleSessions(options.cwd, options.claudeDir, undefined, 1_800_000_000_000);
+	sweepStaleSessions(options.cwd, options.claudeDir, 1_800_000_000_000);
 	assert.ok(existsSync(written.jsonlPath));
 	markSessionDone(written.sessionId);
-	sweepStaleSessions(options.cwd, options.claudeDir, undefined, 1_800_000_000_000);
+	sweepStaleSessions(options.cwd, options.claudeDir, 1_800_000_000_000);
 	assert.ok(!existsSync(written.jsonlPath));
 });
 
@@ -170,7 +170,7 @@ test("delete removes JSONL and populated companion directory and tolerates missi
 test("sweep deletes only old JSONL files and companions inside this project", (t) => {
 	const options = fixture(t);
 	const now = 1_800_000_000_000;
-	assert.doesNotThrow(() => sweepStaleSessions(options.cwd, options.claudeDir, 3_600_000, now));
+	assert.doesNotThrow(() => sweepStaleSessions(options.cwd, options.claudeDir, now));
 	const old = writeSessionFile({ ...options, messages: history });
 	const fresh = writeSessionFile({ ...options, messages: history });
 	const boundary = writeSessionFile({ ...options, messages: history });
@@ -189,7 +189,7 @@ test("sweep deletes only old JSONL files and companions inside this project", (t
 	utimesSync(boundary.jsonlPath, new Date(now - 3_600_000), new Date(now - 3_600_000));
 	const link = join(projectDir, "external.jsonl");
 	symlinkSync(sibling.jsonlPath, link);
-	sweepStaleSessions(options.cwd, options.claudeDir, undefined, now);
+	sweepStaleSessions(options.cwd, options.claudeDir, now);
 	assert.ok(!existsSync(old.jsonlPath));
 	assert.ok(!existsSync(companion));
 	for (const path of [fresh.jsonlPath, freshCompanion, boundary.jsonlPath, sibling.jsonlPath, unrelated, link]) assert.ok(existsSync(path), path);
@@ -225,12 +225,12 @@ test("sweep checks recorded cwd when workdirs share a project directory", (t) =>
 	for (const path of [...sessions.map(session => session.jsonlPath), ...companions]) {
 		utimesSync(path, new Date(0), new Date(0));
 	}
-	sweepStaleSessions(cwdA, options.claudeDir, undefined, now);
+	sweepStaleSessions(cwdA, options.claudeDir, now);
 	assert.ok(!existsSync(sessions[0]!.jsonlPath));
 	assert.ok(!existsSync(companions[0]!));
 	assert.ok(existsSync(sessions[1]!.jsonlPath));
 	assert.ok(existsSync(companions[1]!));
-	sweepStaleSessions(cwdB, options.claudeDir, undefined, now);
+	sweepStaleSessions(cwdB, options.claudeDir, now);
 	assert.ok(!existsSync(sessions[1]!.jsonlPath));
 	assert.ok(!existsSync(companions[1]!));
 });
@@ -246,7 +246,7 @@ test("sweep keeps old sessions without a readable cwd", (t) => {
 		utimesSync(path, new Date(0), new Date(0));
 		return path;
 	});
-	sweepStaleSessions(options.cwd, options.claudeDir, undefined, now);
+	sweepStaleSessions(options.cwd, options.claudeDir, now);
 	for (const path of paths) assert.ok(existsSync(path), path);
 });
 
@@ -257,7 +257,7 @@ test("sweep leaves old orphan UUID companion directories untouched", (t) => {
 	const artifact = join(companion, "artifact");
 	writeFileSync(artifact, "data");
 	utimesSync(companion, new Date(0), new Date(0));
-	sweepStaleSessions(options.cwd, options.claudeDir, undefined, 1_800_000_000_000);
+	sweepStaleSessions(options.cwd, options.claudeDir, 1_800_000_000_000);
 	assert.ok(existsSync(companion));
 	assert.ok(existsSync(artifact));
 });
@@ -281,7 +281,7 @@ test("sweep bounds transcript reads to 64 KiB", (t) => {
 		syncBuiltinESMExports();
 	});
 	syncBuiltinESMExports();
-	sweepStaleSessions(options.cwd, options.claudeDir, undefined, 1_800_000_000_000);
+	sweepStaleSessions(options.cwd, options.claudeDir, 1_800_000_000_000);
 	assert.ok(!existsSync(written.jsonlPath));
 	assert.ok(!existsSync(companion));
 	assert.ok(total > 0 && total <= 64 * 1024, `read ${total} bytes`);
@@ -292,7 +292,7 @@ test("sweep keeps sessions whose first cwd record is beyond the scan cap", (t) =
 	const written = writeSessionFile({ ...options, messages: history });
 	writeFileSync(written.jsonlPath, `${"{}\n".repeat(24 * 1024)}${JSON.stringify({ cwd: options.cwd })}\n`);
 	utimesSync(written.jsonlPath, new Date(0), new Date(0));
-	sweepStaleSessions(options.cwd, options.claudeDir, undefined, 1_800_000_000_000);
+	sweepStaleSessions(options.cwd, options.claudeDir, 1_800_000_000_000);
 	assert.ok(existsSync(written.jsonlPath));
 });
 
@@ -306,7 +306,7 @@ test("sweep parses complete UTF-8 lines at EOF but keeps a line cut off by the c
 	writeFileSync(complete.jsonlPath, splitUtf8);
 	writeFileSync(partial.jsonlPath, capped);
 	for (const path of [complete.jsonlPath, partial.jsonlPath]) utimesSync(path, new Date(0), new Date(0));
-	sweepStaleSessions(options.cwd, options.claudeDir, undefined, 1_800_000_000_000);
+	sweepStaleSessions(options.cwd, options.claudeDir, 1_800_000_000_000);
 	assert.ok(!existsSync(complete.jsonlPath));
 	assert.ok(existsSync(partial.jsonlPath));
 });

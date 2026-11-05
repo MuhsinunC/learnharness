@@ -40,17 +40,14 @@ function buildModels<T extends Model<Api>>(piAiModels: readonly T[]) {
 		}));
 }
 
-type LongContextSettings = {
-	plan: "pro" | "max";
-	longContextExtraUsage: boolean;
-};
-
 type ClaudeCodeRuntimeModel = {
 	cliModelId: string;
 	contextWindow: number;
 };
 
 // Only measured subscription-safe ids request the SDK's explicit 1M window.
+// claude-opus-4-6 and claude-sonnet-4-6 reach 1M only on the Max plan or with
+// long-context extra usage; this provider assumes neither, so they run at 200K.
 export const MEASURED_ONE_M = new Set([
 	"claude-fable-5",
 	"claude-fable-5-1",
@@ -61,49 +58,28 @@ export const MEASURED_ONE_M = new Set([
 	"claude-sonnet-5",
 ]);
 
-const PLAN_GATED_ONE_M: Record<string, (settings: LongContextSettings) => boolean> = {
-	"claude-opus-4-6": (settings) => settings.plan === "max" || settings.longContextExtraUsage,
-	"claude-sonnet-4-6": (settings) => settings.longContextExtraUsage,
-};
-
-function resolveClaudeCodeRuntimeModel(
-	model: { id: string },
-	settings: LongContextSettings,
-): ClaudeCodeRuntimeModel {
+function resolveClaudeCodeRuntimeModel(model: { id: string }): ClaudeCodeRuntimeModel {
 	const modelId = model.id;
 	if (MEASURED_ONE_M.has(modelId)) {
 		return { cliModelId: `${modelId}[1m]`, contextWindow: ONE_M_CONTEXT };
 	}
-	const planGate = PLAN_GATED_ONE_M[modelId];
-	if (planGate) {
-		const useOneM = planGate(settings);
-		return {
-			cliModelId: useOneM ? `${modelId}[1m]` : modelId,
-			contextWindow: useOneM ? ONE_M_CONTEXT : TWO_HUNDRED_K_CONTEXT,
-		};
-	}
 	return { cliModelId: modelId, contextWindow: TWO_HUNDRED_K_CONTEXT };
 }
 
-export function claudeCodeModelId(model: { id: string }, settings: LongContextSettings): string {
-	return resolveClaudeCodeRuntimeModel(model, settings).cliModelId;
+export function claudeCodeModelId(model: { id: string }): string {
+	return resolveClaudeCodeRuntimeModel(model).cliModelId;
 }
 
-function applyLongContext<T extends { id: string; name: string; contextWindow?: number | null }>(
-	models: T[],
-	settings: LongContextSettings,
-): T[] {
+function applyLongContext<T extends { id: string; name: string; contextWindow?: number | null }>(models: T[]): T[] {
 	return models.map((m) => {
-		const { contextWindow } = resolveClaudeCodeRuntimeModel(m, settings);
+		const { contextWindow } = resolveClaudeCodeRuntimeModel(m);
 		const name = contextWindow > TWO_HUNDRED_K_CONTEXT && !/\b1M\b/i.test(m.name) ? `${m.name} 1M` : m.name;
 		return contextWindow === m.contextWindow && name === m.name ? m : { ...m, contextWindow, name };
 	});
 }
 
-export const CLAUDE_CODE_SETTINGS: LongContextSettings = Object.freeze({ plan: "pro", longContextExtraUsage: false });
-
 export function claudeCodeCatalog(anthropicModels: readonly Model<Api>[]): Model<"claude-agent-sdk">[] {
-	return applyLongContext(buildModels(anthropicModels), CLAUDE_CODE_SETTINGS).map(model => ({
+	return applyLongContext(buildModels(anthropicModels)).map(model => ({
 		...model, provider: "claude-code", api: "claude-agent-sdk", baseUrl: "",
 	}));
 }
