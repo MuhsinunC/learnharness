@@ -16,7 +16,7 @@ function versionRank(id: string): { family: string; tuple: [number, number] } {
 
 function buildModels<T extends Model<Api>>(piAiModels: readonly T[]) {
 	return piAiModels
-		.filter((m) => typeof m.id === "string" && !isDatedAlias(m.id))
+		.filter((m) => !isDatedAlias(m.id))
 		.sort((a, b) => {
 			const fa = FAMILY_ORDER.indexOf(versionRank(a.id).family);
 			const fb = FAMILY_ORDER.indexOf(versionRank(b.id).family);

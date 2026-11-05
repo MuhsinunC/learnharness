@@ -1,4 +1,4 @@
-import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { SDKAssistantMessage, SDKMessage, SDKPartialAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
 import { parseStreamingJson, parseToolCallArguments, type AssistantMessage, type AssistantMessageEventStream, type Model } from "@earendil-works/pi-ai";
 
 export interface EventMapperLogger { debug(msg: string): void; warn(msg: string): void }
@@ -33,8 +33,8 @@ function piToolNameFor(name: string, toolNameMap: ReadonlyMap<string, string>): 
 	return toolNameMap.get(name) ?? toolNameMap.get(name.toLowerCase()) ?? name;
 }
 
-type SDKUsage = { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number;
-	cache_creation_input_tokens?: number; reasoning_tokens?: number; thinking_tokens?: number;
+type SDKUsage = { input_tokens?: number | null; output_tokens?: number | null; cache_read_input_tokens?: number | null;
+	cache_creation_input_tokens?: number | null;
 	output_tokens_details?: { thinking_tokens?: number | null } | null;
 	cache_creation?: { ephemeral_1h_input_tokens?: number | null } | null };
 type RateLimitInfo = { status?: string; rateLimitType?: string; resetsAt?: number; utilization?: number;
@@ -154,7 +154,7 @@ export class EventMapper {
 		if (usage.cache_read_input_tokens != null) output.usage.cacheRead = usage.cache_read_input_tokens;
 		if (usage.cache_creation_input_tokens != null) output.usage.cacheWrite = usage.cache_creation_input_tokens;
 		if (usage.cache_creation?.ephemeral_1h_input_tokens != null) output.usage.cacheWrite1h = usage.cache_creation.ephemeral_1h_input_tokens;
-		const reasoning = usage.output_tokens_details?.thinking_tokens ?? usage.reasoning_tokens ?? usage.thinking_tokens;
+		const reasoning = usage.output_tokens_details?.thinking_tokens;
 		if (reasoning != null) output.usage.reasoning = reasoning;
 		output.usage.totalTokens = output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 		const promptTokens = output.usage.input + output.usage.cacheRead + output.usage.cacheWrite;
@@ -253,8 +253,10 @@ export class EventMapper {
 		this.turnSawToolCall = this.blocks.some(b => b.type === "toolCall");
 		this.refreshUsage();
 	}
-	private processStreamEvent(message: SDKMessage): void {
-		const event = (message as SDKMessage & { event: any }).event;
+	private processStreamEvent(message: SDKPartialAssistantMessage): void {
+		const event = message.event;
+		// Read before the branches narrow it: ping, and types newer than the SDK's union, arrive too.
+		const eventType: string | undefined = event?.type;
 
 		if (event?.type === "message_start") {
 			if (this.currentRequest && (this.abandoned(this.currentRequest) || this.currentRequest.id === event.message?.id))
@@ -364,15 +366,15 @@ export class EventMapper {
 			return;
 		}
 
-		if (event?.type !== "message_stop" && event?.type !== "ping") {
-			this.logger.debug(`processStreamEvent: unhandled event type ${event?.type}`);
+		if (eventType !== "message_stop" && eventType !== "ping") {
+			this.logger.debug(`processStreamEvent: unhandled event type ${eventType}`);
 		}
 	}
-	private processAssistantMessage(message: SDKMessage): void {
-		const assistantMsg = (message as any).message;
+	private processAssistantMessage(message: SDKAssistantMessage): void {
+		const assistantMsg = message.message;
 		if (!assistantMsg?.content) return;
 		const id = assistantMsg.id;
-		const supersedes = (message as { supersedes?: string[] }).supersedes;
+		const supersedes = message.supersedes;
 		if (supersedes?.length) this.supersedeFrames(supersedes);
 		if (this.currentRequest?.id !== id && this.currentRequest?.fallbackTools && this.turnSawToolCall) {
 			this.endToolTurn("different assistant id", true);
@@ -406,7 +408,7 @@ export class EventMapper {
 					: { type: "thinking", thinking: block.thinking ?? "", thinkingSignature: block.signature ?? "" });
 				const idx = this.blocks.length - 1;
 				this.stream.push({ type: "thinking_start", contentIndex: idx, partial: this.output });
-				if (block.thinking) this.stream.push({ type: "thinking_delta", contentIndex: idx, delta: block.thinking, partial: this.output });
+				if (block.type === "thinking" && block.thinking) this.stream.push({ type: "thinking_delta", contentIndex: idx, delta: block.thinking, partial: this.output });
 				this.stream.push({ type: "thinking_end", contentIndex: idx, content: this.blocks[idx].thinking, partial: this.output });
 			} else if (block.type === "tool_use") {
 				const piName = piToolNameFor(block.name, this.toolNameMap);
