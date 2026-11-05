@@ -4,8 +4,8 @@ import { test } from "node:test";
 import { normalizeContext } from "@earendil-works/pi-ai";
 import type { AssistantMessage, Message, ToolCall, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
 import { toLlmMessages, type LhMessage } from "../src/core/native-messages.ts";
-import { CONTINUE_TEXT, MCP_TOOL_PREFIX, PROVIDER_ID, convertPiMessages, isDroppedAssistant, mapPiToolNameToSdk, sanitizeToolId, toolResultContent } from "../src/agent/claude-code/convert.ts";
-import { CONTINUE_TEXT as OPTIONS_CONTINUE_TEXT, MCP_TOOL_PREFIX as OPTIONS_MCP_TOOL_PREFIX } from "../src/agent/claude-code/query-options.ts";
+import { PROVIDER_ID, convertPiMessages, isDroppedAssistant, mapPiToolNameToSdk, sanitizeToolId, toolResultContent } from "../src/agent/claude-code/convert.ts";
+import { CONTINUE_TEXT, MCP_TOOL_PREFIX } from "../src/agent/claude-code/query-options.ts";
 import { foldTranscript, splitPrompt, turnStart } from "../src/agent/claude-code/history.ts";
 
 const text = (text: string) => ({ type: "text" as const, text });
@@ -320,12 +320,10 @@ test("unknown tool result blocks retain markers and report each lost block", () 
 	assert.deepEqual(converted.anthropicMessages[1]!.content, [{ type: "tool_result", tool_use_id: "A", content: [text("[audio]"), wireImage, text("[audio]")], is_error: false }]);
 });
 
-test("conversion re-exports shared query option constants", () => {
-	assert.equal(CONTINUE_TEXT, OPTIONS_CONTINUE_TEXT);
-	assert.equal(MCP_TOOL_PREFIX, OPTIONS_MCP_TOOL_PREFIX);
-	assert.equal(mapPiToolNameToSdk("shared", new Map()), `${OPTIONS_MCP_TOOL_PREFIX}shared`);
+test("conversion uses the shared query option constants", () => {
+	assert.equal(mapPiToolNameToSdk("shared", new Map()), `${MCP_TOOL_PREFIX}shared`);
 	assert.deepEqual(convert([assistant([call("A")]), result("A"), assistant([text("done")])]).anthropicMessages[2],
-		{ role: "user", content: [text(OPTIONS_CONTINUE_TEXT)] });
+		{ role: "user", content: [text(CONTINUE_TEXT)] });
 });
 
 test("sanitization updates and reuses a supplied occupied-id set", () => {

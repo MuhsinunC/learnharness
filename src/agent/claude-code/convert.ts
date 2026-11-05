@@ -6,7 +6,6 @@ import type { PromptBlock } from "./history.ts";
 
 import { CONTINUE_TEXT, MCP_TOOL_PREFIX } from "./query-options.ts";
 
-export { CONTINUE_TEXT, MCP_TOOL_PREFIX } from "./query-options.ts";
 export const PROVIDER_ID = "claude-code";
 
 type RedactedThinkingBlock = { type: "redacted_thinking"; data: string };
