@@ -252,9 +252,9 @@ test("tool-turn guard warns without pushes; overage still latches after done", (
 });
 
 test("usage merges reasoning and preserves cacheWrite1h unless overwritten non-null", () => {
- const h = harness(); h.send(start("one", { input_tokens: 3, output_tokens: 2, cache_read_input_tokens: 5, cache_creation_input_tokens: 7, cache_creation: { ephemeral_1h_input_tokens: 6 }, thinking_tokens: 4 }));
+ const h = harness(); h.send(start("one", { input_tokens: 3, output_tokens: 2, cache_read_input_tokens: 5, cache_creation_input_tokens: 7, cache_creation: { ephemeral_1h_input_tokens: 6 }, output_tokens_details: { thinking_tokens: 4 } }));
  assert.equal(h.mapper.output.usage.reasoning, 4);
- h.send(event("message_delta", { delta: { stop_reason: "end_turn" }, usage: { output_tokens: 11, reasoning_tokens: 8, thinking_tokens: 99, cache_creation: { ephemeral_1h_input_tokens: null } } }));
+ h.send(event("message_delta", { delta: { stop_reason: "end_turn" }, usage: { output_tokens: 11, output_tokens_details: { thinking_tokens: 8 }, cache_creation: { ephemeral_1h_input_tokens: null } } }));
  assert.equal(h.mapper.output.usage.cacheWrite1h, 6);
  assert.equal(h.mapper.output.usage.reasoning, 8);
  assert.equal(h.mapper.output.usage.totalTokens, 26);
@@ -495,7 +495,7 @@ test("R2-F8: empty JSON delta preserves nonempty start input", () => {
 });
 
 for (const fallback of [false, true]) test(`R2-F9: abandoned usage is discarded on ${fallback ? "fallback" : "restream"} replacement`, () => {
- const h = harness(); h.send(start("A", { input_tokens: 10, cache_creation_input_tokens: 30, cache_creation: { ephemeral_1h_input_tokens: 30 }, thinking_tokens: 8 }),
+ const h = harness(); h.send(start("A", { input_tokens: 10, cache_creation_input_tokens: 30, cache_creation: { ephemeral_1h_input_tokens: 30 }, output_tokens_details: { thinking_tokens: 8 } }),
   block(0, { type: "text" }));
  if (fallback) h.send(assistant("B", [{ type: "text", text: "replacement" }], { input_tokens: 2, output_tokens: 3 }));
  else h.send(start("B", { input_tokens: 2, output_tokens: 3 }), block(0, { type: "text" }), stop(0), event("message_stop"));

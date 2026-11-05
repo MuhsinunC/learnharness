@@ -7,6 +7,7 @@ import type { AnthropicMessage } from "./convert.ts";
 
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CWD_SCAN_BYTES = 64 * 1024;
+const STALE_SESSION_MS = 3_600_000;
 const activeSessionsKey = Symbol.for("learnharness.claude-code.active-sessions");
 
 function activeSessions(): Set<string> {
@@ -54,24 +55,27 @@ function recordedCwd(path: string): string | undefined {
 			total += bytes;
 			const available = buffer.subarray(0, total);
 			while (lineStart < total) {
-				let lineEnd = available.indexOf(0x0A, lineStart);
-				if (lineEnd === -1) {
-					if (bytes !== 0) break;
-					lineEnd = total;
-				}
-				const line = available.subarray(lineStart, lineEnd).toString("utf8");
+				const newline = available.indexOf(0x0A, lineStart);
+				// Before EOF an unterminated tail waits for more bytes; at EOF it is the last line.
+				if (newline === -1 && bytes !== 0) break;
+				const lineEnd = newline === -1 ? total : newline;
+				const cwd = lineCwd(available.subarray(lineStart, lineEnd));
+				if (cwd !== undefined) return cwd;
 				lineStart = lineEnd + 1;
-				try {
-					const record = JSON.parse(line);
-					if (record !== null && typeof record === "object" && typeof record.cwd === "string") return record.cwd;
-				} catch {
-					continue;
-				}
 			}
 			if (bytes === 0) break;
 		}
 	} finally {
 		closeSync(fd);
+	}
+}
+
+function lineCwd(line: Buffer): string | undefined {
+	try {
+		const record = JSON.parse(line.toString("utf8"));
+		return record !== null && typeof record === "object" && typeof record.cwd === "string" ? record.cwd : undefined;
+	} catch {
+		return undefined;
 	}
 }
 
@@ -83,7 +87,6 @@ function recordedCwd(path: string): string | undefined {
 export function sweepStaleSessions(
 	cwd: string,
 	claudeDir: string,
-	olderThanMs = 3_600_000,
 	now = Date.now(),
 ): void {
 	const projectDir = getProjectDir(cwd, claudeDir);
@@ -100,7 +103,7 @@ export function sweepStaleSessions(
 		if (!SESSION_ID.test(id) || activeSessions().has(id)) continue;
 		try {
 			const path = join(projectDir, entry.name);
-			if (lstatSync(path).mtimeMs < now - olderThanMs && recordedCwd(path) === normalizeProjectPath(cwd)) {
+			if (lstatSync(path).mtimeMs < now - STALE_SESSION_MS && recordedCwd(path) === normalizeProjectPath(cwd)) {
 				deleteSessionFile(id, cwd, claudeDir);
 			}
 		} catch (error) {

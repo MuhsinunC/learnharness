@@ -69,8 +69,8 @@ for ChatGPT + gpt-6.1-terra only takes effect once pi-ai adds the model.
 | anthropic:claude-fable-5-1, fable-5, opus-5-5, opus-5, opus-4-8, opus-4-7, opus-4-6, sonnet-5-5, sonnet-5, sonnet-4-6, haiku-5-5 | 1M | 1M | pi-ai `contextWindow`, matching [Anthropic's context-window docs](https://platform.claude.com/docs/en/build-with-claude/context-windows): "have a 1M-token context window … 1M is the default: you don't need a beta header" (checked 2026-10-27) |
 | anthropic:claude-opus-4-5, sonnet-4-5, haiku-4-5 | 200k | 200k | Same docs: "Other Claude models, including Claude Sonnet 4.5 (deprecated), have a 200k-token context window" |
 | claude-code:claude-fable-5-1, fable-5, opus-5-5, opus-5, opus-4-8, opus-4-7, sonnet-5 | 1M | 1M | `claudeCodeCatalog` in `src/agent/claude-code/models.ts`: `MEASURED_ONE_M` ids run as `<id>[1m]` |
-| claude-code:claude-opus-4-6, sonnet-4-6 | 200k | 200k | Same file: these run at 1M only on the Max plan (opus-4-6) or with long-context extra usage (`PLAN_GATED_ONE_M`). The fork's settings are `plan: "pro"` with no extra usage, so the CLI runs the plain id at 200k |
-| claude-code:claude-sonnet-5-5, haiku-5-5, opus-4-5, sonnet-4-5, haiku-4-5 | 200k | 200k | Same file: not in either 1M table, so the CLI runs the plain id at 200k, even though the API model supports 1M (sonnet-5-5, haiku-5-5) |
+| claude-code:claude-opus-4-6, sonnet-4-6 | 200k | 200k | Same file: these reach 1M only on the Max plan (opus-4-6) or with long-context extra usage. The provider assumes neither, so they are not in `MEASURED_ONE_M` and the CLI runs the plain id at 200k |
+| claude-code:claude-sonnet-5-5, haiku-5-5, opus-4-5, sonnet-4-5, haiku-4-5 | 200k | 200k | Same file: not in `MEASURED_ONE_M`, so the CLI runs the plain id at 200k, even though the API model supports 1M (sonnet-5-5, haiku-5-5) |
 | every other pair (OpenRouter, ...) | pi-ai `contextWindow` | = Default | No documented higher limit found |
 
 The Codex catalogs also give `effective_context_window_percent: 95`. LearnHarness

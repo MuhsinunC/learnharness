@@ -1,7 +1,7 @@
 import { getCurrentSystemPrompt, getCurrentTools } from "@earendil-works/pi-ai";
 import type { Message, Tool, TranscriptContext } from "@earendil-works/pi-ai";
 import type { ImageBlock, TextBlock } from "cc-session-io";
-import { isDroppedAssistant } from "./convert.ts";
+import { isDroppedAssistant, userPromptBlocks } from "./convert.ts";
 
 export type PromptBlock = TextBlock | ImageBlock;
 export type SplitPromptResult =
@@ -32,20 +32,13 @@ export function splitPrompt(history: Message[]): SplitPromptResult {
 	const blocks: PromptBlock[] = [];
 	for (const message of history.slice(start)) {
 		if (message.role !== "user") continue;
-		const content = typeof message.content === "string"
-			? [{ type: "text" as const, text: message.content }]
-			: message.content;
-		if (!Array.isArray(content)) {
+		const userBlocks = userPromptBlocks(message.content);
+		if (!userBlocks) {
 			throw new Error(
-				`extractUserPromptBlocks: user message content must be a string or block array, got ${typeof content} — likely a malformed message from another extension`,
+				`splitPrompt: user message content must be a string or block array, got ${typeof message.content} — likely a malformed message from another extension`,
 			);
 		}
-		for (const block of content) {
-			if (block.type === "text" && block.text) blocks.push({ type: "text", text: block.text });
-			else if (block.type === "image" && block.data && block.mimeType) {
-				blocks.push({ type: "image", source: { type: "base64", media_type: block.mimeType, data: block.data } });
-			}
-		}
+		blocks.push(...userBlocks);
 	}
 	if (blocks.length) return { kind: "user", prior: history.slice(0, start), blocks };
 	// The caller sends CONTINUE_TEXT as its prompt; prior retains every result.

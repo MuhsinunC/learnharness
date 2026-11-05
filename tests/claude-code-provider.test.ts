@@ -9,7 +9,7 @@ import { normalizeContext } from "@earendil-works/pi-ai";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { getProjectDir } from "cc-session-io";
 import { enableClaudeCodeProvider, piEngineForSpec, piModels, resetClaudeCodeProviderForTests } from "../src/agent/models.ts";
-import { claudeCodeCatalog, claudeCodeModelId, CLAUDE_CODE_SETTINGS, MEASURED_ONE_M } from "../src/agent/claude-code/models.ts";
+import { claudeCodeCatalog, claudeCodeModelId, MEASURED_ONE_M } from "../src/agent/claude-code/models.ts";
 import { resetClaudeCodeStreamForTests } from "../src/agent/claude-code/stream.ts";
 
 void (() => {
@@ -90,7 +90,7 @@ test("catalog projects only model fields, orders families newest first, and matc
 		const measured = MEASURED_ONE_M.has(model.id);
 		assert.equal(model.contextWindow, measured ? 1_000_000 : 200_000);
 		assert.equal(model.name, measured && !/\b1M\b/i.test(src.name) ? `${src.name} 1M` : src.name);
-		assert.equal(claudeCodeModelId(model, CLAUDE_CODE_SETTINGS), model.id + (measured ? "[1m]" : ""));
+		assert.equal(claudeCodeModelId(model), model.id + (measured ? "[1m]" : ""));
 		if (index === 0) continue;
 		const prev = catalog[index - 1]!;
 		const family = (id: string) => families.indexOf(id.split("-")[1]!);

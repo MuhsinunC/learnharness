@@ -1,4 +1,4 @@
-import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { SDKAssistantMessage, SDKMessage, SDKPartialAssistantMessage, SDKRateLimitInfo } from "@anthropic-ai/claude-agent-sdk";
 import { parseStreamingJson, parseToolCallArguments, type AssistantMessage, type AssistantMessageEventStream, type Model } from "@earendil-works/pi-ai";
 
 export interface EventMapperLogger { debug(msg: string): void; warn(msg: string): void }
@@ -16,9 +16,12 @@ export function resultErrorText(message: SDKMessage): string | undefined {
 	return `Claude Code failed: ${result.subtype ?? "unknown result"}`;
 }
 
+// resetsAt: Unix seconds (unit undocumented in the SDK; observed)
+function formatResetsAt(resetsAt: number): string { return new Date(resetsAt * 1000).toLocaleTimeString(); }
+
 export function describeRateLimitFailure(rejection: { rateLimitType?: string; resetsAt?: number }, failure: string): string {
 	const kind = rejection.rateLimitType ? ` (${rejection.rateLimitType})` : "";
-	const resets = rejection.resetsAt ? ` — resets ${new Date(rejection.resetsAt * 1000).toLocaleTimeString()}` : ""; // resetsAt: Unix seconds (unit undocumented in the SDK; observed)
+	const resets = rejection.resetsAt ? ` — resets ${formatResetsAt(rejection.resetsAt)}` : "";
 	return `Claude rate limit${kind}${resets}: ${failure}`;
 }
 export function mapStopReason(reason: string | undefined): "stop" | "length" | "toolUse" {
@@ -33,17 +36,21 @@ function piToolNameFor(name: string, toolNameMap: ReadonlyMap<string, string>): 
 	return toolNameMap.get(name) ?? toolNameMap.get(name.toLowerCase()) ?? name;
 }
 
-type SDKUsage = { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number;
-	cache_creation_input_tokens?: number; reasoning_tokens?: number; thinking_tokens?: number;
+type SDKUsage = { input_tokens?: number | null; output_tokens?: number | null; cache_read_input_tokens?: number | null;
+	cache_creation_input_tokens?: number | null;
 	output_tokens_details?: { thinking_tokens?: number | null } | null;
 	cache_creation?: { ephemeral_1h_input_tokens?: number | null } | null };
-type RateLimitInfo = { status?: string; rateLimitType?: string; resetsAt?: number; utilization?: number;
-	surpassedThreshold?: number; isUsingOverage?: boolean; overageInUse?: boolean };
 
 type RequestState = {
 	id: string | undefined; blocks: any[]; streamed: Map<number, any>; ordinal: number;
 	usage: AssistantMessage["usage"]; fallbackTools: boolean; finalUsage: boolean; open: boolean; fromStream: boolean; stopReason?: string;
 };
+// convert.ts replays a redacted block from `redacted: true` and the signature.
+function thinkingBlock(block: { type: "thinking"; thinking?: string; signature?: string } | { type: "redacted_thinking"; data: string }) {
+	return block.type === "redacted_thinking"
+		? { type: "thinking", thinking: "[Reasoning redacted]", thinkingSignature: block.data, redacted: true }
+		: { type: "thinking", thinking: block.thinking ?? "", thinkingSignature: block.signature ?? "" };
+}
 function emptyUsage(): AssistantMessage["usage"] {
 	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
@@ -58,7 +65,7 @@ export class EventMapper {
 	private frameBlocks = new Map<string, { request: RequestState; blocks: any[] }>();
 	private turnSawToolCall = false;
 	private activeBlockIndices = new Map<any, number>();
-	private rateLimitRejection: RateLimitInfo | null = null;
+	private rateLimitRejection: SDKRateLimitInfo | null = null;
 	private lastRateLimitWarnStep: number | null = null;
 	private lastRateLimitWarnThreshold: number | undefined;
 	redact: ((text: string) => string) | undefined;
@@ -84,7 +91,7 @@ export class EventMapper {
 			return;
 		}
 		if (message.type === "rate_limit_event") {
-			this.processRateLimitEvent(message.rate_limit_info as RateLimitInfo);
+			this.processRateLimitEvent(message.rate_limit_info);
 			return;
 		}
 		if (this.terminal) {
@@ -154,14 +161,14 @@ export class EventMapper {
 		if (usage.cache_read_input_tokens != null) output.usage.cacheRead = usage.cache_read_input_tokens;
 		if (usage.cache_creation_input_tokens != null) output.usage.cacheWrite = usage.cache_creation_input_tokens;
 		if (usage.cache_creation?.ephemeral_1h_input_tokens != null) output.usage.cacheWrite1h = usage.cache_creation.ephemeral_1h_input_tokens;
-		const reasoning = usage.output_tokens_details?.thinking_tokens ?? usage.reasoning_tokens ?? usage.thinking_tokens;
+		const reasoning = usage.output_tokens_details?.thinking_tokens;
 		if (reasoning != null) output.usage.reasoning = reasoning;
 		output.usage.totalTokens = output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 		const promptTokens = output.usage.input + output.usage.cacheRead + output.usage.cacheWrite;
 		const cachePct = promptTokens > 0 ? Math.round(output.usage.cacheRead / promptTokens * 100) : 0;
 		this.logger.debug(`usage: in=${output.usage.input} out=${output.usage.output} cacheRead=${output.usage.cacheRead} cacheWrite=${output.usage.cacheWrite} total=${output.usage.totalTokens}${reasoning != null ? ` reasoning=${reasoning}` : ""} cachePct=${cachePct}%`);
 	}
-	private processRateLimitEvent(info: RateLimitInfo): void {
+	private processRateLimitEvent(info: SDKRateLimitInfo): void {
 		this.logger.debug(`rate_limit_event ${JSON.stringify(info)}`);
 		if (info.isUsingOverage === true || info.overageInUse === true) {
 			globalState[overageKey] = true;
@@ -172,7 +179,7 @@ export class EventMapper {
 			this.rateLimitRejection = info;
 			this.lastRateLimitWarnStep = null;
 			this.lastRateLimitWarnThreshold = undefined;
-			const resetsAt = info.resetsAt ? new Date(info.resetsAt * 1000).toLocaleTimeString() : "unknown";
+			const resetsAt = info.resetsAt ? formatResetsAt(info.resetsAt) : "unknown";
 			this.logger.warn(`Claude rate limited (${info.rateLimitType ?? "unknown"}) — resets at ${resetsAt}`);
 		} else if (info.status === "allowed") {
 			this.rateLimitRejection = null;
@@ -253,8 +260,8 @@ export class EventMapper {
 		this.turnSawToolCall = this.blocks.some(b => b.type === "toolCall");
 		this.refreshUsage();
 	}
-	private processStreamEvent(message: SDKMessage): void {
-		const event = (message as SDKMessage & { event: any }).event;
+	private processStreamEvent(message: SDKPartialAssistantMessage): void {
+		const event = message.event;
 
 		if (event?.type === "message_start") {
 			if (this.currentRequest && (this.abandoned(this.currentRequest) || this.currentRequest.id === event.message?.id))
@@ -274,11 +281,11 @@ export class EventMapper {
 				this.stream.push({ type: "text_start", contentIndex: this.blocks.length - 1, partial: this.output });
 				if (event.content_block.text) this.stream.push({ type: "text_delta", contentIndex: this.blocks.length - 1, delta: event.content_block.text, partial: this.output });
 			} else if (event.content_block?.type === "thinking") {
-				this.blocks.push({ type: "thinking", thinking: event.content_block.thinking ?? "", thinkingSignature: event.content_block.signature ?? "" });
+				this.blocks.push(thinkingBlock(event.content_block));
 				this.stream.push({ type: "thinking_start", contentIndex: this.blocks.length - 1, partial: this.output });
 				if (event.content_block.thinking) this.stream.push({ type: "thinking_delta", contentIndex: this.blocks.length - 1, delta: event.content_block.thinking, partial: this.output });
 			} else if (event.content_block?.type === "redacted_thinking") {
-				this.blocks.push({ type: "thinking", thinking: "[Reasoning redacted]", thinkingSignature: event.content_block.data, redacted: true });
+				this.blocks.push(thinkingBlock(event.content_block));
 				this.stream.push({ type: "thinking_start", contentIndex: this.blocks.length - 1, partial: this.output });
 			} else if (event.content_block?.type === "tool_use") {
 				const piName = piToolNameFor(event.content_block.name, this.toolNameMap);
@@ -357,22 +364,21 @@ export class EventMapper {
 			return;
 		}
 
-		if (event?.type === "message_stop") request.open = false;
-
-		if (event?.type === "message_stop" && this.turnSawToolCall) {
-			this.endToolTurn("message_stop");
+		if (event?.type === "message_stop") {
+			request.open = false;
+			if (this.turnSawToolCall) this.endToolTurn("message_stop");
 			return;
 		}
 
-		if (event?.type !== "message_stop" && event?.type !== "ping") {
-			this.logger.debug(`processStreamEvent: unhandled event type ${event?.type}`);
-		}
+		// The branches above narrowed `event` to never, but ping and types newer than the SDK's union arrive too.
+		const type: string | undefined = message.event?.type;
+		if (type !== "ping") this.logger.debug(`processStreamEvent: unhandled event type ${type}`);
 	}
-	private processAssistantMessage(message: SDKMessage): void {
-		const assistantMsg = (message as any).message;
+	private processAssistantMessage(message: SDKAssistantMessage): void {
+		const assistantMsg = message.message;
 		if (!assistantMsg?.content) return;
 		const id = assistantMsg.id;
-		const supersedes = (message as { supersedes?: string[] }).supersedes;
+		const supersedes = message.supersedes;
 		if (supersedes?.length) this.supersedeFrames(supersedes);
 		if (this.currentRequest?.id !== id && this.currentRequest?.fallbackTools && this.turnSawToolCall) {
 			this.endToolTurn("different assistant id", true);
@@ -401,12 +407,10 @@ export class EventMapper {
 				this.stream.push({ type: "text_end", contentIndex: idx, content: block.text, partial: this.output });
 			} else if (block.type === "thinking" || block.type === "redacted_thinking") {
 				this.ensureTurnStarted();
-				this.blocks.push(block.type === "redacted_thinking"
-					? { type: "thinking", thinking: "[Reasoning redacted]", thinkingSignature: block.data, redacted: true }
-					: { type: "thinking", thinking: block.thinking ?? "", thinkingSignature: block.signature ?? "" });
+				this.blocks.push(thinkingBlock(block));
 				const idx = this.blocks.length - 1;
 				this.stream.push({ type: "thinking_start", contentIndex: idx, partial: this.output });
-				if (block.thinking) this.stream.push({ type: "thinking_delta", contentIndex: idx, delta: block.thinking, partial: this.output });
+				if (block.type === "thinking" && block.thinking) this.stream.push({ type: "thinking_delta", contentIndex: idx, delta: block.thinking, partial: this.output });
 				this.stream.push({ type: "thinking_end", contentIndex: idx, content: this.blocks[idx].thinking, partial: this.output });
 			} else if (block.type === "tool_use") {
 				const piName = piToolNameFor(block.name, this.toolNameMap);
@@ -419,9 +423,8 @@ export class EventMapper {
 					arguments: block.input ?? {},
 				});
 				const idx = this.blocks.length - 1;
-				const toolBlock = this.blocks[idx];
 				this.stream.push({ type: "toolcall_start", contentIndex: idx, partial: this.output });
-				this.stream.push({ type: "toolcall_end", contentIndex: idx, toolCall: toolBlock, partial: this.output });
+				this.stream.push({ type: "toolcall_end", contentIndex: idx, toolCall: this.blocks[idx], partial: this.output });
 			} else {
 				this.logger.debug(`processAssistantMessage: unhandled block type ${block.type}`);
 				continue;

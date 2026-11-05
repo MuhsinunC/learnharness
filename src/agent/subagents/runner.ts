@@ -141,6 +141,37 @@ function jobLimitMs(fallback: number, override: string | undefined): number {
 
 type JobResult = ResearchResult | DemoResult | VisualResult | PdfResult;
 
+/** A refused job's result, in its kind's shape. */
+function failureResult(kind: JobKind, reason: string, resolved: JobToolInput | undefined, flag: { needsSettingsFix?: true }): JobResult {
+	switch (kind) {
+		case "research":
+			return { brief: `Research failed: ${reason}`, sources: [], ...flag };
+		case "demo": {
+			const demo = resolved as DemoToolInput | undefined;
+			return {
+				title: typeof demo?.title === "string" && demo.title.trim() ? demo.title : "Interactive demo",
+				html: "",
+				tested: true,
+				notes: `FAILED: ${reason}`,
+				...flag,
+			};
+		}
+		case "visual":
+			return { svg: "", notes: `FAILED: ${reason}`, ...flag };
+		default: {
+			const pdf = resolved as PdfToolInput | undefined;
+			return {
+				path: typeof pdf?.path === "string" ? pdf.path : "",
+				question: typeof pdf?.question === "string" ? pdf.question : "",
+				brief: `PDF failed: ${reason}`,
+				pagesRead: [],
+				pagesConsulted: [],
+				...flag,
+			};
+		}
+	}
+}
+
 export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 	const { chatStore, jobStore, deliver } = deps;
 
@@ -230,36 +261,9 @@ export function createJobRunner(deps: JobRunnerDeps): JobRunner {
 			registerJobAbort(jobId, new AbortController());
 			try {
 				if (stillRunning(jobId)) jobStore.updateJob(jobId, { error: reason });
-				const resolved = resolveInput(job, input) as
-					| ResearchToolInput
-					| DemoToolInput
-					| VisualToolInput
-					| PdfToolInput
-					| undefined;
-				const pdf = resolved as PdfToolInput | undefined;
+				const resolved = resolveInput(job, input);
 				const flag = needsSettingsFix ? { needsSettingsFix: true as const } : {};
-				const failure: JobResult =
-					job.kind === "research"
-						? { brief: `Research failed: ${reason}`, sources: [], ...flag }
-						: job.kind === "demo"
-							? {
-									title: typeof (resolved as DemoToolInput | undefined)?.title === "string" && (resolved as DemoToolInput).title.trim() ? (resolved as DemoToolInput).title : "Interactive demo",
-									html: "",
-									tested: true,
-									notes: `FAILED: ${reason}`,
-									...flag,
-								}
-							: job.kind === "visual"
-								? { svg: "", notes: `FAILED: ${reason}`, ...flag }
-								: {
-										path: typeof pdf?.path === "string" ? pdf.path : "",
-										question: typeof pdf?.question === "string" ? pdf.question : "",
-										brief: `PDF failed: ${reason}`,
-										pagesRead: [],
-										pagesConsulted: [],
-										...flag,
-									};
-				await finishJob(jobId, failure);
+				await finishJob(jobId, failureResult(job.kind, reason, resolved, flag));
 			} finally {
 				unregisterJobAbort(jobId);
 			}
