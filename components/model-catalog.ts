@@ -43,13 +43,19 @@ function fetchCatalog(revalidate = false): Promise<void> {
 	return catalogInflight;
 }
 
-/** Revalidate now and resolve with the catalog once no read is in flight
- *  (the last good one if the read failed): for a decision that must not
- *  read the snapshot it is about to replace. */
-export async function refreshCatalogNow(): Promise<ModelCatalogResponse | undefined> {
-	await fetchCatalog(true);
-	while (catalogInflight) await catalogInflight;
-	return catalogCache;
+/** Revalidate now and resolve with the fresh catalog, for a decision that
+ *  must not read the snapshot it is about to replace: undefined when the
+ *  read fails or takes longer than `waitMs`, never the stale snapshot. The
+ *  read itself goes on and publishes as usual. */
+export function refreshCatalogNow(waitMs: number): Promise<ModelCatalogResponse | undefined> {
+	const read = (async () => {
+		await fetchCatalog(true);
+		while (catalogInflight) await catalogInflight;
+		return catalogError ? undefined : catalogCache;
+	})();
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const late = new Promise<undefined>((resolve) => { timer = setTimeout(resolve, waitMs, undefined); });
+	return Promise.race([read, late]).finally(() => clearTimeout(timer));
 }
 
 /** Refetch on the server's word that the catalog changed (a provider

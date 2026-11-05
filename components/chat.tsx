@@ -168,6 +168,17 @@ export function parseProviderKeyRefusal(message: string | undefined): boolean {
 	}
 }
 
+/** A provider-key refusal that keeps its banner speaks its own words
+ *  (they name the remedy), never the transport envelope. */
+function bannerText(message: string): string {
+	return parseProviderKeyRefusal(message) ? (JSON.parse(message) as { error: string }).error : message;
+}
+
+/** How long a Claude Code refusal waits on the catalog read to choose its
+ *  remedy; a read answers in well under a second. Past this the refusal
+ *  keeps its banner, as for a failed read. */
+const REFUSAL_CATALOG_WAIT_MS = 5_000;
+
 /** The image gate's send refusal (LH-39): the chat's model can't read
  *  images. Its words, for the composer's notice; null for anything else. */
 function parseImagesRefusal(message: string | undefined): string | null {
@@ -725,7 +736,7 @@ export function Chat({
 		// provider can serve, else the off notice. Both read the catalog
 		// as it is now, which the page may not have seen change.
 		const claudeRefused = keyRefused && (JSON.parse(error.message) as { provider?: string }).provider === "claude-code";
-		const freshCatalog = claudeRefused ? refreshCatalogNow() : undefined;
+		const freshCatalog = claudeRefused ? refreshCatalogNow(REFUSAL_CATALOG_WAIT_MS) : undefined;
 		// ORDER MATTERS: clearError() flips this effect's own dep (`error`)
 		// and would cancel the in-flight work below — so the banner dismiss,
 		// the draft restore, and the dialog open all land TOGETHER after the
@@ -753,6 +764,9 @@ export function Chat({
 			}
 			const catalog = freshCatalog ? await freshCatalog : catalogRef.current;
 			if (cancelled) return;
+			// No fresh catalog (the read failed or is slow): no remedy can be
+			// chosen, so the refusal stays up in its own words.
+			if (claudeRefused && !catalog) return;
 			clearError();
 			if (keyRefused && catalog?.providers.some((p) => p.keyPresent && !(claudeRefused && p.id === "claude-code"))) openModelPicker();
 			else if (!claudeRefused) setSetupOpen(true);
@@ -1763,7 +1777,7 @@ export function Chat({
 							{openingError && <p role="alert" className="text-sm text-destructive">{OPENING_PROMPT_FAILURE}</p>}
 							{error && (
 								<div data-testid="chat-error" className="flex items-center gap-3 rounded-lg border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm">
-									<span className="min-w-0 flex-1">Something went wrong: {error.message}</span>
+									<span className="min-w-0 flex-1">Something went wrong: {bannerText(error.message)}</span>
 									{repairError?.banner === error.message && (
 										<span data-testid="repair-error" className="shrink-0 text-xs text-muted-foreground">{repairError.text}</span>
 									)}
