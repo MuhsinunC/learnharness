@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { normalizeContext } from "@earendil-works/pi-ai";
 import type { AssistantMessage, Message, ToolCall, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
 import { toLlmMessages, type LhMessage } from "../src/core/native-messages.ts";
-import { CONTINUE_TEXT, MCP_TOOL_PREFIX, PROVIDER_ID, convertPiMessages, isDroppedAssistant, mapPiToolNameToSdk, messageContentToText, sanitizeToolId, toolResultContent } from "../src/agent/claude-code/convert.ts";
+import { CONTINUE_TEXT, MCP_TOOL_PREFIX, PROVIDER_ID, convertPiMessages, isDroppedAssistant, mapPiToolNameToSdk, sanitizeToolId, toolResultContent } from "../src/agent/claude-code/convert.ts";
 import { CONTINUE_TEXT as OPTIONS_CONTINUE_TEXT, MCP_TOOL_PREFIX as OPTIONS_MCP_TOOL_PREFIX } from "../src/agent/claude-code/query-options.ts";
 import { foldTranscript, splitPrompt, turnStart } from "../src/agent/claude-code/history.ts";
 
@@ -76,7 +76,6 @@ test("images survive user and tool result conversion; text-only results flatten"
 	assert.deepEqual(convert([user([text("look"), image])]).anthropicMessages, [{ role: "user", content: [text("look"), wireImage] }]);
 	assert.deepEqual(toolResultContent([text("look"), image]), [text("look"), wireImage]);
 	assert.equal(toolResultContent([text("one"), text("two")]), "one\ntwo");
-	assert.equal(messageContentToText([{ type: "other" }, text("ok")]), "[other]\nok");
 	const content = convert([assistant([call("X")]), result("X", [image])]).anthropicMessages[1]!.content;
 	assert.deepEqual(content, [{ type: "tool_result", tool_use_id: "X", content: [wireImage], is_error: false }]);
 });
@@ -309,7 +308,6 @@ test("unknown tool result blocks retain markers and report each lost block", () 
 	assert.equal(toolResultContent([audio]), "[audio]");
 	assert.equal(toolResultContent([audio, { type: "video" }]), "[audio]\n[video]");
 	assert.equal(toolResultContent([text("heard"), audio]), "heard\n[audio]");
-	assert.equal(messageContentToText([audio]), "");
 	for (const [blocks, expected] of [
 		[[audio], "[audio]"], [[text("heard"), audio], "heard\n[audio]"],
 	] as const) {

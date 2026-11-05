@@ -14,7 +14,7 @@ function versionRank(id: string): { family: string; tuple: [number, number] } {
 	return { family: family ?? "", tuple: [Number(major) || 0, Number(minor) || 0] };
 }
 
-export function buildModels<T extends Model<Api>>(piAiModels: readonly T[]) {
+function buildModels<T extends Model<Api>>(piAiModels: readonly T[]) {
 	return piAiModels
 		.filter((m) => typeof m.id === "string" && !isDatedAlias(m.id))
 		.sort((a, b) => {
@@ -38,13 +38,12 @@ export function buildModels<T extends Model<Api>>(piAiModels: readonly T[]) {
 		}));
 }
 
-export type LongContextSettings = {
+type LongContextSettings = {
 	plan: "pro" | "max";
 	longContextExtraUsage: boolean;
-	forceTwoHundredK?: string[];
 };
 
-export type ClaudeCodeRuntimeModel = {
+type ClaudeCodeRuntimeModel = {
 	cliModelId: string;
 	contextWindow: number;
 };
@@ -65,14 +64,11 @@ const PLAN_GATED_ONE_M: Record<string, (settings: LongContextSettings) => boolea
 	"claude-sonnet-4-6": (settings) => settings.longContextExtraUsage,
 };
 
-export function resolveClaudeCodeRuntimeModel(
+function resolveClaudeCodeRuntimeModel(
 	model: { id: string },
 	settings: LongContextSettings,
 ): ClaudeCodeRuntimeModel {
 	const modelId = model.id;
-	if (settings.forceTwoHundredK?.includes(modelId)) {
-		return { cliModelId: modelId, contextWindow: TWO_HUNDRED_K_CONTEXT };
-	}
 	if (MEASURED_ONE_M.has(modelId)) {
 		return { cliModelId: `${modelId}[1m]`, contextWindow: ONE_M_CONTEXT };
 	}
@@ -91,7 +87,7 @@ export function claudeCodeModelId(model: { id: string }, settings: LongContextSe
 	return resolveClaudeCodeRuntimeModel(model, settings).cliModelId;
 }
 
-export function applyLongContext<T extends { id: string; name: string; contextWindow?: number | null }>(
+function applyLongContext<T extends { id: string; name: string; contextWindow?: number | null }>(
 	models: T[],
 	settings: LongContextSettings,
 ): T[] {

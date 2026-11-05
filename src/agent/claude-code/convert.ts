@@ -41,27 +41,12 @@ export function mapPiToolNameToSdk(name: string, customToolNameToSdk: Map<string
 	return customToolNameToSdk.get(name) ?? customToolNameToSdk.get(normalized) ?? `${MCP_TOOL_PREFIX}${name}`;
 }
 
-export function messageContentToText(
-	content: string | Array<{ type: string; text?: string; data?: string; mimeType?: string }>,
-): string {
-	if (typeof content === "string") return content;
-	if (!Array.isArray(content)) return "";
-	const parts = [];
-	let hasText = false;
-	for (const block of content) {
-		if (block.type === "text" && block.text) { parts.push(block.text); hasText = true; }
-		else if (block.type !== "text" && block.type !== "image") { parts.push(`[${block.type}]`); }
-	}
-	return hasText ? parts.join("\n") : "";
-}
-
 // Tool results are flattened to text, which is how Claude Code stores most of
 // them. Images are the exception: they have no text form, so a result carrying
 // one keeps the block array shape instead (also what CC writes for screenshots).
 export function toolResultContent(
-	content: string | Array<{ type: string; text?: string; data?: string; mimeType?: string }>,
+	content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>,
 ): string | ContentBlock[] {
-	if (typeof content === "string" || !Array.isArray(content)) return messageContentToText(content) || "";
 	const images = content.filter((b) => b.type === "image" && b.data && b.mimeType);
 	if (!images.length) return content.flatMap((block) => {
 		if (block.type === "text") return block.text ? [block.text] : [];
@@ -73,7 +58,7 @@ export function toolResultContent(
 		else if (block.type === "image" && block.data && block.mimeType) {
 			blocks.push({ type: "image", source: { type: "base64", media_type: block.mimeType, data: block.data } });
 		} else if (block.type !== "text" && block.type !== "image") {
-			// Same marker messageContentToText leaves for unrecognized blocks, so the
+			// Same marker the text-only path leaves for unrecognized blocks, so the
 			// text and image paths describe an extension's output the same way.
 			blocks.push({ type: "text", text: `[${block.type}]` });
 		}
