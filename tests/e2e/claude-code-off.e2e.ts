@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
-import type { Page } from "puppeteer-core";
+import type { HTTPRequest, Page } from "puppeteer-core";
 import { bootServer, until, type LhServer } from "./harness/server.ts";
 import { hydrated as reactHydrated, launchChrome, type HeadlessChrome } from "./harness/chrome.ts";
 import { calledTool, reply, startStubProvider, type StubProvider } from "./harness/stub-provider.ts";
+import { CLAUDE_CODE_OFF_REFUSAL } from "../../src/core/settings.ts";
 
 // LH-61: a Claude Code (subscription) selection that is off keeps v0.3.9's
 // own flows: the pre-send picker, Retry and the refusal handling. The fork
@@ -233,22 +234,86 @@ describe("the catalog changed after the page loaded", () => {
 		await server?.stop();
 	});
 
-	test("a Claude Code refusal decides from the refreshed catalog: the picker for a provider keyed since the load", async () => {
-		await page.goto(server.url, { waitUntil: "domcontentloaded", timeout: 180_000 });
-		await setClaudeCode(page, server, claude, "local");
+	/** A Claude Code session open on `p` whose catalog went stale: loaded
+	 *  with Claude Code on and openrouter keyless, then, behind the page's
+	 *  back, Claude Code goes off and openrouter gets a key. `onCatalogRead`
+	 *  answers the page's /api/models reads from then on (default: pass). */
+	async function staleClaudeSession(p: Page, onCatalogRead?: (req: HTTPRequest) => void): Promise<string> {
+		await server.api("/api/keys/OPENROUTER_API_KEY", { method: "DELETE" });
+		await p.setBypassServiceWorker(true);
+		await p.goto(server.url, { waitUntil: "domcontentloaded", timeout: 180_000 });
+		await setClaudeCode(p, server, claude, "local");
 		const id = await sessionOn(server, await firstClaudeModel(server));
-		await hydrated(page, `/chat/${id}`, server);
-		// The page's catalog: Claude Code on, openrouter without a key.
+		await hydrated(p, `/chat/${id}`, server);
 		let catalogReads = 0;
-		page.on("request", (req) => { if (new URL(req.url()).pathname === "/api/models") catalogReads++; });
-		// Behind the page's back: Claude Code goes off and openrouter gets a key.
-		await setClaudeCode(page, server, claude, "off");
+		await p.setRequestInterception(true);
+		p.on("request", (req) => {
+			if (new URL(req.url()).pathname !== "/api/models") return void req.continue();
+			catalogReads++;
+			if (onCatalogRead) onCatalogRead(req);
+			else void req.continue();
+		});
+		await setClaudeCode(p, server, claude, "off");
 		await server.json("/api/keys/OPENROUTER_API_KEY", { method: "PUT", body: { value: "e2e-dummy-key-not-real" } });
 		assert.equal(catalogReads, 0, "the page still holds the catalog it loaded");
+		return id;
+	}
+
+	/** The refusal banner, in its own words (never the transport envelope). */
+	const OFF_BANNER = `Something went wrong: ${CLAUDE_CODE_OFF_REFUSAL}`;
+	const banner = (p: Page) => p.$eval("[data-testid=chat-error] span", (el) => el.textContent ?? "").catch(() => "");
+	/** Two frames: whatever the page decided after the last event has rendered. */
+	const painted = (p: Page) => p.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))));
+
+	test("a Claude Code refusal decides from the refreshed catalog: the picker for a provider keyed since the load", async () => {
+		const id = await staleClaudeSession(page);
 		await type(page, "Hello there");
 		await page.waitForSelector("[data-testid=model-search]", { timeout: 30_000 });
 		assert.equal(await draft(page), "Hello there");
 		assert.equal(await userMessages(server, id), 0, "nothing was sent");
+	});
+
+	test("when the fresh catalog can't be read, the Claude Code refusal stays up in its own words", async () => {
+		const p = await chrome.browser.newPage();
+		try {
+			let failed = 0;
+			const id = await staleClaudeSession(p, (req) => { failed++; void req.abort(); });
+			await type(p, "Hello there");
+			// The read failed and the draft is back: the refusal has decided.
+			await until(async () => failed > 0 && (await draft(p)) === "Hello there", "the failed read and the draft", 30_000);
+			await painted(p);
+			assert.equal(await banner(p), OFF_BANNER);
+			assert(!(await present(p, "[data-testid=model-search]")), "no picker from the stale catalog");
+			assert.equal(await userMessages(server, id), 0, "nothing was sent");
+		} finally {
+			await p.close();
+		}
+	});
+
+	test("a stalled catalog read: the Claude Code refusal shows its own words, and its decision is final once the wait ends", async () => {
+		const p = await chrome.browser.newPage();
+		const held: HTTPRequest[] = [];
+		try {
+			const id = await staleClaudeSession(p, (req) => held.push(req));
+			await type(p, "Hello there");
+			await until(async () => held.length > 0 && (await draft(p)) === "Hello there", "the stalled read and the draft", 30_000);
+			await until(async () => (await banner(p)) === OFF_BANNER, "the refusal in its own words", 10_000);
+			// The refusal waits 5 s on the read (REFUSAL_CATALOG_WAIT_MS). Past
+			// that, the read lands with a catalog that would open the picker:
+			// the decision is made, so nothing pops up over the learner.
+			await new Promise((r) => setTimeout(r, 6_000));
+			let answered = 0;
+			p.on("requestfinished", (req) => { if (new URL(req.url()).pathname === "/api/models") answered++; });
+			for (const req of held.splice(0)) await req.continue();
+			await until(() => answered > 0, "the late catalog read to land", 30_000);
+			await painted(p);
+			assert.equal(await banner(p), OFF_BANNER);
+			assert(!(await present(p, "[data-testid=model-search]")), "no late picker");
+			assert.equal(await userMessages(server, id), 0, "nothing was sent");
+		} finally {
+			for (const req of held) await req.continue().catch(() => {});
+			await p.close();
+		}
 	});
 });
 
@@ -335,9 +400,10 @@ describe("Claude Code is the only provider", () => {
 		// The Settings card shows that reason.
 		await page.setViewport({ width: 1280, height: 800 });
 		await page.goto(server.url, { waitUntil: "domcontentloaded", timeout: 180_000 });
-		// Clicks before hydration land on inert markup: retry until it opens.
+		// Clicks before hydration land on inert markup: retry until it opens,
+		// never clicking again once it has (that click would hit its overlay).
 		await until(async () => {
-			await page.click("[data-testid=settings-entry]");
+			if (!(await present(page, "[data-testid=settings-nav-keys]"))) await page.click("[data-testid=settings-entry]");
 			return page.waitForSelector("[data-testid=settings-nav-keys]", { timeout: 2000 });
 		}, "the settings dialog to open", 180_000, 500);
 		await page.click("[data-testid=settings-nav-keys]");
