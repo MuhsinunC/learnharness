@@ -37,7 +37,7 @@ export function splitPrompt(history: Message[]): SplitPromptResult {
 			: message.content;
 		if (!Array.isArray(content)) {
 			throw new Error(
-				`extractUserPromptBlocks: user message content must be a string or block array, got ${typeof content} — likely a malformed message from another extension`,
+				`splitPrompt: user message content must be a string or block array, got ${typeof content} — likely a malformed message from another extension`,
 			);
 		}
 		for (const block of content) {

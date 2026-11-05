@@ -124,7 +124,7 @@ test("splitPrompt handles trailing runs, empty blocks, malformed content and inv
 	for (const invalid of [[], [assistant([text("done")])], [user([text(""), { ...image, data: "" }])], [user("")]]) {
 		assert.deepEqual(splitPrompt(invalid), { kind: "invalid", reason: "claude-code: nothing to send" });
 	}
-	assert.throws(() => splitPrompt([user(null as unknown as string)]), /extractUserPromptBlocks: user message content must be a string or block array, got object/);
+	assert.throws(() => splitPrompt([user(null as unknown as string)]), /splitPrompt: user message content must be a string or block array, got object/);
 });
 
 test("foldTranscript replays system state and removes system messages from history", () => {
