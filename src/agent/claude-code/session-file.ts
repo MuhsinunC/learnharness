@@ -48,20 +48,34 @@ function recordedCwd(path: string): string | undefined {
 	const fd = openSync(path, "r");
 	try {
 		const buffer = Buffer.alloc(CWD_SCAN_BYTES);
-		const bytes = readSync(fd, buffer, 0, CWD_SCAN_BYTES, null);
-		const lines = buffer.subarray(0, bytes).toString("utf8").split("\n");
-		// A full buffer can end mid-line, so its last piece is not a record.
-		if (bytes === CWD_SCAN_BYTES) lines.pop();
-		for (const line of lines) {
-			try {
-				const record = JSON.parse(line);
-				if (record !== null && typeof record === "object" && typeof record.cwd === "string") return record.cwd;
-			} catch {
-				// Not a JSON line; keep scanning.
+		let total = 0;
+		let lineStart = 0;
+		while (total < CWD_SCAN_BYTES) {
+			const bytes = readSync(fd, buffer, total, Math.min(4096, CWD_SCAN_BYTES - total), null);
+			total += bytes;
+			const available = buffer.subarray(0, total);
+			while (lineStart < total) {
+				const newline = available.indexOf(0x0A, lineStart);
+				// Before EOF an unterminated tail waits for more bytes; at EOF it is the last line.
+				if (newline === -1 && bytes !== 0) break;
+				const lineEnd = newline === -1 ? total : newline;
+				const cwd = lineCwd(available.subarray(lineStart, lineEnd));
+				if (cwd !== undefined) return cwd;
+				lineStart = lineEnd + 1;
 			}
+			if (bytes === 0) break;
 		}
 	} finally {
 		closeSync(fd);
+	}
+}
+
+function lineCwd(line: Buffer): string | undefined {
+	try {
+		const record = JSON.parse(line.toString("utf8"));
+		return record !== null && typeof record === "object" && typeof record.cwd === "string" ? record.cwd : undefined;
+	} catch {
+		return undefined;
 	}
 }
 

@@ -40,11 +40,6 @@ function buildModels<T extends Model<Api>>(piAiModels: readonly T[]) {
 		}));
 }
 
-type ClaudeCodeRuntimeModel = {
-	cliModelId: string;
-	contextWindow: number;
-};
-
 // Only measured subscription-safe ids request the SDK's explicit 1M window.
 // claude-opus-4-6 and claude-sonnet-4-6 reach 1M only on the Max plan or with
 // long-context extra usage; this provider assumes neither, so they run at 200K.
@@ -58,21 +53,13 @@ export const MEASURED_ONE_M = new Set([
 	"claude-sonnet-5",
 ]);
 
-function resolveClaudeCodeRuntimeModel(model: { id: string }): ClaudeCodeRuntimeModel {
-	const modelId = model.id;
-	if (MEASURED_ONE_M.has(modelId)) {
-		return { cliModelId: `${modelId}[1m]`, contextWindow: ONE_M_CONTEXT };
-	}
-	return { cliModelId: modelId, contextWindow: TWO_HUNDRED_K_CONTEXT };
-}
-
 export function claudeCodeModelId(model: { id: string }): string {
-	return resolveClaudeCodeRuntimeModel(model).cliModelId;
+	return MEASURED_ONE_M.has(model.id) ? `${model.id}[1m]` : model.id;
 }
 
 function applyLongContext<T extends { id: string; name: string; contextWindow?: number | null }>(models: T[]): T[] {
 	return models.map((m) => {
-		const { contextWindow } = resolveClaudeCodeRuntimeModel(m);
+		const contextWindow = MEASURED_ONE_M.has(m.id) ? ONE_M_CONTEXT : TWO_HUNDRED_K_CONTEXT;
 		const name = contextWindow > TWO_HUNDRED_K_CONTEXT && !/\b1M\b/i.test(m.name) ? `${m.name} 1M` : m.name;
 		return contextWindow === m.contextWindow && name === m.name ? m : { ...m, contextWindow, name };
 	});

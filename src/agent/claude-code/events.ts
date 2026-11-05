@@ -262,8 +262,6 @@ export class EventMapper {
 	}
 	private processStreamEvent(message: SDKPartialAssistantMessage): void {
 		const event = message.event;
-		// Read before the branches narrow it: ping, and types newer than the SDK's union, arrive too.
-		const eventType: string | undefined = event?.type;
 
 		if (event?.type === "message_start") {
 			if (this.currentRequest && (this.abandoned(this.currentRequest) || this.currentRequest.id === event.message?.id))
@@ -372,7 +370,9 @@ export class EventMapper {
 			return;
 		}
 
-		if (eventType !== "ping") this.logger.debug(`processStreamEvent: unhandled event type ${eventType}`);
+		// The branches above narrowed `event` to never, but ping and types newer than the SDK's union arrive too.
+		const type: string | undefined = message.event?.type;
+		if (type !== "ping") this.logger.debug(`processStreamEvent: unhandled event type ${type}`);
 	}
 	private processAssistantMessage(message: SDKAssistantMessage): void {
 		const assistantMsg = message.message;
