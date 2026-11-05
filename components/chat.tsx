@@ -6,7 +6,7 @@ import { visibleQueuedSteers } from "@/components/session-core";
 import { SetupDialog } from "@/components/setup-dialog";
 import { Hint } from "@/components/ui/hint";
 import { ClaudeCodeOffNotice, claudeCodeOff, useModelSetup, selectedModelUnavailable, openModelPicker, ZeroKeysPill } from "@/components/setup-cta";
-import { useModelCatalog } from "@/components/model-catalog";
+import { refreshCatalogNow } from "@/components/model-catalog";
 import { useStickToBottomContext, type StickToBottomContext } from "use-stick-to-bottom";
 import {
 	Conversation,
@@ -168,6 +168,17 @@ export function parseProviderKeyRefusal(message: string | undefined): boolean {
 	}
 }
 
+/** A provider-key refusal that keeps its banner speaks its own words
+ *  (they name the remedy), never the transport envelope. */
+function bannerText(message: string): string {
+	return parseProviderKeyRefusal(message) ? (JSON.parse(message) as { error: string }).error : message;
+}
+
+/** How long a Claude Code refusal waits on the catalog read to choose its
+ *  remedy; a read answers in well under a second. Past this the refusal
+ *  keeps its banner, as for a failed read. */
+const REFUSAL_CATALOG_WAIT_MS = 5_000;
+
 /** The image gate's send refusal (LH-39): the chat's model can't read
  *  images. Its words, for the composer's notice; null for anything else. */
 function parseImagesRefusal(message: string | undefined): string | null {
@@ -234,6 +245,7 @@ export function Chat({
 	initiallyInFlight,
 	initiallyCompacting = false,
 	initialConfigured = false,
+	initialModel,
 	kind = "teach",
 }: {
 	chatId: string;
@@ -261,6 +273,9 @@ export function Chat({
 	 *  it (BYOK, owner 2026-09-22). The server gate stays the truth; this
 	 *  only decides whether the pill rides the composer. */
 	initialConfigured?: boolean;
+	/** The session's model ("provider:id") as the server resolved it at
+	 *  load, until the stats bar's model control reports it. */
+	initialModel?: string;
 }) {
 	// Reattach plumbing (background-turn runner wave): the hook holds the
 	// settled terminal's callback — a stable ref assigned below, once
@@ -586,10 +601,9 @@ export function Chat({
 	// Saved slot completeness is live, but the session's selected route
 	// comes from its own ordinary model control, never today's Strong pin.
 	const { catalog, configured, zeroKeys } = useModelSetup(initialConfigured);
-	const { refresh: refreshCatalog } = useModelCatalog();
 	const catalogRef = useRef(catalog);
 	catalogRef.current = catalog;
-	const [selectedModel, setSelectedModel] = useState<string | undefined>();
+	const [selectedModel, setSelectedModel] = useState(initialModel);
 	// An off Claude Code selection shows its notice in place of key setup.
 	const claudeOff = claudeCodeOff(catalog, selectedModel);
 	// The stats bar's model report also clears the image notice (LH-39).
@@ -718,6 +732,11 @@ export function Chat({
 		const images = parseImagesRefusal(error.message);
 		if (!missing && !keyRefused && !images) return; // a real error keeps the honest banner
 		const refetch = !(images && busy);
+		// Claude Code off has no key to add: the picker when another
+		// provider can serve, else the off notice. Both read the catalog
+		// as it is now, which the page may not have seen change.
+		const claudeRefused = keyRefused && (JSON.parse(error.message) as { provider?: string }).provider === "claude-code";
+		const freshCatalog = claudeRefused ? refreshCatalogNow(REFUSAL_CATALOG_WAIT_MS) : undefined;
 		// ORDER MATTERS: clearError() flips this effect's own dep (`error`)
 		// and would cancel the in-flight work below — so the banner dismiss,
 		// the draft restore, and the dialog open all land TOGETHER after the
@@ -735,19 +754,21 @@ export function Chat({
 				attach.restore(draftRef.current.refs);
 				draftRef.current = null;
 			}
+			// Every handled refusal leaves the session usable (dismissals and
+			// continuations need it ready), as it was before the send.
+			recoverFromError();
 			if (images) {
-				recoverFromError();
 				clearError();
 				attach.showNotice(images);
 				return;
 			}
+			const catalog = freshCatalog ? await freshCatalog : catalogRef.current;
+			if (cancelled) return;
+			// No fresh catalog (the read failed or is slow): no remedy can be
+			// chosen, so the refusal stays up in its own words.
+			if (claudeRefused && !catalog) return;
 			clearError();
-			// Claude Code off has no key to add: the picker when another
-			// provider can serve, else the off notice (the fresh catalog
-			// shows it in place of key setup).
-			const claudeRefused = keyRefused && (JSON.parse(error.message) as { provider?: string }).provider === "claude-code";
-			if (claudeRefused) refreshCatalog();
-			if (keyRefused && catalogRef.current?.providers.some((p) => p.keyPresent && !(claudeRefused && p.id === "claude-code"))) openModelPicker();
+			if (keyRefused && catalog?.providers.some((p) => p.keyPresent && !(claudeRefused && p.id === "claude-code"))) openModelPicker();
 			else if (!claudeRefused) setSetupOpen(true);
 		})();
 		return () => {
@@ -1756,7 +1777,7 @@ export function Chat({
 							{openingError && <p role="alert" className="text-sm text-destructive">{OPENING_PROMPT_FAILURE}</p>}
 							{error && (
 								<div data-testid="chat-error" className="flex items-center gap-3 rounded-lg border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm">
-									<span className="min-w-0 flex-1">Something went wrong: {error.message}</span>
+									<span className="min-w-0 flex-1">Something went wrong: {bannerText(error.message)}</span>
 									{repairError?.banner === error.message && (
 										<span data-testid="repair-error" className="shrink-0 text-xs text-muted-foreground">{repairError.text}</span>
 									)}
