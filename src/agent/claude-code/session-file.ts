@@ -47,28 +47,17 @@ function recordedCwd(path: string): string | undefined {
 	const fd = openSync(path, "r");
 	try {
 		const buffer = Buffer.alloc(CWD_SCAN_BYTES);
-		let total = 0;
-		let lineStart = 0;
-		while (total < CWD_SCAN_BYTES) {
-			const bytes = readSync(fd, buffer, total, Math.min(4096, CWD_SCAN_BYTES - total), null);
-			total += bytes;
-			const available = buffer.subarray(0, total);
-			while (lineStart < total) {
-				let lineEnd = available.indexOf(0x0A, lineStart);
-				if (lineEnd === -1) {
-					if (bytes !== 0) break;
-					lineEnd = total;
-				}
-				const line = available.subarray(lineStart, lineEnd).toString("utf8");
-				lineStart = lineEnd + 1;
-				try {
-					const record = JSON.parse(line);
-					if (record !== null && typeof record === "object" && typeof record.cwd === "string") return record.cwd;
-				} catch {
-					continue;
-				}
+		const bytes = readSync(fd, buffer, 0, CWD_SCAN_BYTES, null);
+		const lines = buffer.subarray(0, bytes).toString("utf8").split("\n");
+		// A full buffer can end mid-line, so its last piece is not a record.
+		if (bytes === CWD_SCAN_BYTES) lines.pop();
+		for (const line of lines) {
+			try {
+				const record = JSON.parse(line);
+				if (record !== null && typeof record === "object" && typeof record.cwd === "string") return record.cwd;
+			} catch {
+				// Not a JSON line; keep scanning.
 			}
-			if (bytes === 0) break;
 		}
 	} finally {
 		closeSync(fd);

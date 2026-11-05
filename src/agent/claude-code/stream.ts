@@ -145,7 +145,8 @@ export function stillAdmitted(mapper: EventMapper, options: SimpleStreamOptions 
 /** Reports a call's failure; once the call has ended it is only logged. */
 export function failCall(mapper: EventMapper, options: SimpleStreamOptions | undefined, warn: (error: unknown) => void, error: unknown): void {
 	if (mapper.ended) warn(error);
-	else mapper.fail(options?.signal?.aborted ? "aborted" : "error", options?.signal?.aborted ? "aborted" : error instanceof Error ? error.message : String(error));
+	else if (options?.signal?.aborted) mapper.fail("aborted", "aborted");
+	else mapper.fail("error", error instanceof Error ? error.message : String(error));
 }
 
 /** Fallback frames describe a complete API response and arrive back to back before tools/call.

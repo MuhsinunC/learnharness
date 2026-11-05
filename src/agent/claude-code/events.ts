@@ -366,16 +366,13 @@ export class EventMapper {
 			return;
 		}
 
-		if (event?.type === "message_stop") request.open = false;
-
-		if (event?.type === "message_stop" && this.turnSawToolCall) {
-			this.endToolTurn("message_stop");
+		if (event?.type === "message_stop") {
+			request.open = false;
+			if (this.turnSawToolCall) this.endToolTurn("message_stop");
 			return;
 		}
 
-		if (eventType !== "message_stop" && eventType !== "ping") {
-			this.logger.debug(`processStreamEvent: unhandled event type ${eventType}`);
-		}
+		if (eventType !== "ping") this.logger.debug(`processStreamEvent: unhandled event type ${eventType}`);
 	}
 	private processAssistantMessage(message: SDKAssistantMessage): void {
 		const assistantMsg = message.message;

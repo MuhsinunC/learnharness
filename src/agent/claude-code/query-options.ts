@@ -72,7 +72,6 @@ export function resolveEffort(
 ): EffortLevel | undefined {
 	if (reasoning === undefined || reasoning === "off") return undefined;
 	const mapped = model.thinkingLevelMap?.[reasoning];
-	return mapped === undefined
-		? REASONING_TO_EFFORT[reasoning]
-		: VALID_EFFORTS.has(mapped as EffortLevel) ? mapped as EffortLevel : undefined;
+	if (mapped === undefined) return REASONING_TO_EFFORT[reasoning];
+	return mapped !== null && VALID_EFFORTS.has(mapped) ? mapped as EffortLevel : undefined;
 }
