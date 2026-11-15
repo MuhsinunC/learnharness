@@ -114,7 +114,7 @@ const nextConfig: NextConfig = {
 		"@resvg/resvg-js", // native binding — same
 		"@anthropic-ai/claude-agent-sdk",
 		"@modelcontextprotocol/sdk",
-		"cc-session-io", // Claude Code provider, personal-use; loaded by dynamic import
+		"cc-session-io", // Claude Code provider, personal-use
 	],
 };
 

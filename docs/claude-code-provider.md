@@ -62,7 +62,7 @@ The lifecycle above starts a child per model call, so the prompt cache never cov
 - The server log says `claude-code: live session started (new|replaced)` and `claude-code: live session closed (<reason>)`.
 - No SDK contract covers the in-process tool-result path (toolUseId pairing, ack ordering, the post-tool drain). `tests/e2e/claude-code-session-reuse.e2e.ts` proves LearnHarness's side against a stub binary; the real binary needs the live re-measure.
 
-The SDK platform binary is never shipped in the desktop payload; the build fails if it is present. The launcher is supplied by the owner.
+The launcher is supplied by the owner.
 
 `LH_MAX_OUTPUT_TOKENS` and `maxTokens` do not cap this provider: Claude Code sets its own output limit. An invalid `LH_MAX_OUTPUT_TOKENS` still fails every engine build, this one included, because it is validated for all providers: set it to an integer >= 1024 or leave it unset. Thinking `off` sends no effort, so Claude Code's default thinking applies. Usage cost shows as unpriced ("—").
 
