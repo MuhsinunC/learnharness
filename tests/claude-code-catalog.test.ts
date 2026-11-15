@@ -73,7 +73,6 @@ function scenario(kind: string, entry: "catalog" | "chat" = "catalog") {
 					assert.deepEqual(m.catalogProviders().filter(p => !isSubscriptionProvider(p.id)), AUTH_PROVIDER_KEYS.map(p => ({
 						id: p.id, envVar: p.envVar, keyPresent: keys.keyValue(p.envVar) !== undefined,
 					})).sort((a, b) => a.id.localeCompare(b.id)));
-					assert.ok(m.catalogProviders().every(p => !("keyless" in p)));
 					assert.ok(m.modelCatalog().models.every(m => m.provider !== "claude-code"));
 					assert.ok([...m.catalogContextLimits().keys()].every(key => !key.startsWith("claude-code:")));
 				}
@@ -123,7 +122,7 @@ for (const [kind, reason] of [
 it("production import enables the catalog and accepted decisions re-register", posixOnly, () => {
 	for (const kind of ["accepted", "restore"]) {
 		const result = scenario(kind);
-		const row = { id: "claude-code", envVar: variable, keyPresent: true, keyless: true };
+		const row = { id: "claude-code", envVar: variable, keyPresent: true };
 		assert.deepEqual(result.first.providers.find((p: { id: string }) => p.id === "claude-code"), row);
 		const ids = result.first.providers.map((p: { id: string }) => p.id);
 		assert.deepEqual(ids, [...ids].sort((a, b) => a.localeCompare(b)));

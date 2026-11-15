@@ -147,7 +147,7 @@ export function catalogProviders(): CatalogProvider[] {
 		keyPresent: keyValue(p.envVar) !== undefined,
 	}));
 	if (piModels().getProvider("claude-code")) {
-		providers.push({ id: "claude-code", envVar: "LH_CLAUDE_CODE_EXECUTABLE", keyPresent: true, keyless: true });
+		providers.push({ id: "claude-code", envVar: "LH_CLAUDE_CODE_EXECUTABLE", keyPresent: true });
 	}
 	providers.push({ id: "chatgpt", envVar: "", keyPresent: chatGPTConnected() });
 	providers.push(...NATIVE_SUBSCRIPTIONS.map((p) => ({ id: p.logicalId, envVar: "", keyPresent: nativeSubscriptionConnected(p.providerId) })));

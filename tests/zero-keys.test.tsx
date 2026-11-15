@@ -174,7 +174,7 @@ it("an available Claude Code catalog row suppresses the zero-keys pill without A
 	const originalFetch = globalThis.fetch;
 	Object.assign(globalThis, { window, document: window.document, CustomEvent: window.CustomEvent, IS_REACT_ACT_ENVIRONMENT: true });
 	const available = catalog("claude-code");
-	available.providers.push({ id: "claude-code", envVar: "LH_CLAUDE_CODE_EXECUTABLE", keyless: true, keyPresent: true });
+	available.providers.push({ id: "claude-code", envVar: "LH_CLAUDE_CODE_EXECUTABLE", keyPresent: true });
 	globalThis.fetch = async (input) => {
 		assert.equal(input, "/api/models");
 		return Response.json(available);
